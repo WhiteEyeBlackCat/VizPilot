@@ -1,0 +1,22 @@
+# Claude Code local config
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+
+# Data / temp
+*.tmp
+.cache/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
