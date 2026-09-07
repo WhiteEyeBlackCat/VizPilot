@@ -18,6 +18,15 @@ class LLMChartSuggestion(BaseModel):
     priority: int = 50
 
 
+class LLMInsight(BaseModel):
+    """One insight paired with its supporting chart (stage8 contract).
+    chart is an LLMChartSuggestion-shaped dict, validated per item in the
+    service; None means the LLM attached no chart (kept as unverified)."""
+
+    text: str = ""
+    chart: Any = None
+
+
 class LLMResponse(BaseModel):
     # Any, not list[str]: a malformed insights value must not invalidate the
     # whole response — the service normalizes it item-by-item

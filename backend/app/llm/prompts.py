@@ -6,46 +6,59 @@ and even those can be disabled via settings.
 import json
 from typing import Any
 
-from ..charts.rules import Recommendation
+from ..charts.rules import (
+    LINE_GROUP_INTERACTION_MIN,
+    Recommendation,
+    slope_spread_threshold,
+)
 from ..profiling.models import ColumnProfile, DatasetProfile
 
 MAX_COLUMNS = 40
-MAX_CORR_PAIRS = 10
+MAX_CORR_PAIRS = 8
+MAX_ETA_PAIRS = 8
 MAX_CELL_CHARS = 100
 
-SYSTEM_PROMPT = """You are a data visualization assistant. Given a dataset profile and a list of \
-rule-generated chart candidates, you suggest insightful charts and short analytical insights.
+SYSTEM_PROMPT = """You are a data visualization assistant. Given a dataset profile with measured \
+statistical evidence and a list of rule-generated chart candidates, you produce short analytical \
+insights and chart suggestions. Your hypotheses will be verified against the evidence afterwards.
 
 Respond with a single JSON object, no prose, matching exactly:
 {
-  "insights": ["2 to 5 short observations about the data"],
-  "charts": [
+  "insights": [
     {
-      "title": "string",
-      "type": "line|bar|scatter|histogram|box|heatmap",
-      "x": "column name or null",
-      "y": "column name or null",
-      "group_by": "column name or null",
-      "aggregation": "mean|sum|count|median|min|max or null",
-      "reason": "why this chart is useful",
-      "priority": 1
+      "text": "one short observation about the data",
+      "chart": {
+        "title": "string",
+        "type": "line|bar|scatter|histogram|box|heatmap",
+        "x": "column name or null",
+        "y": "column name or null",
+        "group_by": "column name or null",
+        "aggregation": "mean|sum|count|median|min|max or null",
+        "reason": "why this chart supports the insight",
+        "priority": 1
+      }
     }
-  ]
+  ],
+  "charts": [ { ...same chart shape... } ]
 }
 
 Rules:
+- Every insight MUST include a supporting "chart" (same shape as a chart suggestion).
+- Base insights on the evidence section. If the evidence shows a column's effect is close to \
+zero, do NOT draw conclusions about that column.
 - Use only the listed columns, with exact column names (case-sensitive).
 - Allowed chart types: line, bar, scatter, histogram, box, heatmap. Never suggest pie charts.
 - Allowed aggregations: mean, sum, count, median, min, max.
 - Every line chart MUST include an aggregation (e.g. "mean").
-- Suggest at most 6 charts. Lower priority number = more important.
-- You may re-rank the existing candidates by including them with your own priority and reason.
+- 2 to 5 insights; at most 6 charts in total. Lower priority number = more important.
+- "charts" is for extra suggestions or re-ranking existing candidates; it may be empty.
 
 Example response:
-{"insights": ["Sales grow steadily over the year.", "The North region outperforms the others."],
- "charts": [{"title": "Sales over time", "type": "line", "x": "date", "y": "sales",
-             "group_by": "region", "aggregation": "mean",
-             "reason": "Shows the seasonal trend per region.", "priority": 1}]}"""
+{"insights": [{"text": "Sales rise steadily over the year, and the trend differs by region.",
+               "chart": {"title": "Sales over time", "type": "line", "x": "date", "y": "sales",
+                         "group_by": "region", "aggregation": "mean",
+                         "reason": "Shows the seasonal trend per region.", "priority": 1}}],
+ "charts": []}"""
 
 
 def build_messages(
@@ -69,10 +82,7 @@ def _user_content(
     if len(profile.columns) > MAX_COLUMNS:
         lines.append(f"(only the first {MAX_COLUMNS} of {len(profile.columns)} columns are listed)")
 
-    pairs = _top_correlations(profile)
-    if pairs:
-        lines += ["", "Strongest correlations:"]
-        lines += [f"- {a} vs {b}: {v:.2f}" for a, b, v in pairs]
+    lines += _evidence_section(profile)
 
     if include_sample_rows and profile.sample_rows:
         lines += ["", "Sample rows:"]
@@ -86,10 +96,63 @@ def _user_content(
 
     lines += [
         "",
-        "Interpret the column semantics, give 2-5 insights, add useful charts the rules missed, "
-        "and rank the most important charts with priority numbers.",
+        "Interpret the column semantics and give 2-5 insights, each with its supporting chart. "
+        "Build on the evidence above — do not conclude anything about columns whose measured "
+        "effects are close to zero. Add useful charts the rules missed and rank the most "
+        "important charts with priority numbers.",
     ]
     return "\n".join(lines)
+
+
+def _evidence_section(profile: DatasetProfile) -> list[str]:
+    """Measured-evidence summary so LLM hypotheses start from data, not
+    guesses. Caps (critique #5): top 8 eta pairs, top 8 correlation pairs
+    (with spearman), only above-threshold interaction/slope hits, 2 decimals."""
+    lines: list[str] = ["", "Measured evidence (effect sizes; ~0.00 means no effect):"]
+    evidence = profile.evidence
+
+    etas = sorted(evidence.cat_num, key=lambda e: (-e.eta_squared, e.cat, e.num))[:MAX_ETA_PAIRS]
+    if etas:
+        lines.append("Group effects (eta, 0..1):")
+        lines += [f"- {e.cat} -> {e.num}: eta={e.eta_squared ** 0.5:.2f}" for e in etas]
+
+    pairs = _top_correlations(profile)
+    if pairs:
+        spearman = evidence.num_num_spearman
+        lines.append("Strongest correlations:")
+        for a, b, value in pairs:
+            entry = f"- {a} vs {b}: pearson={value:.2f}"
+            if spearman is not None and a in spearman.columns and b in spearman.columns:
+                s = spearman.matrix[spearman.columns.index(a)][spearman.columns.index(b)]
+                if s is not None:
+                    entry += f", spearman={s:.2f}"
+            lines.append(entry)
+
+    trends = sorted(evidence.time_effects, key=lambda t: (-t.eta_squared, t.num))[:MAX_ETA_PAIRS]
+    if trends:
+        lines.append("Time effects (eta over time buckets):")
+        lines += [
+            f"- {t.datetime_col} -> {t.num}: eta={t.eta_squared ** 0.5:.2f} (per {t.bucket})"
+            for t in trends
+        ]
+
+    interactions = [e for e in evidence.interactions if e.strength >= LINE_GROUP_INTERACTION_MIN]
+    if interactions:
+        lines.append("Interaction hits (trend differs across groups):")
+        lines += [
+            f"- {e.cat1} x {e.cat2} -> {e.num}: strength={e.strength:.2f}" for e in interactions
+        ]
+
+    slopes = [
+        s
+        for s in evidence.slope_heterogeneity
+        if s.spread >= slope_spread_threshold(s.n_min)
+    ]
+    if slopes:
+        lines.append("Slope heterogeneity hits (relationship differs across groups):")
+        lines += [f"- {s.x} vs {s.y} by {s.group}: spread={s.spread:.2f}" for s in slopes]
+
+    return lines if len(lines) > 2 else []
 
 
 def _describe_column(col: ColumnProfile) -> str:

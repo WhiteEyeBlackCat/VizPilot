@@ -86,15 +86,25 @@ export interface ChartSpec {
   priority?: number;
 }
 
+export type Tier = "top" | "secondary" | "exploratory";
+export type Supported = "strong" | "weak" | "unverified";
+
 export interface Recommendation {
   spec: ChartSpec;
   score: number;
   source: "rules" | "llm";
+  tier: Tier;
+}
+
+export interface Insight {
+  text: string;
+  supported: Supported;
+  chart_priority: number | null;
 }
 
 export interface RecommendationsResponse {
   charts: Recommendation[];
-  insights: string[];
+  insights: Insight[];
   message: string | null;
 }
 

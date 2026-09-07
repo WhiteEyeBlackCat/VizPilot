@@ -56,6 +56,9 @@ npm run build      # tsc --noEmit + vite build -> frontend/dist
 # restart the backend; it now serves the app at http://localhost:8100/
 ```
 
+After pulling backend updates, rebuild the frontend (`npm run build`) so the
+served SPA matches the current API shapes.
+
 `npm test` runs the chart-conversion unit tests (vitest).
 
 ### Local LLM (optional)

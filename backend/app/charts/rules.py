@@ -11,9 +11,9 @@ import statistics
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from ..profiling.models import ColumnProfile, DatasetProfile, Evidence
+from ..profiling.models import ColumnProfile, Correlations, DatasetProfile, Evidence
 from .spec import ChartSpec, TimeGranularity, validate_spec
 
 MAX_CHARTS = 12
@@ -30,12 +30,20 @@ LINE_GROUP_MAIN_EFFECT_MIN = 0.1  # eta-squared(group, y): main-effect grouping 
 
 Tier = Literal["top", "secondary", "exploratory"]
 
+# verification level of an LLM-suggested chart against the evidence table
+VerificationLevel = Literal["strong", "weak", "unverified", "neutral"]
+TOP_SCORE_FLOOR = 0.68
+UNVERIFIED_SCORE = 0.5  # combinations outside the evidence scan
+
 
 class Recommendation(BaseModel):
     spec: ChartSpec
     score: float
     source: Literal["rules", "llm"] = "rules"
     tier: Tier = "exploratory"
+    # LLM-verification ceiling ("secondary"/"exploratory"); internal only —
+    # applied by assign_tiers and never serialized into the API response
+    tier_cap: Tier | None = Field(default=None, exclude=True)
 
 
 def choose_time_granularity(unique_count: int, span_days: float) -> TimeGranularity:
@@ -121,35 +129,47 @@ def recommend_charts(profile: DatasetProfile) -> list[Recommendation]:
     candidates += _heatmap_chart(numeric_cols)
 
     valid = _dedup(r for r in candidates if not validate_spec(r.spec, profile))
-    ranked = _rank(valid)
+    ranked = apply_diversity_caps(valid)
     for i, rec in enumerate(ranked):
         rec.spec.priority = i + 1
-    _assign_tiers(ranked)
+    assign_tiers(ranked)
     return ranked
 
 
-def _assign_tiers(recs: list[Recommendation]) -> None:
-    """Dynamic tier boundaries (stage7 blocking #2), calibrated on
+def assign_tiers(recs: list[Recommendation]) -> None:
+    """Score-based tier boundaries, decoupled from display order (stage8
+    blocking #2 — the merged list may show LLM-ranked charts first, so
+    display position must never decide "top"). Calibrated on
     dataset/sales_basic.csv and the planted-signal eval:
 
-    - top: first 3 by rank whose score clears the dataset's median by 0.05
-      AND an absolute floor of 0.68 — strictly above every fixed score
-      (heatmap 0.65, count bar 0.6, histogram <=0.55), so only charts with
-      actual effect-size evidence can be top. The relative bar keeps "everything is
-      strong" datasets from demoting real signals; the floor keeps pure-noise
-      datasets (bars ~0.45-0.6, histograms 0.5) from minting top charts.
+    - top: scanning by score DESCENDING, the first 3 charts that clear the
+      dataset's median by 0.05 AND an absolute floor of 0.68 — strictly above
+      every fixed score (heatmap 0.65, count bar 0.6, histogram <=0.55), so
+      only charts with actual effect-size evidence can be top. Charts with an
+      LLM-verification cap never take a top slot.
     - secondary: at or above the median.
+    - finally the LLM caps are applied (weak -> at most secondary,
+      unverified -> exploratory).
     """
     if not recs:
         return
     median = statistics.median(rec.score for rec in recs)
-    for i, rec in enumerate(recs):
-        if i < 3 and rec.score >= max(median + 0.05, 0.68):
+    threshold = max(median + 0.05, TOP_SCORE_FLOOR)
+    top_slots = 3
+    for rec in sorted(recs, key=_sort_key):  # score-descending scan
+        if top_slots > 0 and rec.tier_cap is None and rec.score >= threshold:
             rec.tier = "top"
+            top_slots -= 1
         elif rec.score >= median:
             rec.tier = "secondary"
         else:
             rec.tier = "exploratory"
+    for rec in recs:
+        if rec.tier_cap == "exploratory":
+            rec.tier = "exploratory"
+        elif rec.tier_cap == "secondary" and rec.tier == "top":
+            # defensive only: the scan above never hands top to a capped chart
+            rec.tier = "secondary"
 
 
 def _line_charts(
@@ -373,6 +393,80 @@ def _heatmap_chart(numeric_cols: list[ColumnProfile]) -> list[Recommendation]:
     ]
 
 
+def evaluate_llm_spec(spec: ChartSpec, profile: DatasetProfile) -> tuple[float, VerificationLevel]:
+    """Scores an LLM-suggested chart with the same evidence formulas as the
+    rule engine and grades the hypothesis (stage8):
+
+    - "strong": evidence-backed and score >= TOP_SCORE_FLOOR (may reach top)
+    - "weak": evidence exists but is below the floor (capped at secondary)
+    - "unverified": the combination is outside the evidence scan, e.g. a
+      numeric-backed categorical as y (capped at exploratory)
+    - "neutral": the type carries no testable hypothesis (heatmap, histogram,
+      count bar) — rules' fixed scores, no cap, no unverified label
+    """
+    index = _EvidenceIndex(profile.evidence)
+    columns = {c.name: c for c in profile.columns}
+
+    if spec.type == "heatmap":
+        return 0.65, "neutral"
+    if spec.type == "histogram":
+        col = columns.get(spec.x or "")
+        skewed = col is not None and col.skewness is not None and abs(col.skewness) > 1
+        return 0.5 + (0.05 if skewed else 0.0), "neutral"
+    if spec.type in ("bar", "box") and spec.y is None:
+        return 0.6, "neutral"  # count bar: no group-effect hypothesis
+
+    if spec.type in ("bar", "box"):
+        eta2 = index.eta2.get((spec.x or "", spec.y or ""))
+        if eta2 is None:
+            return UNVERIFIED_SCORE, "unverified"
+        score = (0.45 if spec.type == "bar" else 0.4) + 0.45 * math.sqrt(eta2)
+    elif spec.type == "scatter":
+        pearson = _pearson_lookup(profile.correlations, spec.x or "", spec.y or "")
+        spearman = index.spearman.get((spec.x or "", spec.y or ""))
+        if pearson is None and spearman is None:
+            return UNVERIFIED_SCORE, "unverified"
+        strength = max(abs(pearson or 0.0), abs(spearman or 0.0))
+        score = 0.5 + 0.4 * strength
+    elif spec.type == "line":
+        eta2 = index.time_eta2.get((spec.x or "", spec.y or ""))
+        if eta2 is None:
+            return UNVERIFIED_SCORE, "unverified"
+        dt = columns.get(spec.x or "")
+        regularity = (
+            0.05 if dt is not None and dt.inferred_frequency in ("daily", "weekly", "monthly") else 0.0
+        )
+        score = 0.5 + 0.3 * math.sqrt(eta2) + regularity
+    else:
+        return UNVERIFIED_SCORE, "unverified"
+
+    level: VerificationLevel = "strong" if score >= TOP_SCORE_FLOOR else "weak"
+    if spec.group_by is not None and not _group_supported(spec, index):
+        level = "weak"  # ungrouped evidence is fine, but the split is a guess
+    return score, level
+
+
+def _pearson_lookup(correlations: Correlations | None, a: str, b: str) -> float | None:
+    if correlations is None or a not in correlations.columns or b not in correlations.columns:
+        return None
+    return correlations.matrix[correlations.columns.index(a)][correlations.columns.index(b)]
+
+
+def _group_supported(spec: ChartSpec, index: _EvidenceIndex) -> bool:
+    if spec.type == "scatter":
+        entry = index.slope.get((spec.x or "", spec.y or "", spec.group_by or ""))
+        return entry is not None and entry[0] >= slope_spread_threshold(entry[1])
+    if spec.type == "line":
+        interaction = index.time_interaction.get(
+            (spec.x or "", spec.group_by or "", spec.y or ""), 0.0
+        )
+        main_effect = index.eta2.get((spec.group_by or "", spec.y or ""), 0.0)
+        return (
+            interaction >= LINE_GROUP_INTERACTION_MIN or main_effect >= LINE_GROUP_MAIN_EFFECT_MIN
+        )
+    return True  # bar/histogram grouping carries no scanned hypothesis
+
+
 def _dedup(recs) -> list[Recommendation]:
     seen: set[tuple] = set()
     result = []
@@ -388,7 +482,10 @@ def _sort_key(rec: Recommendation) -> tuple:
     return (-rec.score, rec.spec.type, rec.spec.x or "", rec.spec.y or "", rec.spec.group_by or "")
 
 
-def _rank(recs: list[Recommendation]) -> list[Recommendation]:
+def apply_diversity_caps(recs: list[Recommendation]) -> list[Recommendation]:
+    """Per-type/per-x slots picked in score order plus the overall MAX_CHARTS
+    cut. Also called after the LLM merge (stage8 critique #4): re-suggesting a
+    chart the caps removed must not bypass the diversity defenses."""
     per_type: dict[str, list[Recommendation]] = {}
     for rec in sorted(recs, key=_sort_key):
         per_type.setdefault(rec.spec.type, []).append(rec)

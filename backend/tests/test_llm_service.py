@@ -4,11 +4,11 @@ import polars as pl
 import pytest
 from fastapi.testclient import TestClient
 
-from app.charts.rules import recommend_charts
+from app.charts.rules import TOP_SCORE_FLOOR, recommend_charts
 from app.config import Settings
 from app.llm.provider import LLMError
 from app.llm.schemas import LLMResponse
-from app.llm.service import RecommendationService
+from app.llm.service import RecommendationService, _parse_insights
 from app.main import create_app
 from app.profiling.profiler import profile_dataset
 
@@ -30,13 +30,15 @@ class FakeProvider:
 
 @pytest.fixture(scope="module")
 def profile():
+    n = 60  # spans two months so the time-effect evidence is computable
     df = pl.DataFrame(
         {
-            "ts": [datetime(2024, 1, 1) + timedelta(days=i) for i in range(12)],
-            "city": ["a", "b", "c"] * 4,
-            "value": [float(i) for i in range(12)],
-            "value2": [2.0 * i for i in range(12)],
-            "value3": [float(i % 2) for i in range(12)],  # uncorrelated
+            "ts": [datetime(2024, 1, 1) + timedelta(days=i) for i in range(n)],
+            "city": ["a", "b", "c"] * (n // 3),
+            "value": [float(i) for i in range(n)],
+            "value2": [2.0 * i for i in range(n)],
+            "value3": [float(i % 2) for i in range(n)],  # ~uncorrelated
+            "rating": [i % 5 + 1 for i in range(n)],  # numeric-backed categorical
         }
     )
     return profile_dataset(df, "0" * 32, BIG)
@@ -45,6 +47,14 @@ def profile():
 def _service(response=None, error=None) -> tuple[RecommendationService, FakeProvider]:
     provider = FakeProvider(response, error)
     return RecommendationService(provider), provider
+
+
+def _chart_by(result, type_, x=None, y=None, group=None):
+    for c in result["charts"]:
+        s = c["spec"]
+        if s["type"] == type_ and s["x"] == x and s["y"] == y and s["group_by"] == group:
+            return c
+    return None
 
 
 NEW_CHART = {
@@ -65,20 +75,22 @@ def test_rules_only_path_identical_to_stage3(profile) -> None:
     assert provider.calls == 0
 
 
-def test_new_llm_chart_merged_ahead_of_rules(profile) -> None:
+def test_new_llm_chart_scored_by_evidence_not_fixed(profile) -> None:
     service, _ = _service(LLMResponse(insights=["a insight"], charts=[NEW_CHART]))
     result = service.get(profile, use_llm=True)
-    first = result["charts"][0]
-    assert first["source"] == "llm" and first["score"] == 0.75
-    assert first["tier"] == "secondary"  # LLM charts can't mint top until Stage 8
-    assert first["spec"]["type"] == "scatter"
+    first = result["charts"][0]  # LLM priority still leads the display order
+    assert first["source"] == "llm"
     assert (first["spec"]["x"], first["spec"]["y"]) == ("value", "value3")
-    assert first["spec"]["priority"] == 1
-    assert result["insights"] == ["a insight"]
+    # stage8: evidence score replaces the fixed 0.75 — |corr| ~ 0 -> ~0.5
+    assert 0.45 <= first["score"] < 0.6
+    assert first["tier"] != "top"  # weak evidence is capped below top
     assert result["message"] is None
-    # remaining charts keep score order with consecutive priorities
     priorities = [c["spec"]["priority"] for c in result["charts"]]
     assert priorities == list(range(1, len(priorities) + 1))
+    # legacy string insight -> kept, unverified, no chart link
+    assert result["insights"] == [
+        {"text": "a insight", "supported": "unverified", "chart_priority": None}
+    ]
 
 
 def test_dedup_keeps_rules_spec_adopts_llm_reason(profile) -> None:
@@ -175,8 +187,9 @@ def test_provider_error_falls_back_with_category(profile) -> None:
 def test_insights_capped_and_truncated(profile) -> None:
     service, _ = _service(LLMResponse(insights=[f"i{n}" + "x" * 400 for n in range(7)]))
     insights = service.get(profile, use_llm=True)["insights"]
-    assert len(insights) == 5
-    assert all(len(i) == 300 for i in insights)
+    assert len(insights) == 5  # cap kept from stage 5
+    assert all(len(i["text"]) == 300 for i in insights)  # truncation kept
+    assert all(i["supported"] == "unverified" and i["chart_priority"] is None for i in insights)
 
 
 def test_cache_per_dataset_and_per_llm_flag(profile) -> None:
@@ -187,6 +200,166 @@ def test_cache_per_dataset_and_per_llm_flag(profile) -> None:
     rules_only = service.get(profile, use_llm=False)
     assert provider.calls == 1  # llm=false path never touches the provider
     assert rules_only["insights"] == []
+
+
+# --- stage 8: insight -> chart contract -------------------------------------
+
+
+def test_insight_chart_priority_points_to_final_chart(profile) -> None:
+    service, _ = _service(
+        LLMResponse(insights=[{"text": "weak pair moves together", "chart": NEW_CHART}])
+    )
+    result = service.get(profile, use_llm=True)
+    (insight,) = result["insights"]
+    chart = _chart_by(result, "scatter", x="value", y="value3")
+    assert chart is not None and chart["source"] == "llm"
+    assert insight["chart_priority"] == chart["spec"]["priority"]
+    assert insight["supported"] == "weak"  # |corr| ~ 0 -> evidence exists but weak
+    assert chart["tier"] != "top"
+
+
+def test_insight_chart_deduped_into_rules_chart(profile) -> None:
+    rules = recommend_charts(profile)
+    strong_line = next(r for r in rules if r.spec.type == "line" and r.score >= TOP_SCORE_FLOOR)
+    mention = {
+        "title": "trend",
+        "type": "line",
+        "x": strong_line.spec.x,
+        "y": strong_line.spec.y,
+        "group_by": strong_line.spec.group_by,
+        "aggregation": strong_line.spec.aggregation,
+        "reason": "clear upward trend",
+        "priority": 1,
+    }
+    service, _ = _service(LLMResponse(insights=[{"text": "value trends up", "chart": mention}]))
+    result = service.get(profile, use_llm=True)
+    (insight,) = result["insights"]
+    merged = _chart_by(result, "line", x=strong_line.spec.x, y=strong_line.spec.y)
+    assert merged is not None and merged["source"] == "rules"
+    assert insight["chart_priority"] == merged["spec"]["priority"]
+    assert insight["supported"] == "strong"
+
+
+@pytest.mark.parametrize(
+    "bad_chart",
+    [
+        {"title": "p", "type": "pie", "x": "city"},  # invalid type
+        {"title": "g", "type": "histogram", "x": "ghost"},  # nonexistent column
+        "a bar chart of sales",  # not even an object
+    ],
+    ids=["pie", "ghost-column", "non-dict"],
+)
+def test_insight_with_rejected_chart_is_dropped(profile, bad_chart) -> None:
+    service, _ = _service(
+        LLMResponse(
+            insights=[
+                {"text": "bogus claim", "chart": bad_chart},
+                {"text": "chartless but honest", "chart": None},
+            ]
+        )
+    )
+    insights = service.get(profile, use_llm=True)["insights"]
+    assert [i["text"] for i in insights] == ["chartless but honest"]
+    assert insights[0]["supported"] == "unverified" and insights[0]["chart_priority"] is None
+
+
+def test_unverified_combination_capped_exploratory(profile) -> None:
+    # bar y=rating: valid (numeric-backed categorical) but outside the
+    # evidence scan -> unverified, exploratory cap, honest reason note
+    chart = {
+        "title": "rating by city",
+        "type": "bar",
+        "x": "city",
+        "y": "rating",
+        "aggregation": "mean",
+        "reason": "cities rate differently",
+        "priority": 1,
+    }
+    service, _ = _service(LLMResponse(insights=[{"text": "ratings differ by city", "chart": chart}]))
+    result = service.get(profile, use_llm=True)
+    (insight,) = result["insights"]
+    assert insight["supported"] == "unverified"
+    rec = _chart_by(result, "bar", x="city", y="rating")
+    assert rec is not None
+    assert rec["tier"] == "exploratory"
+    assert "not verified against the data" in rec["spec"]["reason"]
+
+
+def test_weak_llm_charts_cannot_evict_strong_rules_from_top(profile) -> None:
+    # blocking #2: three LLM charts occupy the display front, but tiers are
+    # assigned by score — the strong rules chart keeps its top badge
+    weak_charts = [
+        dict(NEW_CHART, priority=1),
+        {
+            "title": "v2 vs v3",
+            "type": "scatter",
+            "x": "value2",
+            "y": "value3",
+            "reason": "?",
+            "priority": 2,
+        },
+        {
+            # perfect correlation but an unsupported group split -> weak cap,
+            # even though the evidence score itself is high
+            "title": "grouped",
+            "type": "scatter",
+            "x": "value",
+            "y": "value2",
+            "group_by": "city",
+            "reason": "?",
+            "priority": 3,
+        },
+    ]
+    service, _ = _service(LLMResponse(charts=weak_charts))
+    result = service.get(profile, use_llm=True)
+    charts = result["charts"]
+    # the surviving LLM charts monopolize the display front (the per-type cap
+    # may cut one of the three weak scatters — that is the diversity defense)
+    leading = [c for c in charts if c["source"] == "llm"]
+    assert len(leading) >= 2
+    assert [c["source"] for c in charts[: len(leading)]] == ["llm"] * len(leading)
+    assert all(c["tier"] != "top" for c in leading)
+    top = [c for c in charts if c["tier"] == "top"]
+    assert top and all(c["source"] == "rules" for c in top)
+    assert all(c["score"] >= TOP_SCORE_FLOOR for c in top)
+    # the high-score grouped scatter is capped at secondary, not top
+    grouped = _chart_by(result, "scatter", x="value", y="value2", group="city")
+    assert grouped is not None and grouped["score"] > 0.85 and grouped["tier"] == "secondary"
+
+
+def test_resuggested_capped_chart_stays_out_but_insight_survives(profile) -> None:
+    # critique #4: the diversity caps cut bar(city, value3) from the rules
+    # list; the LLM re-suggesting it must not bypass the caps — the insight
+    # survives with chart_priority=null (blocking #1 path 3)
+    rules_keys = {(r.spec.type, r.spec.x, r.spec.y) for r in recommend_charts(profile)}
+    assert ("bar", "city", "value3") not in rules_keys
+    chart = {
+        "title": "v3 by city",
+        "type": "bar",
+        "x": "city",
+        "y": "value3",
+        "aggregation": "mean",
+        "reason": "?",
+        "priority": 1,
+    }
+    service, _ = _service(LLMResponse(insights=[{"text": "v3 differs by city", "chart": chart}]))
+    result = service.get(profile, use_llm=True)
+    assert _chart_by(result, "bar", x="city", y="value3") is None  # still capped out
+    (insight,) = result["insights"]
+    assert insight["chart_priority"] is None
+    assert insight["supported"] == "weak"  # evidence was checked regardless
+    assert insight["text"] == "v3 differs by city"
+
+
+def test_malformed_insights_do_not_invalidate_response() -> None:
+    # per-item tolerance carried over from stage 5, now shape-aware
+    assert _parse_insights("single insight") == [("single insight", None)]
+    assert _parse_insights(["ok", 42, None, "  "]) == [("ok", None)]
+    assert _parse_insights({"not": "a list"}) == []
+    assert _parse_insights([{"text": "paired", "chart": {"type": "bar"}}]) == [
+        ("paired", {"type": "bar"})
+    ]
+    assert _parse_insights([{"text": "  ", "chart": None}, {"no_text": 1}]) == []
 
 
 # --- API integration --------------------------------------------------------
@@ -211,14 +384,17 @@ def test_endpoint_with_llm_and_llm_false_switch(tmp_path) -> None:
     client = _llm_client(
         tmp_path,
         LLMResponse(
-            insights=["value2 doubles value."],
-            charts=[dict(NEW_CHART, x="value", y="value3")],
+            insights=[{"text": "value2 doubles value.", "chart": dict(NEW_CHART)}],
+            charts=[],
         ),
     )
     dataset_id = client.post("/api/datasets", files={"file": ("d.csv", CSV.encode())}).json()["dataset_id"]
 
     body = client.get(f"/api/datasets/{dataset_id}/recommendations").json()
-    assert body["insights"] == ["value2 doubles value."]
+    (insight,) = body["insights"]
+    assert insight["text"] == "value2 doubles value."
+    assert insight["supported"] in ("strong", "weak", "unverified")
+    assert isinstance(insight["chart_priority"], int)
     assert any(c["source"] == "llm" for c in body["charts"])
 
     rules_only = client.get(f"/api/datasets/{dataset_id}/recommendations", params={"llm": "false"}).json()
@@ -232,16 +408,3 @@ def test_endpoint_llm_disabled_ignores_llm_param(client: TestClient) -> None:
     forced = client.get(f"/api/datasets/{dataset_id}/recommendations", params={"llm": "true"}).json()
     assert default == forced
     assert default["insights"] == []
-
-
-def test_malformed_insights_do_not_invalidate_response() -> None:
-    # a bare string, and a list with non-string junk, must both survive
-    from app.llm.schemas import LLMResponse
-
-    r1 = LLMResponse.model_validate({"insights": "single insight", "charts": []})
-    r2 = LLMResponse.model_validate({"insights": ["ok", 42, None, "  "], "charts": []})
-    from app.llm.service import _clean_insights
-
-    assert _clean_insights(r1.insights) == ["single insight"]
-    assert _clean_insights(r2.insights) == ["ok"]
-    assert _clean_insights({"not": "a list"}) == []

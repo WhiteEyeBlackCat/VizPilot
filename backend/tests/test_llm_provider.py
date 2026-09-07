@@ -177,6 +177,19 @@ def test_prompt_content(profile, candidates) -> None:
     assert "Rule-generated chart candidates:" in content
 
 
+def test_prompt_evidence_summary_and_insight_contract(profile, candidates) -> None:
+    system, user = build_messages(profile, candidates)
+    # stage8: every insight must ship a supporting chart, from evidence
+    assert "supporting" in system["content"]
+    assert '"chart"' in system["content"]
+    assert "close to zero" in system["content"]
+    content = user["content"]
+    assert "Measured evidence" in content
+    assert "Group effects (eta" in content
+    assert "eta=" in content  # top eta pairs listed (city -> value etc.)
+    assert "spearman=" in content  # correlations carry both coefficients
+
+
 def test_prompt_without_sample_rows(profile, candidates) -> None:
     _, user = build_messages(profile, candidates, include_sample_rows=False)
     assert "Sample rows:" not in user["content"]
