@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import Settings
 from .datasets.router import router
 from .datasets.store import DatasetStore
+from .profiling.profiler import ProfileService
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -18,6 +19,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = settings
     app.state.store = DatasetStore(settings.data_dir)
+    app.state.profiles = ProfileService(settings.data_dir, settings.profile_sample_threshold)
     app.include_router(router)
     return app
 

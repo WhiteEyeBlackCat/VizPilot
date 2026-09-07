@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     data_dir: Path = BACKEND_DIR / "data"
     max_upload_mb: int = 200
     preview_rows: int = 50
+    # Profiling runs on a seeded random sample above this row count.
+    profile_sample_threshold: int = 100_000
 
     @property
     def max_upload_bytes(self) -> int:

@@ -88,3 +88,13 @@ def preview_dataset(
         raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found") from None
     n = rows if rows is not None else _settings(request).preview_rows
     return df_to_records(df.head(n))
+
+
+@router.get("/datasets/{dataset_id}/profile")
+def get_profile(dataset_id: str, request: Request) -> dict[str, Any]:
+    _check_dataset_id(dataset_id)
+    try:
+        df = _store(request).get_df(dataset_id)
+    except DatasetNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found") from None
+    return request.app.state.profiles.get(dataset_id, df).model_dump()

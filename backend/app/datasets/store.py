@@ -65,7 +65,12 @@ class DatasetStore:
         return self._df_cache[dataset_id]
 
     def list_meta(self) -> list[Metadata]:
-        metas = [json.loads(path.read_text()) for path in self._data_dir.glob("*.json")]
+        metas = [
+            json.loads(path.read_text())
+            for path in self._data_dir.glob("*.json")
+            # {id}.profile.json files (profile cache) are not dataset metadata
+            if not path.name.endswith(".profile.json")
+        ]
         return sorted(metas, key=lambda m: m.get("uploaded_at", ""), reverse=True)
 
     def _parquet_path(self, dataset_id: str) -> Path:
