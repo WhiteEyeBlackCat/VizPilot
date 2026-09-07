@@ -8,6 +8,7 @@ import polars as pl
 from pydantic import ValidationError
 
 from ..serialization import df_to_records
+from .evidence import compute_evidence
 from .models import (
     PROFILE_VERSION,
     CastParams,
@@ -37,6 +38,7 @@ def profile_dataset(df: pl.DataFrame, dataset_id: str, sample_threshold: int) ->
         for name, (sem, _) in inferred.items()
     ]
     numeric_cols = [c.name for c in columns if c.semantic_type == "numeric"]
+    correlations = _correlations(casted, numeric_cols)
     return DatasetProfile(
         profile_version=PROFILE_VERSION,
         dataset_id=dataset_id,
@@ -44,7 +46,8 @@ def profile_dataset(df: pl.DataFrame, dataset_id: str, sample_threshold: int) ->
         n_cols=df.width,
         sampled=sampled,
         columns=columns,
-        correlations=_correlations(casted, numeric_cols),
+        correlations=correlations,
+        evidence=compute_evidence(casted, columns, correlations),
         sample_rows=df_to_records(df.head(SAMPLE_ROWS_N)),
     )
 

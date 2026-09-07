@@ -71,13 +71,18 @@ def test_high_cardinality_categorical_not_used(mixed_recs) -> None:
     assert all(r.spec.x != "cat25" for r in recs if r.spec.type in ("bar", "box"))
 
 
-def test_line_charts_grouped_and_scored(mixed_recs) -> None:
+def test_line_charts_scored_by_time_effect(mixed_recs) -> None:
     _, recs = mixed_recs
     lines = [r for r in recs if r.spec.type == "line"]
     assert lines and all(r.spec.x == "ts" for r in lines)
-    # grouped version replaces ungrouped (critique #10); daily regularity bonus
-    assert all(r.spec.group_by == "city" for r in lines)
-    assert all(r.score == pytest.approx(0.9) for r in lines)
+    # stage7: grouping now requires interaction/main-effect evidence — this
+    # dataset has none (city is unrelated to the numeric columns)
+    assert all(r.spec.group_by is None for r in lines)
+    # the time effect drives ranking: trending series above the noise series
+    noise = next(r for r in lines if r.spec.y == "value3")
+    trending = [r for r in lines if r.spec.y in ("value", "value2")]
+    assert trending and all(r.score > noise.score for r in trending)
+    assert noise.score == pytest.approx(0.55)  # 0.5 + daily regularity bonus only
 
 
 def test_count_bar_present(mixed_recs) -> None:
@@ -87,13 +92,15 @@ def test_count_bar_present(mixed_recs) -> None:
     )
 
 
-def test_scatter_uses_correlation_and_group(mixed_recs) -> None:
+def test_scatter_uses_correlation(mixed_recs) -> None:
     _, recs = mixed_recs
     scatters = [r for r in recs if r.spec.type == "scatter"]
     assert len(scatters) == 1  # only |corr(value, value2)| >= 0.3
     top = scatters[0]
     assert {top.spec.x, top.spec.y} == {"value", "value2"}
-    assert top.spec.group_by == "city"
+    # stage7: grouping needs slope-heterogeneity evidence; the correlation is
+    # identical inside every city group, so the scatter stays ungrouped
+    assert top.spec.group_by is None
     assert top.score == pytest.approx(0.5 + 0.4 * 1.0)
 
 
@@ -231,8 +238,9 @@ def test_recommendations_endpoint_shape(client: TestClient) -> None:
     assert body["insights"] == [] and body["message"] is None
     assert len(body["charts"]) >= 3
     first = body["charts"][0]
-    assert set(first) == {"spec", "score", "source"}
+    assert set(first) == {"spec", "score", "source", "tier"}
     assert first["source"] == "rules"
+    assert first["tier"] in ("top", "secondary", "exploratory")
     assert first["spec"]["priority"] == 1
     assert len({c["spec"]["type"] for c in body["charts"]}) >= 2
     assert "NaN" not in resp.text and "Infinity" not in resp.text

@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 # Bump whenever the profile schema or inference rules change: cached
 # {id}.profile.json files with a different version are recomputed.
-PROFILE_VERSION = 1
+PROFILE_VERSION = 2  # v2: evidence table (stage 7)
 
 SemanticType = Literal["numeric", "categorical", "datetime", "boolean", "text", "id", "unknown"]
 Frequency = Literal["daily", "weekly", "monthly", "irregular", "unknown"]
@@ -62,6 +62,62 @@ class Correlations(BaseModel):
     truncated: bool = False
 
 
+TimeBucket = Literal["day", "month", "year"]
+
+
+class CatNumEffect(BaseModel):
+    """Adjusted (df-corrected) eta-squared of `num` explained by `cat` groups,
+    clipped at 0 — raw eta-squared inflates on high-cardinality small samples."""
+
+    cat: str
+    num: str
+    eta_squared: float
+    n_groups: int
+
+
+class TimeEffect(BaseModel):
+    """Adjusted eta-squared of `num` across time buckets of `datetime_col`.
+    `bucket` records the granularity actually used (span-adaptive, coarsened
+    when the finer bucket leaves no within-group degrees of freedom)."""
+
+    datetime_col: str
+    num: str
+    eta_squared: float
+    bucket: TimeBucket
+
+
+class InteractionEffect(BaseModel):
+    """Two-factor interaction share of variance (additive-prediction residual;
+    not df-corrected, so small cells bias it upward — cells below the minimum
+    count are dropped to bound that). cat1 may be a `col@bucket` time marker."""
+
+    cat1: str
+    cat2: str
+    num: str
+    strength: float
+
+
+class SlopeHet(BaseModel):
+    """Per-group Pearson correlations of a numeric pair; spread = max - min
+    over groups with enough rows. Keys are stringified group values."""
+
+    x: str
+    y: str
+    group: str
+    corrs: dict[str, float | None]
+    spread: float
+    n_min: int  # rows in the smallest contributing group (for dynamic thresholds)
+
+
+class Evidence(BaseModel):
+    cat_num: list[CatNumEffect] = []
+    time_effects: list[TimeEffect] = []
+    # same columns/shape as DatasetProfile.correlations, Spearman method
+    num_num_spearman: Correlations | None = None
+    interactions: list[InteractionEffect] = []
+    slope_heterogeneity: list[SlopeHet] = []
+
+
 class DatasetProfile(BaseModel):
     profile_version: int
     dataset_id: str
@@ -70,4 +126,5 @@ class DatasetProfile(BaseModel):
     sampled: bool
     columns: list[ColumnProfile]
     correlations: Correlations | None = None
+    evidence: Evidence = Evidence()
     sample_rows: list[dict[str, Any]]

@@ -142,7 +142,11 @@ def _merge(
             if suggestion.reason:
                 by_key[key].spec.reason = suggestion.reason
         elif key not in llm_priority:
-            added.append(Recommendation(spec=spec, score=LLM_NEW_CHART_SCORE, source="llm"))
+            # tier stays "secondary" until the Stage 8 LLM contract lands —
+            # LLM-added charts must not mint themselves into top (critique #8)
+            added.append(
+                Recommendation(spec=spec, score=LLM_NEW_CHART_SCORE, source="llm", tier="secondary")
+            )
         else:
             continue  # LLM repeated itself
         llm_priority[key] = min(suggestion.priority, llm_priority.get(key, suggestion.priority))

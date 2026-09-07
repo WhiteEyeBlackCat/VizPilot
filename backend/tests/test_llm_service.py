@@ -70,6 +70,7 @@ def test_new_llm_chart_merged_ahead_of_rules(profile) -> None:
     result = service.get(profile, use_llm=True)
     first = result["charts"][0]
     assert first["source"] == "llm" and first["score"] == 0.75
+    assert first["tier"] == "secondary"  # LLM charts can't mint top until Stage 8
     assert first["spec"]["type"] == "scatter"
     assert (first["spec"]["x"], first["spec"]["y"]) == ("value", "value3")
     assert first["spec"]["priority"] == 1
