@@ -1,9 +1,12 @@
 import re
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Body, HTTPException, Query, Request, UploadFile
+from pydantic import ValidationError
 
+from ..charts.render import RenderError, render_chart
 from ..charts.rules import recommend_charts
+from ..charts.spec import ChartSpec, validate_spec
 from ..config import Settings
 from ..serialization import df_to_records
 from .loader import SUPPORTED_EXTENSIONS, LoaderError, load_dataframe
@@ -115,3 +118,40 @@ def get_recommendations(dataset_id: str, request: Request) -> dict[str, Any]:
         "insights": [],  # populated by the LLM in Stage 5; shape fixed now
         "message": None if charts else "No charts could be recommended for this dataset.",
     }
+
+
+def _spec_errors(errors: list[str]) -> HTTPException:
+    # unified 422 shape (stage4 critique #8): {detail: {errors: [...]}}
+    return HTTPException(status_code=422, detail={"errors": errors})
+
+
+@router.post("/charts/render")
+def render(request: Request, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    dataset_id = payload.get("dataset_id", "")
+    if not isinstance(dataset_id, str):
+        dataset_id = ""
+    _check_dataset_id(dataset_id)
+    try:
+        df = _store(request).get_df(dataset_id)
+    except DatasetNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found") from None
+
+    # Pydantic errors (e.g. type="pie") must yield the same 422 shape as the
+    # validation matrix, so the spec is parsed by hand rather than by FastAPI.
+    try:
+        spec = ChartSpec.model_validate(payload.get("spec") or {})
+    except ValidationError as exc:
+        raise _spec_errors(
+            [f"spec.{'.'.join(str(part) for part in e['loc'])}: {e['msg']}" for e in exc.errors()]
+        ) from None
+
+    profile = request.app.state.profiles.get(dataset_id, df)
+    errors = validate_spec(spec, profile)
+    if errors:
+        raise _spec_errors(errors)
+
+    casted = request.app.state.render_cache.get(dataset_id, df, profile)
+    try:
+        return render_chart(casted, spec, profile)
+    except RenderError as exc:
+        raise _spec_errors([str(exc)]) from None

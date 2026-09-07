@@ -9,8 +9,8 @@
 | 1 | 後端基礎：FastAPI 骨架、上傳 CSV/XLSX/Parquet、Parquet 快取 + dataset_id、preview/schema API | ✅ PASS |
 | 2 | Data Profiler：語意 dtype 推斷、統計、相關矩陣 → DatasetProfile | ✅ PASS |
 | 3 | ChartSpec 模型 + 驗證矩陣 + 規則推薦引擎（含 base score） | ✅ PASS |
-| 4 | Chart render API：後端聚合/抽樣/heatmap 矩陣 | 進行中 |
-| 5 | LLM 層：LLMProvider 抽象、OpenAI-compatible 本地 provider、合併排序、fallback | 待開始 |
+| 4 | Chart render API：後端聚合/抽樣/heatmap 矩陣 | ✅ PASS |
+| 5 | LLM 層：LLMProvider 抽象、OpenAI-compatible 本地 provider、合併排序、fallback | 進行中 |
 | 6 | 前端 SPA（React+TS+Vite+Tailwind+react-plotly）＋整合驗證 | 待開始 |
 
 ## Stage 記錄
@@ -38,3 +38,11 @@
 - **Review**：design critique 4 BLOCKING（多樣性上限、granularity/aggregation 閉環、可實作選檔規則、heatmap dataset 檢查）+ 9 建議全落實；code review 1 BLOCKING（缺軸互異檢查，x==y 恆等圖可穿門）已修＋補測試，另加 intraday span<2 天 → raw、source 收斂 Literal。
 - **Verifier 結果**：PASS — 13 個對抗性 spec 全被拒、寬資料集多樣性/priority 連號/相關性排序實測、granularity 八組邊界、3 組 property 檢查（引擎輸出全過驗證）零錯誤。
 - **尚存風險**：(1) >100k 列時 unique_count 來自抽樣，「x 有重複值」判斷偏保守（大資料一律強制聚合，方向無害）。(2) line 帶 aggregation=count 時 y 欄名有誤導性，Stage 4 render 需在 series 命名標 count。(3) grouped long-format line 需 aggregation（恆等操作），Stage 6 builder UI 選 group_by 時應自動預填 mean。
+
+### Stage 4 — Chart Render API（PASS，第 1 次驗證即通過）
+
+- **修改內容**：`backend/app/charts/render.py` — 六型別後端渲染（line truncate/聚合/自動降檔、bar 排名先於分組＋top_n＋缺格 null 對齊、scatter 總量 10k seed 抽樣、histogram 手算 bins、box linear 五數＋1.5 IQR、heatmap 取 profile）；y_label 契約；numeric-x line stride 抽樣；CastedFrameCache 原子單槽；`POST /api/charts/render` 統一 422 `{detail:{errors:[...]}}`（含 Pydantic 錯誤轉換）。
+- **測試結果**：pytest 206 passed（新增 30）。
+- **Review**：design critique 3 BLOCKING（grouped bar 對齊契約、line raw 超限自動降檔、y_label 命名矛盾）+ 8 建議全落實；code review 無 BLOCKING，2 建議已修（cache 原子 tuple、numeric-x stride 抽樣）。
+- **Verifier 結果**：PASS — 六種圖手算答案逐值驗證（含 %m/%d/%Y cast 重放、缺格 null 對齊、linear quantile）、兩種降檔路徑、三種 422 來源同形狀、raw JSON 零 NaN。
+- **尚存風險**：(1) 空 body/頂層非 dict 的 422 仍是 FastAPI 原生形狀（前端正常流程不會觸發）。(2) 盤中資料（span<2 天）大量 timestamp 的 line 降檔選 raw ＋ 50k 硬上限把關，極端下仍 422。

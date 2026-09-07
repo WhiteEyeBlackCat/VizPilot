@@ -16,6 +16,11 @@ def df_to_records(df: pl.DataFrame) -> list[dict[str, Any]]:
     return [{key: _jsonify(value) for key, value in row.items()} for row in df.to_dicts()]
 
 
+def jsonify_scalar(value: Any) -> Any:
+    """Single-value entry point to the same convention (used by chart rendering)."""
+    return _jsonify(value)
+
+
 def _jsonify(value: Any) -> Any:
     if isinstance(value, float) and not math.isfinite(value):
         return None

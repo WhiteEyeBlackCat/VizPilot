@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .charts.render import CastedFrameCache
 from .config import Settings
 from .datasets.router import router
 from .datasets.store import DatasetStore
@@ -20,6 +21,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.store = DatasetStore(settings.data_dir)
     app.state.profiles = ProfileService(settings.data_dir, settings.profile_sample_threshold)
+    app.state.render_cache = CastedFrameCache()
     app.include_router(router)
     return app
 
