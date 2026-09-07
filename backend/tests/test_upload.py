@@ -1,13 +1,24 @@
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.config import Settings
-from app.main import create_app
+from app.main import FRONTEND_DIST, create_app
 
 from .conftest import FIXTURE_DIR
 
 MISSING_ID = "0" * 32
+
+
+def test_frontend_dist_served_when_built(client: TestClient) -> None:
+    if not (FRONTEND_DIST / "index.html").is_file():
+        pytest.skip("frontend not built (frontend/dist missing)")
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert 'id="root"' in resp.text
+    # API routes still win over the static mount
+    assert client.get("/api/health").json() == {"status": "ok"}
 
 
 def _upload(client: TestClient, name: str, filename: str | None = None) -> dict:

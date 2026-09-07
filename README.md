@@ -22,6 +22,67 @@
 | Visualization | Plotly (react-plotly.js) |
 | Local AI | OpenAI-compatible local endpoint |
 
+## Getting Started
+
+### Backend (FastAPI, port 8100)
+
+```bash
+cd backend
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/uvicorn app.main:create_app --factory --port 8100
+```
+
+Run tests with `.venv/bin/pytest tests -q`.
+
+### Frontend
+
+Two modes:
+
+**Dev mode** (hot reload; vite proxies `/api` to `http://localhost:8100`):
+
+```bash
+cd frontend
+npm install
+npm run dev        # http://localhost:5173 — backend must be running on 8100
+```
+
+**Build mode** (single port; the backend serves the built SPA at `/`):
+
+```bash
+cd frontend
+npm install
+npm run build      # tsc --noEmit + vite build -> frontend/dist
+# restart the backend; it now serves the app at http://localhost:8100/
+```
+
+`npm test` runs the chart-conversion unit tests (vitest).
+
+### Local LLM (optional)
+
+The AI layer is off by default; everything works without it. To enable it,
+point the backend at any OpenAI-compatible local server (Ollama, vLLM,
+llama.cpp server, LM Studio) via environment variables:
+
+```bash
+VIZPILOT_LLM_ENABLED=true \
+VIZPILOT_LLM_MODEL=qwen2.5:14b \
+.venv/bin/uvicorn app.main:create_app --factory --port 8100
+```
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `VIZPILOT_LLM_ENABLED` | `false` | Turn the AI suggestion layer on |
+| `VIZPILOT_LLM_MODEL` | *(empty)* | Model name on the local server |
+| `VIZPILOT_LLM_BASE_URL` | `http://localhost:11434/v1` | OpenAI-compatible endpoint |
+| `VIZPILOT_LLM_API_KEY` | *(empty)* | Only if your local server requires one |
+| `VIZPILOT_LLM_TIMEOUT_SECONDS` | `30` | Per-request timeout; on failure the app falls back to rule-based recommendations |
+
+Only the dataset profile (schema, statistics, 5 sample rows) is ever sent to
+the LLM — never the raw dataset. Sample rows can be withheld too with
+`VIZPILOT_LLM_INCLUDE_SAMPLE_ROWS=false`.
+
 ## Status
 
-Design phase — implementation starting with dataset upload and profiling.
+All six stages implemented: upload → profiling → rule-based recommendations →
+chart rendering → optional local-LLM re-ranking and insights → React SPA.

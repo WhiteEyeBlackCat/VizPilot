@@ -11,7 +11,9 @@
 | 3 | ChartSpec 模型 + 驗證矩陣 + 規則推薦引擎（含 base score） | ✅ PASS |
 | 4 | Chart render API：後端聚合/抽樣/heatmap 矩陣 | ✅ PASS |
 | 5 | LLM 層：LLMProvider 抽象、OpenAI-compatible 本地 provider、合併排序、fallback | ✅ PASS |
-| 6 | 前端 SPA（React+TS+Vite+Tailwind+react-plotly）＋整合驗證 | 進行中 |
+| 6 | 前端 SPA（React+TS+Vite+Tailwind+react-plotly）＋整合驗證 | ✅ PASS |
+
+**全部 6 個 stage 完成並通過獨立驗證；SPEC §14 的 8 條 MVP 成功準則全數達成（最終 verifier 逐條實測）。**
 
 ## Stage 記錄
 
@@ -54,3 +56,11 @@
 - **Review**：design critique 2 BLOCKING（逐項容錯 schema、兩層排序鍵）+ 7 建議全落實；code review 無 BLOCKING，3 建議已修（insights 容錯、per-key lock、JSON 切片 fallback）。
 - **Verifier 結果**：PASS — 真 LLM 端到端（首次 9.09s、cache 0.01s 位元級相同、insights 語意正確讀出負相關）、兩種 fallback 200＋訊息、LLM 關閉與 Stage 3 位元級一致、3 好 3 壞逐項分離、llm=false 不被 in-flight build 卡住。
 - **尚存風險**：(1) LLM 建議常與規則候選全重複（qwen2.5:14b 保守），source=llm 的新圖不常出現——屬預期行為非 bug。(2) prompt injection 面：insights 是唯一到 UI 的自由文字，前端須純文字渲染（Stage 6 簡報已記）。
+
+### Stage 6 — 前端 SPA + 整合驗證（PASS，第 1 次驗證即通過）
+
+- **修改內容**：`frontend/` 全新（Vite5+React18.3+TS strict+Tailwind3.4）— 六元件（Upload/Overview/Recommendations/ChartView/ManualBuilder/Workspace）、typed api client（422 三形狀容錯）、chartTraces.ts 純函數六型別轉換（plotly factory 模式、bar/box category 軸、histogram bin 重現、box 預計算統計、heatmap 自定 diverging colorscale）＋vitest；兩段式推薦載入（先 ?llm=false 秒回＋AI badge，LLM 結果原地替換）；dataset 切換 race guard；ManualBuilder 選項按 profile 過濾（互斥軸、box 基數、aggregation 預填含 duplicate-x）；後端 dist mount（單 port 服務 SPA）；README 啟動文件。
+- **測試結果**：tsc 零錯誤、vitest 8 passed、vite build 成功、pytest 237 passed。
+- **Review**：design critique 3 BLOCKING（plotly factory＋版本鎖定、duplicate-x 預填、category 軸）+ 6 建議全落實；code review 無 BLOCKING，2 建議已修（generateChart race guard、builder 互斥/基數過濾）。
+- **Verifier 結果**：PASS — 全系統以 README 流程實跑（真 LLM 16.4s、cache 0.01s、六型別 render、422 收集 5 條錯誤、raw JSON 零 NaN）；SPEC §14 八條 MVP 準則逐條 ✓。
+- **尚存風險**：(1) 無瀏覽器級 E2E（環境無瀏覽器，以 curl＋build 產物為底線，簡報明文接受）。(2) bundle 4.85MB（plotly.js-dist-min 固有體積，gzip 1.47MB，本地部署可接受）。

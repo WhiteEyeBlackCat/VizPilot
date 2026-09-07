@@ -1,5 +1,8 @@
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from .charts.render import CastedFrameCache
 from .config import Settings
@@ -8,6 +11,8 @@ from .datasets.store import DatasetStore
 from .llm.provider import DisabledProvider, OpenAICompatProvider
 from .llm.service import RecommendationService
 from .profiling.profiler import ProfileService
+
+FRONTEND_DIST = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -36,6 +41,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         provider = DisabledProvider()
     app.state.recommendations = RecommendationService(provider)
     app.include_router(router)
+    # single-port production mode: serve the built SPA when it exists
+    # (dev mode uses the vite proxy instead; /api routes are matched first)
+    if FRONTEND_DIST.is_dir():
+        app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
     return app
 
 
