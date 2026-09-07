@@ -5,7 +5,6 @@ from fastapi import APIRouter, Body, HTTPException, Query, Request, UploadFile
 from pydantic import ValidationError
 
 from ..charts.render import RenderError, render_chart
-from ..charts.rules import recommend_charts
 from ..charts.spec import ChartSpec, validate_spec
 from ..config import Settings
 from ..serialization import df_to_records
@@ -105,19 +104,19 @@ def get_profile(dataset_id: str, request: Request) -> dict[str, Any]:
 
 
 @router.get("/datasets/{dataset_id}/recommendations")
-def get_recommendations(dataset_id: str, request: Request) -> dict[str, Any]:
+def get_recommendations(
+    dataset_id: str,
+    request: Request,
+    llm: bool = Query(default=True),  # ?llm=false forces the rules-only path
+) -> dict[str, Any]:
     _check_dataset_id(dataset_id)
     try:
         df = _store(request).get_df(dataset_id)
     except DatasetNotFoundError:
         raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found") from None
     profile = request.app.state.profiles.get(dataset_id, df)
-    charts = [rec.model_dump() for rec in recommend_charts(profile)]
-    return {
-        "charts": charts,
-        "insights": [],  # populated by the LLM in Stage 5; shape fixed now
-        "message": None if charts else "No charts could be recommended for this dataset.",
-    }
+    use_llm = bool(_settings(request).llm_enabled and llm)
+    return request.app.state.recommendations.get(profile, use_llm)
 
 
 def _spec_errors(errors: list[str]) -> HTTPException:

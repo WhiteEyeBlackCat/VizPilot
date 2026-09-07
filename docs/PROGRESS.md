@@ -10,8 +10,8 @@
 | 2 | Data Profiler：語意 dtype 推斷、統計、相關矩陣 → DatasetProfile | ✅ PASS |
 | 3 | ChartSpec 模型 + 驗證矩陣 + 規則推薦引擎（含 base score） | ✅ PASS |
 | 4 | Chart render API：後端聚合/抽樣/heatmap 矩陣 | ✅ PASS |
-| 5 | LLM 層：LLMProvider 抽象、OpenAI-compatible 本地 provider、合併排序、fallback | 進行中 |
-| 6 | 前端 SPA（React+TS+Vite+Tailwind+react-plotly）＋整合驗證 | 待開始 |
+| 5 | LLM 層：LLMProvider 抽象、OpenAI-compatible 本地 provider、合併排序、fallback | ✅ PASS |
+| 6 | 前端 SPA（React+TS+Vite+Tailwind+react-plotly）＋整合驗證 | 進行中 |
 
 ## Stage 記錄
 
@@ -46,3 +46,11 @@
 - **Review**：design critique 3 BLOCKING（grouped bar 對齊契約、line raw 超限自動降檔、y_label 命名矛盾）+ 8 建議全落實；code review 無 BLOCKING，2 建議已修（cache 原子 tuple、numeric-x stride 抽樣）。
 - **Verifier 結果**：PASS — 六種圖手算答案逐值驗證（含 %m/%d/%Y cast 重放、缺格 null 對齊、linear quantile）、兩種降檔路徑、三種 422 來源同形狀、raw JSON 零 NaN。
 - **尚存風險**：(1) 空 body/頂層非 dict 的 422 仍是 FastAPI 原生形狀（前端正常流程不會觸發）。(2) 盤中資料（span<2 天）大量 timestamp 的 line 降檔選 raw ＋ 50k 硬上限把關，極端下仍 422。
+
+### Stage 5 — LLM 層（PASS，第 1 次驗證即通過）
+
+- **修改內容**：`backend/app/llm/`（provider/schemas/prompts/service）— LLMProvider Protocol＋OpenAICompatProvider（純 httpx、任何 OpenAI-compatible 本地端點）＋DisabledProvider；逐項容錯解析（一張壞圖/壞 insight 不炸整包）；兩層排序鍵合併（LLM 排過的前段、其餘按 score）；dedup 保 rules spec 採 LLM reason；timeout 30s 不重試、其他錯誤 retry 1 次後 fallback 純規則＋分類訊息；per-(dataset, llm) cache＋per-key lock；prompt 只含 profile metadata（枚舉合法值、few-shot、40 欄/100 字元截斷、sample_rows 開關）；`?llm=false`。環境：Ollama 0.33.3＋qwen2.5:14b 裝於 /data-10/users/re6141011/opt/ollama（使用者空間）。
+- **測試結果**：pytest 236 passed（新增 30）。
+- **Review**：design critique 2 BLOCKING（逐項容錯 schema、兩層排序鍵）+ 7 建議全落實；code review 無 BLOCKING，3 建議已修（insights 容錯、per-key lock、JSON 切片 fallback）。
+- **Verifier 結果**：PASS — 真 LLM 端到端（首次 9.09s、cache 0.01s 位元級相同、insights 語意正確讀出負相關）、兩種 fallback 200＋訊息、LLM 關閉與 Stage 3 位元級一致、3 好 3 壞逐項分離、llm=false 不被 in-flight build 卡住。
+- **尚存風險**：(1) LLM 建議常與規則候選全重複（qwen2.5:14b 保守），source=llm 的新圖不常出現——屬預期行為非 bug。(2) prompt injection 面：insights 是唯一到 UI 的自由文字，前端須純文字渲染（Stage 6 簡報已記）。
