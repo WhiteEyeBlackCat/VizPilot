@@ -3,6 +3,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request, UploadFile
 
+from ..charts.rules import recommend_charts
 from ..config import Settings
 from ..serialization import df_to_records
 from .loader import SUPPORTED_EXTENSIONS, LoaderError, load_dataframe
@@ -98,3 +99,19 @@ def get_profile(dataset_id: str, request: Request) -> dict[str, Any]:
     except DatasetNotFoundError:
         raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found") from None
     return request.app.state.profiles.get(dataset_id, df).model_dump()
+
+
+@router.get("/datasets/{dataset_id}/recommendations")
+def get_recommendations(dataset_id: str, request: Request) -> dict[str, Any]:
+    _check_dataset_id(dataset_id)
+    try:
+        df = _store(request).get_df(dataset_id)
+    except DatasetNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found") from None
+    profile = request.app.state.profiles.get(dataset_id, df)
+    charts = [rec.model_dump() for rec in recommend_charts(profile)]
+    return {
+        "charts": charts,
+        "insights": [],  # populated by the LLM in Stage 5; shape fixed now
+        "message": None if charts else "No charts could be recommended for this dataset.",
+    }
