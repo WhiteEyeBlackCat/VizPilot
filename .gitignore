@@ -23,3 +23,7 @@ dist/
 
 # Runtime data (user uploads)
 backend/data/
+
+# Generated synthetic datasets (regenerate with dataset/syn/*.py)
+dataset/*.csv
+dataset/*.parquet
