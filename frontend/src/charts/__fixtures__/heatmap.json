@@ -1,0 +1,53 @@
+{
+  "spec": {
+    "title": "correlation heatmap",
+    "type": "heatmap",
+    "x": null,
+    "y": null,
+    "group_by": null,
+    "aggregation": null,
+    "bins": null,
+    "time_granularity": null,
+    "top_n": null,
+    "reason": "",
+    "priority": 100
+  },
+  "chart_data": {
+    "columns": [
+      "temperature",
+      "humidity",
+      "wind_speed",
+      "pm25"
+    ],
+    "matrix": [
+      [
+        1,
+        -0.6888157726809302,
+        0.07294010008612128,
+        0.4338956666323623
+      ],
+      [
+        -0.6888157726809302,
+        1,
+        -0.06123512532773266,
+        -0.23091280014200286
+      ],
+      [
+        0.07294010008612128,
+        -0.06123512532773266,
+        1,
+        -0.4498831689709425
+      ],
+      [
+        0.4338956666323623,
+        -0.23091280014200286,
+        -0.4498831689709425,
+        1
+      ]
+    ],
+    "y_label": "correlation"
+  },
+  "sampled": false,
+  "n_points": 16,
+  "display_range": null
+}

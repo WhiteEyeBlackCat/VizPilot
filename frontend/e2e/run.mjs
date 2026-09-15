@@ -111,6 +111,36 @@ async function chartCount() {
   return page.locator(CHART_SEL).count();
 }
 
+/** Which library drew the last chart, and whether its canvas has pixels. */
+async function inspectChart(locator) {
+  return locator.evaluate((el) => {
+    if (el.classList.contains("js-plotly-plot")) return { renderer: "plotly", svg: el.querySelectorAll("svg").length };
+    const canvas = el.querySelector("canvas");
+    const chart = el.__echarts;
+    return {
+      renderer: el.dataset.chartView,
+      canvas: Boolean(canvas),
+      canvasSize: canvas ? [canvas.width, canvas.height] : null,
+      seriesTypes: chart ? (chart.getOption().series ?? []).map((s) => s.type) : null,
+    };
+  });
+}
+
+/** Ask ECharts to show a tooltip for the first datum and report the
+ *  tooltip DOM it created (real dispatchAction, real DOM). */
+async function probeTooltip(locator) {
+  return locator.evaluate(async (el) => {
+    const chart = el.__echarts;
+    if (!chart) return { supported: false };
+    chart.dispatchAction({ type: "showTip", seriesIndex: 0, dataIndex: 0 });
+    await new Promise((r) => setTimeout(r, 300));
+    const tip = Array.from(el.querySelectorAll("div")).find(
+      (d) => d.style.position === "absolute" && d.style.visibility !== "hidden" && d.textContent.trim(),
+    );
+    return { supported: true, shown: Boolean(tip), text: tip ? tip.textContent.trim().slice(0, 120) : null };
+  });
+}
+
 async function generateManual({ type, x, y, group }) {
   const before = await chartCount();
   await pick("圖表類型", type);
@@ -157,7 +187,8 @@ try {
       { timeout: 60000 },
     );
     await page.waitForTimeout(1200);
-    step("air_quality.generate-from-recommendation", { charts: await chartCount() });
+    const info = await inspectChart(page.locator(CHART_SEL).last());
+    step("air_quality.generate-from-recommendation", { charts: await chartCount(), ...info });
     await shot("02-rec-chart", page.locator(CHART_SEL).last());
   }
 
@@ -190,8 +221,14 @@ try {
   ];
   for (const m of manual) {
     const { chart, count } = await generateManual(m);
-    step(`manual.${m.name}`, { charts: count });
+    const info = await inspectChart(chart);
+    step(`manual.${m.name}`, { charts: count, ...info });
     await shot(`10-manual-${m.name}`, chart.locator("xpath=.."));
+    if (info.renderer === "echarts") {
+      const tip = await probeTooltip(chart);
+      step(`manual.${m.name}.tooltip`, tip);
+      if (tip.shown) await shot(`10-manual-${m.name}-tooltip`, chart.locator("xpath=.."));
+    }
   }
   await shot("11-workspace-all");
 
@@ -225,6 +262,18 @@ try {
     const topEmptyNotice = await page.getByText(/沒有圖表在資料中展現足夠強的證據/).count();
     step("tiny.warnings", { recCards: await page.locator("[id^=rec-card-]").count(), warningChips: chips, topEmptyNotice: topEmptyNotice > 0 });
     await shot("30-tiny-warnings");
+  }
+  // ---- renderer fallback: ?renderer=plotly must still draw with Plotly ---
+  {
+    await page.goto(`${base}/?renderer=plotly`, { waitUntil: "networkidle" });
+    const switcher = page.getByLabel("選擇既有資料集").first();
+    await switcher.click();
+    await page.getByRole("option", { name: /^air_quality\.csv/ }).first().click();
+    await page.getByRole("heading", { name: /B\. 資料總覽/ }).waitFor({ timeout: 30000 });
+    const { chart, count } = await generateManual({ type: "scatter", x: "temperature", y: "humidity" });
+    const info = await inspectChart(chart);
+    step("fallback.plotly", { charts: count, ...info });
+    await shot("40-plotly-fallback", chart.locator("xpath=.."));
   }
 } catch (e) {
   summary.fatal = String(e && e.stack ? e.stack : e);

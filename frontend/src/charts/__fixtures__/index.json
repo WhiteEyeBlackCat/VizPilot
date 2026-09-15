@@ -1,0 +1,169 @@
+{
+  "line_single": {
+    "file": "air_quality.csv",
+    "spec": {
+      "title": "mean temperature per day",
+      "type": "line",
+      "x": "timestamp",
+      "y": "temperature",
+      "aggregation": "mean",
+      "time_granularity": "day"
+    }
+  },
+  "line_grouped": {
+    "file": "air_quality.csv",
+    "spec": {
+      "title": "mean temperature per day by station",
+      "type": "line",
+      "x": "timestamp",
+      "y": "temperature",
+      "group_by": "station",
+      "aggregation": "mean",
+      "time_granularity": "day"
+    }
+  },
+  "line_raw_time": {
+    "file": "air_quality.csv",
+    "spec": {
+      "title": "pm25 over time",
+      "type": "line",
+      "x": "timestamp",
+      "y": "pm25"
+    }
+  },
+  "line_numeric_x": {
+    "file": "products.csv",
+    "spec": {
+      "title": "mean rating by price",
+      "type": "line",
+      "x": "price",
+      "y": "rating",
+      "aggregation": "mean"
+    }
+  },
+  "bar_single": {
+    "file": "air_quality.csv",
+    "spec": {
+      "title": "mean pm25 by station",
+      "type": "bar",
+      "x": "station",
+      "y": "pm25",
+      "aggregation": "mean"
+    }
+  },
+  "bar_count": {
+    "file": "air_quality.csv",
+    "spec": {
+      "title": "rows per station",
+      "type": "bar",
+      "x": "station",
+      "aggregation": "count"
+    }
+  },
+  "bar_grouped_null": {
+    "file": "e2e/data/sparse_groups.csv",
+    "spec": {
+      "title": "mean value by region and product",
+      "type": "bar",
+      "x": "region",
+      "y": "value",
+      "group_by": "product",
+      "aggregation": "mean"
+    }
+  },
+  "bar_truncated": {
+    "file": "customers_high_cardinality.csv",
+    "spec": {
+      "title": "top cities by lifetime value",
+      "type": "bar",
+      "x": "city",
+      "y": "lifetime_value",
+      "aggregation": "mean",
+      "top_n": 5
+    }
+  },
+  "scatter_single": {
+    "file": "air_quality.csv",
+    "spec": {
+      "title": "humidity vs temperature",
+      "type": "scatter",
+      "x": "temperature",
+      "y": "humidity"
+    }
+  },
+  "scatter_grouped": {
+    "file": "air_quality.csv",
+    "spec": {
+      "title": "humidity vs temperature by station",
+      "type": "scatter",
+      "x": "temperature",
+      "y": "humidity",
+      "group_by": "station"
+    }
+  },
+  "scatter_sampled": {
+    "file": "large_dataset.parquet",
+    "spec": {
+      "title": "latency_ms vs amount",
+      "type": "scatter",
+      "x": "amount",
+      "y": "latency_ms"
+    }
+  },
+  "histogram_single": {
+    "file": "air_quality.csv",
+    "spec": {
+      "title": "pm25 distribution",
+      "type": "histogram",
+      "x": "pm25"
+    }
+  },
+  "histogram_grouped": {
+    "file": "air_quality.csv",
+    "spec": {
+      "title": "pm25 distribution by station",
+      "type": "histogram",
+      "x": "pm25",
+      "group_by": "station"
+    }
+  },
+  "histogram_display_range": {
+    "file": "outliers.csv",
+    "spec": {
+      "title": "temperature distribution",
+      "type": "histogram",
+      "x": "temperature"
+    }
+  },
+  "box_outliers": {
+    "file": "outliers.csv",
+    "spec": {
+      "title": "value by group",
+      "type": "box",
+      "x": "group",
+      "y": "value"
+    }
+  },
+  "box_single": {
+    "file": "air_quality.csv",
+    "spec": {
+      "title": "pm25",
+      "type": "box",
+      "y": "pm25"
+    }
+  },
+  "heatmap": {
+    "file": "air_quality.csv",
+    "spec": {
+      "title": "correlation heatmap",
+      "type": "heatmap"
+    }
+  },
+  "heatmap_null_cell": {
+    "file": "e2e/data/sparse_groups.csv",
+    "spec": {
+      "title": "correlation heatmap",
+      "type": "heatmap"
+    }
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "spec": {
+    "title": "top cities by lifetime value",
+    "type": "bar",
+    "x": "city",
+    "y": "lifetime_value",
+    "group_by": null,
+    "aggregation": "mean",
+    "bins": null,
+    "time_granularity": null,
+    "top_n": 5,
+    "reason": "",
+    "priority": 100
+  },
+  "chart_data": {
+    "categories": [
+      "City_043",
+      "City_108",
+      "City_046",
+      "City_079",
+      "City_083"
+    ],
+    "series": [
+      {
+        "name": "lifetime_value",
+        "values": [
+          11252.776666666665,
+          9988.162,
+          8385.522857142858,
+          8373.106666666667,
+          7558.911428571429
+        ]
+      }
+    ],
+    "truncated": true,
+    "y_label": "mean(lifetime_value)"
+  },
+  "sampled": false,
+  "n_points": 5,
+  "display_range": null
+}

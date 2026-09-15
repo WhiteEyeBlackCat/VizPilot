@@ -1,0 +1,43 @@
+{
+  "spec": {
+    "title": "correlation heatmap",
+    "type": "heatmap",
+    "x": null,
+    "y": null,
+    "group_by": null,
+    "aggregation": null,
+    "bins": null,
+    "time_granularity": null,
+    "top_n": null,
+    "reason": "",
+    "priority": 100
+  },
+  "chart_data": {
+    "columns": [
+      "value",
+      "metric_a",
+      "metric_b"
+    ],
+    "matrix": [
+      [
+        1,
+        0.19808048719216914,
+        0.015971758271381878
+      ],
+      [
+        0.19808048719216914,
+        1,
+        null
+      ],
+      [
+        0.015971758271381878,
+        null,
+        1
+      ]
+    ],
+    "y_label": "correlation"
+  },
+  "sampled": false,
+  "n_points": 9,
+  "display_range": null
+}

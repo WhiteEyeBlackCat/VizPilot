@@ -1,0 +1,45 @@
+{
+  "spec": {
+    "title": "mean value by region and product",
+    "type": "bar",
+    "x": "region",
+    "y": "value",
+    "group_by": "product",
+    "aggregation": "mean",
+    "bins": null,
+    "time_granularity": null,
+    "top_n": null,
+    "reason": "",
+    "priority": 100
+  },
+  "chart_data": {
+    "categories": [
+      "East",
+      "North",
+      "South"
+    ],
+    "series": [
+      {
+        "name": "Gadget",
+        "values": [
+          null,
+          55.08833333333334,
+          56.8425
+        ]
+      },
+      {
+        "name": "Widget",
+        "values": [
+          102.16000000000001,
+          102.0425,
+          100.18666666666667
+        ]
+      }
+    ],
+    "truncated": false,
+    "y_label": "mean(value)"
+  },
+  "sampled": false,
+  "n_points": 5,
+  "display_range": null
+}

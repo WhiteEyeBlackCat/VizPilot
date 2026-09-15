@@ -1,0 +1,39 @@
+{
+  "spec": {
+    "title": "pm25",
+    "type": "box",
+    "x": null,
+    "y": "pm25",
+    "group_by": null,
+    "aggregation": null,
+    "bins": null,
+    "time_granularity": null,
+    "top_n": null,
+    "reason": "",
+    "priority": 100
+  },
+  "chart_data": {
+    "groups": [
+      {
+        "name": "all",
+        "q1": 31.8275,
+        "median": 38.295,
+        "q3": 45.285,
+        "lower_fence": 11.641250000000007,
+        "upper_fence": 65.47125,
+        "outliers": [
+          7.67,
+          8.42,
+          10.94,
+          65.57
+        ],
+        "mean": 38.485375,
+        "count": 720
+      }
+    ],
+    "y_label": "pm25"
+  },
+  "sampled": false,
+  "n_points": 9,
+  "display_range": null
+}

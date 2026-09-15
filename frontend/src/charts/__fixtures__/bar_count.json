@@ -1,0 +1,37 @@
+{
+  "spec": {
+    "title": "rows per station",
+    "type": "bar",
+    "x": "station",
+    "y": null,
+    "group_by": null,
+    "aggregation": "count",
+    "bins": null,
+    "time_granularity": null,
+    "top_n": null,
+    "reason": "",
+    "priority": 100
+  },
+  "chart_data": {
+    "categories": [
+      "C",
+      "B",
+      "A"
+    ],
+    "series": [
+      {
+        "name": "count",
+        "values": [
+          248,
+          238,
+          234
+        ]
+      }
+    ],
+    "truncated": false,
+    "y_label": "count"
+  },
+  "sampled": false,
+  "n_points": 3,
+  "display_range": null
+}

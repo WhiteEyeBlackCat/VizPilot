@@ -1,0 +1,37 @@
+{
+  "spec": {
+    "title": "mean pm25 by station",
+    "type": "bar",
+    "x": "station",
+    "y": "pm25",
+    "group_by": null,
+    "aggregation": "mean",
+    "bins": null,
+    "time_granularity": null,
+    "top_n": null,
+    "reason": "",
+    "priority": 100
+  },
+  "chart_data": {
+    "categories": [
+      "C",
+      "B",
+      "A"
+    ],
+    "series": [
+      {
+        "name": "pm25",
+        "values": [
+          44.163387096774194,
+          37.84831932773109,
+          33.11559829059829
+        ]
+      }
+    ],
+    "truncated": false,
+    "y_label": "mean(pm25)"
+  },
+  "sampled": false,
+  "n_points": 3,
+  "display_range": null
+}
