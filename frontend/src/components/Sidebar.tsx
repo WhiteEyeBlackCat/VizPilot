@@ -19,8 +19,24 @@ interface Props {
 /** Primary navigation: the dataset list and, once one is selected, the four
  *  pages. Links are plain anchors on the hash router so the browser back
  *  button and a reload both work. */
+const uploadTime = new Intl.DateTimeFormat("zh-Hant", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+
+/** Datasets sharing a filename are told apart by their upload time. */
+function duplicateNames(datasets: DatasetMeta[]): Set<string> {
+  const seen = new Set<string>();
+  const dups = new Set<string>();
+  for (const d of datasets) (seen.has(d.filename) ? dups : seen).add(d.filename);
+  return dups;
+}
+
+function whenLabel(meta: DatasetMeta): string {
+  const d = new Date(meta.uploaded_at);
+  return Number.isNaN(d.getTime()) ? "" : uploadTime.format(d);
+}
+
 export function Sidebar({ datasets, currentId, page, workspaceCount, onNewDataset, variant }: Props) {
   const listRef = useRef<HTMLUListElement>(null);
+  const dups = duplicateNames(datasets);
 
   // keep the selected dataset in view when the list is long
   useEffect(() => {
@@ -78,7 +94,7 @@ export function Sidebar({ datasets, currentId, page, workspaceCount, onNewDatase
             </option>
             {datasets.map((d) => (
               <option key={d.dataset_id} value={d.dataset_id}>
-                {d.filename} ({d.n_rows}×{d.n_cols})
+                {d.filename} ({d.n_rows}×{d.n_cols}){dups.has(d.filename) && ` · ${whenLabel(d)}`}
               </option>
             ))}
           </select>
@@ -135,7 +151,14 @@ export function Sidebar({ datasets, currentId, page, workspaceCount, onNewDatase
                 )}
               >
                 <Database className="h-3.5 w-3.5 shrink-0 opacity-70" />
-                <span className="min-w-0 flex-1 truncate">{d.filename}</span>
+                <span className="min-w-0 flex-1 truncate">
+                  {d.filename}
+                  {dups.has(d.filename) && (
+                    <span className="ml-1.5 text-[11px] tabular-nums text-muted-foreground" data-upload-time>
+                      {whenLabel(d)}
+                    </span>
+                  )}
+                </span>
                 <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
                   {d.n_rows}×{d.n_cols}
                 </span>

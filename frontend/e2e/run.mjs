@@ -276,6 +276,7 @@ try {
     panelPresent: (await panelState()).present,
   });
   await shot("01-overview-page");
+  if ((await main().getAttribute("data-active-page")) !== "overview" || (await page.locator("[data-page-nav] a").count()) !== 4) fail("upload did not land on Overview with the four page links");
 
   // ---- Overview (16.3): summary tiles, type filter, derived / warnings ----
   {
@@ -343,6 +344,7 @@ try {
   const recCards = await page.locator("[id^=rec-card-]").count();
   const topCards = await page.locator("[id^=rec-card-][data-tier=top]").count();
   step("air_quality.insights", { recCards, topCards, tiers, previewButtons: await page.getByRole("button", { name: "Preview" }).count() });
+  if (recCards === 0 || topCards === 0 || !tiers["推薦重點"] || !tiers["次要"] || !tiers["探索"]) fail("insights tiers / cards missing");
   await shot("02-insights-page");
 
   // click a top card → preview panel opens with the chart, nothing saved
@@ -396,16 +398,22 @@ try {
   // ---- Explore: option filtering per type, six chart types --------------
   await gotoPage("Explore");
   await pick("圖表類型", "box");
-  step("builder.box.options", { x: await labelledOptions("X 軸"), y: await labelledOptions("Y 軸") });
+  const boxOpts = { x: await labelledOptions("X 軸"), y: await labelledOptions("Y 軸") };
+  step("builder.box.options", boxOpts);
+  if (boxOpts.x.join() !== "station" || boxOpts.y.length !== 4) fail(`box options wrong: ${JSON.stringify(boxOpts)}`);
   await pick("圖表類型", "heatmap");
-  step("builder.heatmap.options", { x: await labelledOptions("X 軸"), y: await labelledOptions("Y 軸") });
+  const heatOpts = { x: await labelledOptions("X 軸"), y: await labelledOptions("Y 軸") };
+  step("builder.heatmap.options", heatOpts);
+  if (heatOpts.x.length !== 0 || heatOpts.y.length !== 0) fail("heatmap must offer no axes");
   await pick("圖表類型", "bar");
-  step("builder.bar.options", {
+  const barOpts = {
     x: await labelledOptions("X 軸"),
     y: await labelledOptions("Y 軸"),
     group: await labelledOptions("分組"),
     aggDisabledWithoutY: await page.getByLabel("聚合").first().isDisabled(),
-  });
+  };
+  step("builder.bar.options", barOpts);
+  if (barOpts.x.join() !== "station" || barOpts.y.length !== 4 || !barOpts.aggDisabledWithoutY) fail(`bar options wrong: ${JSON.stringify(barOpts)}`);
 
   const manual = [
     { name: "line", type: "line", x: "timestamp", y: "temperature" },
@@ -424,6 +432,7 @@ try {
     await shot(`10-manual-${m.name}`, panel());
     const tip = await probeTooltip(chart);
     step(`manual.${m.name}.tooltip`, tip);
+    if (!tip.shown) fail(`${m.name}: tooltip did not show`);
     if (saveAfter.has(m.name)) {
       const before = await workspaceCount();
       await page.locator("[data-preview-save]").click();
@@ -519,8 +528,9 @@ try {
     await shot("13-enlarged-dialog");
     await page.keyboard.press("Escape");
     await dialog.waitFor({ state: "detached", timeout: 10000 });
-    step("workspace.enlarge.closed", { charts: await page.locator(CHART_SEL).count(), panelStillOpen: (await panelState()).present });
-    if (!(await panelState()).present) fail("Escape that closed the dialog must not also close the panel");
+    const closed = { charts: await page.locator(CHART_SEL).count(), panelStillOpen: (await panelState()).present };
+    step("workspace.enlarge.closed", closed);
+    if (!closed.panelStillOpen || closed.charts !== 1) fail("Escape that closed the dialog must not also close the panel / leave a chart behind");
 
     // export: a real download of a PNG data URL
     const dataUrl = await panel().locator(CHART_SEL).first().evaluate((el) =>
@@ -540,8 +550,9 @@ try {
     // remove from the panel → one left, panel closes
     await page.getByRole("button", { name: "Remove" }).first().click();
     await page.waitForTimeout(300);
-    step("workspace.remove", { cards: await page.locator("[data-workspace-card]").count(), panel: (await panelState()).present, count: await workspaceCount() });
-    if ((await workspaceCount()) !== 1) fail("remove did not leave exactly one chart");
+    const removed = { cards: await page.locator("[data-workspace-card]").count(), panel: (await panelState()).present, count: await workspaceCount() };
+    step("workspace.remove", removed);
+    if (removed.count !== 1 || removed.cards !== 1 || removed.panel) fail("remove did not leave exactly one chart with the panel closed");
   }
 
   // Escape with no dialog open closes the preview panel
@@ -561,12 +572,16 @@ try {
     await gotoPage("Explore");
     await pick("圖表類型", "box");
     await pick("X 軸", "station");
+    await pick("Y 軸", "—"); // the form is kept in the store: drop the y left by the earlier steps
+    const yBefore = (await page.getByLabel("Y 軸").first().textContent())?.trim();
     await page.getByRole("button", { name: "生成圖表" }).click();
     const err = page.locator("[data-manual-builder] [role=alert]").first();
     await err.waitFor({ timeout: 15000 }).catch(() => {});
-    const errorShown = await page.locator("[data-manual-builder] [role=alert] li").filter({ hasText: /y/i }).count();
-    step("builder.422", { errorShown: errorShown > 0 });
+    const errorText = (await page.locator("[data-manual-builder] [role=alert] li").allTextContents()).map((t) => t.trim());
+    const errorShown = errorText.some((t) => /y/i.test(t));
+    step("builder.422", { yBefore, errorShown, errorText });
     await shot("14-builder-422");
+    if (yBefore !== "—" || !errorShown) fail(`box without y must show the backend's 422 error (y=${yBefore}, errors=${JSON.stringify(errorText)})`);
   }
 
   // ---- layout: no page scroll, stable height ----------------------------
@@ -608,7 +623,9 @@ try {
     if ((await main().getAttribute("data-panel-mode")) !== "overlay" || Math.abs(widthAfter - widthBefore) > 2) fail("overlay mode squeezed the content");
     await page.getByRole("button", { name: "收合預覽面板" }).click();
     await page.waitForTimeout(300);
-    step("layout.overlay.collapsed", { panelPresent: (await panelState()).present, expandButton: await page.getByRole("button", { name: "展開預覽面板" }).count() });
+    const overlayCollapsed = { panelPresent: (await panelState()).present, expandButton: await page.getByRole("button", { name: "展開預覽面板" }).count() };
+    step("layout.overlay.collapsed", overlayCollapsed);
+    if (overlayCollapsed.panelPresent || overlayCollapsed.expandButton !== 1) fail("overlay collapse broken");
     await page.getByRole("button", { name: "展開預覽面板" }).click();
     await page.waitForTimeout(200);
     await page.getByRole("button", { name: "關閉預覽" }).click();
@@ -629,17 +646,21 @@ try {
     const paneBox = await panel().boundingBox();
     const contentBox = await main().boundingBox();
     const probe = await layoutProbe();
-    step("layout.narrow", {
+    const narrow = {
       sidebar: await page.locator("[data-sidebar]").first().getAttribute("data-sidebar"),
       variant: st.variant,
       open: st.open,
       stacked: Boolean(paneBox && contentBox && paneBox.y >= contentBox.y + contentBox.height - 2),
       noHorizontalScroll: probe.scrollWidth === probe.innerWidth,
-    });
+    };
+    step("layout.narrow", narrow);
+    if (narrow.sidebar !== "top" || narrow.variant !== "drawer" || !narrow.open || !narrow.stacked || !narrow.noHorizontalScroll) fail(`narrow layout wrong: ${JSON.stringify(narrow)}`);
     await shot("15-narrow-drawer");
     await page.getByRole("button", { name: "收合預覽面板" }).click();
     await page.waitForTimeout(300);
-    step("layout.narrow.collapsed", { open: (await panelState()).open, height: (await panel().boundingBox())?.height });
+    const narrowCollapsed = { open: (await panelState()).open, height: (await panel().boundingBox())?.height };
+    step("layout.narrow.collapsed", narrowCollapsed);
+    if (narrowCollapsed.open || !narrowCollapsed.height || narrowCollapsed.height > 48) fail("drawer did not collapse to its header");
     await page.setViewportSize({ width: 1400, height: 1000 });
     await page.waitForTimeout(500);
   }
@@ -652,13 +673,15 @@ try {
     const { chart, ...state } = await generateManual({ type: "histogram", x: "temperature" });
     const note = await panel().getByText(/顯示範圍/).count();
     step("outliers.histogram.display_range", { title: state.title, displayRangeNote: note > 0, canvas: (await inspectChart(chart)).canvas });
+    if (note === 0) fail("display_range note missing on outliers.temperature histogram");
     await shot("20-outliers-histogram", panel());
     await gotoPage("Overview");
     const sentinel = await page.locator("[data-column-row=temperature] [data-quality-flag=sentinel]").count();
     const flagKinds = await page.locator("[data-quality-flag]").evaluateAll((els) => els.map((e) => e.dataset.qualityFlag));
-    step("outliers.overview.quality", { sentinelFlagOnTemperature: sentinel, flagKinds, qualityTile: await page.locator("[data-summary-tile=quality] [data-summary-value]").textContent().then((t) => t?.trim()) });
+    const qualityTile = await page.locator("[data-summary-tile=quality] [data-summary-value]").textContent().then((t) => t?.trim());
+    step("outliers.overview.quality", { sentinelFlagOnTemperature: sentinel, flagKinds, qualityTile });
     await shot("21-overview-outliers");
-    if (sentinel !== 1) fail("suspected sentinel flag missing on outliers.temperature");
+    if (sentinel !== 1 || Number(qualityTile) < 1) fail("suspected sentinel flag / quality tile missing on outliers");
   }
 
   // switching back restores that dataset's workspace
@@ -706,13 +729,15 @@ try {
   {
     const chips = await page.locator("[id^=rec-card-] li").count();
     const topEmptyNotice = await page.getByText(/沒有圖表在資料中展現足夠強的證據/).count();
-    step("tiny.warnings", {
+    const tiny = {
       recCards: await page.locator("[id^=rec-card-]").count(),
       warningChips: chips,
       topEmptyNotice: topEmptyNotice > 0,
       panelCleared: !(await panelState()).present,
-    });
+    };
+    step("tiny.warnings", tiny);
     await shot("30-tiny-warnings");
+    if (tiny.recCards === 0 || tiny.warningChips === 0 || !tiny.topEmptyNotice || !tiny.panelCleared) fail(`tiny_dataset checks failed: ${JSON.stringify(tiny)}`);
   }
 
   // ---- sales_basic: derived-column demotion (stage 13) -------------------
