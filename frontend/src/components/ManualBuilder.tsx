@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { ApiError } from "../api";
 import type { ExploreField, ExploreForm, FieldUpdate } from "../store";
@@ -26,11 +26,11 @@ export function ManualBuilder({ profile, form, onField, onGenerate }: Props) {
   // same names and setter semantics as the former useState pairs (value or
   // updater), backed by the store; the logic below is unchanged
   const { type, x, y, group, agg } = form;
-  const setType = (v: FieldUpdate<string>) => onField("type", v);
-  const setX = (v: FieldUpdate<string>) => onField("x", v);
-  const setY = (v: FieldUpdate<string>) => onField("y", v);
-  const setGroup = (v: FieldUpdate<string>) => onField("group", v);
-  const setAgg = (v: FieldUpdate<string>) => onField("agg", v);
+  const setType = useCallback((v: FieldUpdate<string>) => onField("type", v), [onField]);
+  const setX = useCallback((v: FieldUpdate<string>) => onField("x", v), [onField]);
+  const setY = useCallback((v: FieldUpdate<string>) => onField("y", v), [onField]);
+  const setGroup = useCallback((v: FieldUpdate<string>) => onField("group", v), [onField]);
+  const setAgg = useCallback((v: FieldUpdate<string>) => onField("agg", v), [onField]);
   const [busy, setBusy] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
 

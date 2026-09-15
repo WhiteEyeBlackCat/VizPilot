@@ -8,9 +8,11 @@
 // Requires: a backend serving frontend/dist, Playwright's Chromium installed
 // (npx playwright install chromium). See e2e/README.md.
 //
-// Layout (stage 16.2): sidebar (datasets + Overview / Insights / Explore /
-// Workspace, hash routes #/d/<id>/<page>), one shared preview panel
-// ([data-preview-panel]); Save is the only way into the workspace.
+// Layout (stage 16.2 / 16.3): sidebar (datasets + Overview / Insights /
+// Explore / Workspace, hash routes #/d/<id>/<page>), one shared preview panel
+// ([data-preview-panel]: resizable split ≥1280px, overlay 1024–1279px, bottom
+// drawer below); Save is the only way into the workspace. Overview shows
+// summary tiles, a type filter, quality flags, derived fields and warnings.
 
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -149,6 +151,12 @@ async function upload(file) {
   await dialog.waitFor({ timeout: 5000 });
   const before = await datasetIdFromHash();
   await dialog.locator("input[type=file]").setInputFiles(dataset(file));
+  // a re-run against a backend that already holds this file gets the
+  // same-name prompt (16.3); confirm it — every upload is a fresh dataset
+  const prompt = dialog.locator("[data-duplicate-prompt]");
+  if (await prompt.waitFor({ timeout: 1500 }).then(() => true, () => false)) {
+    await dialog.getByRole("button", { name: "仍要上傳" }).click();
+  }
   await page.waitForFunction(
     (prev) => window.location.hash.startsWith("#/d/") && window.location.hash.split("/")[2] !== prev,
     before,
@@ -269,10 +277,68 @@ try {
   });
   await shot("01-overview-page");
 
+  // ---- Overview (16.3): summary tiles, type filter, derived / warnings ----
+  {
+    const tile = (name) => page.locator(`[data-summary-tile=${name}] [data-summary-value]`).first().textContent().then((t) => t?.trim());
+    const chips = await page.locator("[data-type-chip]").evaluateAll((els) =>
+      els.map((el) => ({ type: el.dataset.typeChip, count: Number(el.querySelector("[data-type-count]")?.textContent) })),
+    );
+    const chipSum = chips.reduce((s, c) => s + c.count, 0);
+    const rowsAll = await page.locator("[data-column-table] tbody tr[data-column-row]").count();
+    await page.locator("[data-type-chip=numeric]").click();
+    await page.waitForTimeout(150);
+    const rowsNumeric = await page.locator("[data-column-table] tbody tr[data-column-row]").count();
+    const numericChip = chips.find((c) => c.type === "numeric")?.count ?? -1;
+    const filterAttr = await page.locator("[data-column-table]").getAttribute("data-filter");
+    await page.locator("[data-type-chip=numeric]").click(); // toggle off
+    await page.waitForTimeout(150);
+    const rowsAfterClear = await page.locator("[data-column-table] tbody tr[data-column-row]").count();
+    step("overview.sections", {
+      rows: await tile("rows"),
+      columns: await tile("columns"),
+      missing: await tile("missing"),
+      profiled: await tile("profiled"),
+      quality: await tile("quality"),
+      chips,
+      chipSum,
+      rowsAll,
+      rowsNumeric,
+      numericChip,
+      filterAttr,
+      rowsAfterClear,
+      derivedEmpty: (await page.locator("[data-derived-empty]").count()) > 0,
+      warningsSection: (await page.locator("[data-warnings-section]").count()) > 0,
+      qualityFlags: await page.locator("[data-quality-flag]").count(),
+    });
+    if ((await tile("rows")) !== "720" || (await tile("columns")) !== "6") fail("summary tiles do not match the dataset");
+    if (chipSum !== rowsAll || rowsNumeric !== numericChip || rowsAfterClear !== rowsAll) fail("type filter / chip counts inconsistent");
+  }
+
+  // same-name upload asks first; cancelling keeps the list unchanged
+  {
+    const before = await page.locator("[data-dataset-list] a").count();
+    await page.getByRole("button", { name: "New Dataset" }).first().click();
+    const dialog = page.locator("[data-new-dataset-dialog]");
+    await dialog.waitFor({ timeout: 5000 });
+    await dialog.locator("input[type=file]").setInputFiles(dataset("air_quality.csv"));
+    const prompt = dialog.locator("[data-duplicate-prompt]");
+    await prompt.waitFor({ timeout: 5000 });
+    const promptText = (await prompt.textContent())?.trim().slice(0, 60);
+    await dialog.getByRole("button", { name: "取消" }).click();
+    await page.waitForTimeout(150);
+    const promptGone = (await prompt.count()) === 0;
+    const dropZoneBack = (await dialog.locator("[data-drop-zone]").count()) === 1;
+    await page.keyboard.press("Escape");
+    await dialog.waitFor({ state: "detached", timeout: 5000 });
+    const after = await page.locator("[data-dataset-list] a").count();
+    step("upload.duplicate-name-prompt", { promptText, promptGone, dropZoneBack, before, after, hash: await currentHash() });
+    if (!promptGone || !dropZoneBack || after !== before) fail("duplicate-name prompt misbehaved");
+  }
+
   await gotoPage("Insights");
   const tiers = {};
   for (const t of ["推薦重點", "次要", "探索"]) {
-    tiers[t] = (await page.getByRole("heading", { level: 3, name: new RegExp(`^${t}`) }).count()) > 0;
+    tiers[t] = (await page.getByRole("heading", { level: 2, name: new RegExp(`^${t}`) }).count()) > 0;
   }
   const recCards = await page.locator("[id^=rec-card-]").count();
   const topCards = await page.locator("[id^=rec-card-][data-tier=top]").count();
@@ -289,15 +355,28 @@ try {
     const paneBox = await panel().boundingBox();
     const contentBox = await main().boundingBox();
     const pressed = await page.locator("[id^=rec-card-][aria-pressed=true]").count();
+    // 16.3: the first opening lands on the default 55 / 45 split, and the
+    // panel header names the chart so the in-canvas title is hidden
+    const total = paneBox && contentBox ? contentBox.width + paneBox.width : 0;
+    const previewShare = total ? Number((paneBox.width / total).toFixed(3)) : null;
+    const titleHidden = await panel().locator(CHART_SEL).first().evaluate((el) => {
+      const t = el.__echarts?.getOption().title;
+      return Array.isArray(t) ? t.every((x) => x.show === false) : t?.show === false;
+    });
     step("air_quality.preview-from-insight", {
       ...st,
       ...info,
       selectedCards: pressed,
       panelRightOfContent: Boolean(paneBox && contentBox && paneBox.x >= contentBox.x + contentBox.width - 2),
       workspaceCount: await workspaceCount(),
+      previewShare,
+      panelMode: await main().getAttribute("data-panel-mode"),
+      titleHidden,
     });
     if (!st.present || !st.canvas || st.source !== "insight" || !st.confidence) fail(`insight preview failed: ${JSON.stringify(st)}`);
     if ((await workspaceCount()) !== 0) fail("previewing must not save");
+    if (previewShare === null || Math.abs(previewShare - 0.45) > 0.03) fail(`first open is not the 55/45 split (${previewShare})`);
+    if (!titleHidden) fail("the panel chart still draws its own title");
     await shot("03-insight-preview");
   }
 
@@ -356,6 +435,12 @@ try {
     }
   }
   await shot("11-explore-page");
+  {
+    const hint = (name) => page.locator(`[data-explore-hints] [data-hint=${name}]`).first().textContent().then((t) => Number(t?.trim()));
+    const last = (await page.locator("[data-explore-last]").textContent())?.trim();
+    step("explore.hints", { numeric: await hint("numeric"), categorical: await hint("categorical"), datetime: await hint("datetime"), last: last?.slice(0, 60) });
+    if ((await hint("numeric")) !== 4 || (await hint("datetime")) !== 1 || !/heatmap/.test(last ?? "")) fail("explore hints / last spec wrong");
+  }
   // state survives navigation: the explore form keeps its last selection
   {
     await gotoPage("Overview");
@@ -425,7 +510,12 @@ try {
     await dialog.waitFor({ timeout: 10000 });
     await page.waitForTimeout(1000);
     const big = await inspectChart(dialog.locator(CHART_SEL));
-    step("workspace.enlarge", { inline: inline.canvasSize, dialog: big.canvasSize, bigger: Boolean(big.canvasSize && inline.canvasSize && big.canvasSize[0] > inline.canvasSize[0]) });
+    const dialogTitleShown = await dialog.locator(CHART_SEL).evaluate((el) => {
+      const t = el.__echarts?.getOption().title;
+      return Array.isArray(t) ? t.some((x) => x.show !== false && x.text) : Boolean(t?.text) && t?.show !== false;
+    });
+    step("workspace.enlarge", { inline: inline.canvasSize, dialog: big.canvasSize, bigger: Boolean(big.canvasSize && inline.canvasSize && big.canvasSize[0] > inline.canvasSize[0]), dialogTitleShown });
+    if (!dialogTitleShown) fail("the enlarged chart lost its title");
     await shot("13-enlarged-dialog");
     await page.keyboard.press("Escape");
     await dialog.waitFor({ state: "detached", timeout: 10000 });
@@ -491,6 +581,40 @@ try {
     if (new Set(samples).size !== 1 || probe.scrollHeight !== probe.innerHeight) fail("document scrolls or height drifts");
   }
 
+  // ---- 1024–1279px: the preview overlays the content (no squeeze) --------
+  {
+    await page.setViewportSize({ width: 1100, height: 1000 });
+    await page.waitForTimeout(500);
+    await gotoPage("Insights");
+    const widthBefore = (await main().boundingBox())?.width ?? 0;
+    const before = await panelSeq();
+    await page.locator("[id^=rec-card-][data-tier=top]").first().click();
+    await waitPreview(before);
+    const st = await panelState();
+    const widthAfter = (await main().boundingBox())?.width ?? 0;
+    const paneBox = await panel().boundingBox();
+    const probe = await layoutProbe();
+    step("layout.overlay", {
+      mode: await main().getAttribute("data-panel-mode"),
+      panelMode: await panel().getAttribute("data-mode"),
+      variant: st.variant,
+      canvas: st.canvas,
+      contentWidthBefore: widthBefore,
+      contentWidthAfter: widthAfter,
+      panelWidth: paneBox?.width,
+      noHorizontalScroll: probe.scrollWidth === probe.innerWidth,
+    });
+    await shot("16-overlay-1100");
+    if ((await main().getAttribute("data-panel-mode")) !== "overlay" || Math.abs(widthAfter - widthBefore) > 2) fail("overlay mode squeezed the content");
+    await page.getByRole("button", { name: "收合預覽面板" }).click();
+    await page.waitForTimeout(300);
+    step("layout.overlay.collapsed", { panelPresent: (await panelState()).present, expandButton: await page.getByRole("button", { name: "展開預覽面板" }).count() });
+    await page.getByRole("button", { name: "展開預覽面板" }).click();
+    await page.waitForTimeout(200);
+    await page.getByRole("button", { name: "關閉預覽" }).click();
+    await page.waitForTimeout(200);
+  }
+
   // ---- narrow viewport: top bar + bottom drawer -------------------------
   {
     await page.setViewportSize({ width: 800, height: 1000 });
@@ -529,6 +653,12 @@ try {
     const note = await panel().getByText(/顯示範圍/).count();
     step("outliers.histogram.display_range", { title: state.title, displayRangeNote: note > 0, canvas: (await inspectChart(chart)).canvas });
     await shot("20-outliers-histogram", panel());
+    await gotoPage("Overview");
+    const sentinel = await page.locator("[data-column-row=temperature] [data-quality-flag=sentinel]").count();
+    const flagKinds = await page.locator("[data-quality-flag]").evaluateAll((els) => els.map((e) => e.dataset.qualityFlag));
+    step("outliers.overview.quality", { sentinelFlagOnTemperature: sentinel, flagKinds, qualityTile: await page.locator("[data-summary-tile=quality] [data-summary-value]").textContent().then((t) => t?.trim()) });
+    await shot("21-overview-outliers");
+    if (sentinel !== 1) fail("suspected sentinel flag missing on outliers.temperature");
   }
 
   // switching back restores that dataset's workspace
@@ -549,6 +679,24 @@ try {
     await waitProfile("air_quality.csv");
     step("route.reload", { hashBefore: hash, hashAfter: await currentHash(), activePage: await main().getAttribute("data-active-page"), currentDataset: await page.locator("[data-dataset-list] a[aria-current=true]").count(), workspaceAfterReload: await workspaceCount() });
     if ((await currentHash()) !== hash || (await main().getAttribute("data-active-page")) !== "workspace") fail("reload lost the route");
+  }
+
+  // ---- hash normalisation: unknown id → empty state; bogus page → overview --
+  {
+    await page.evaluate(() => (window.location.hash = "#/d/no-such-dataset/overview"));
+    await page.waitForFunction(() => window.location.hash === "#/" && document.querySelector("[data-empty-state]"), null, { timeout: 5000 });
+    const unknown = { hash: await currentHash(), emptyState: (await page.locator("[data-empty-state]").count()) > 0, activePage: await main().getAttribute("data-active-page") };
+    await page.evaluate((id) => (window.location.hash = `#/d/${id}/bogus`), airId);
+    await page.waitForFunction((id) => window.location.hash === `#/d/${id}/overview`, airId, { timeout: 5000 });
+    await waitProfile("air_quality.csv");
+    const bogus = { hash: await currentHash(), activePage: await main().getAttribute("data-active-page") };
+    await page.evaluate(() => (window.location.hash = "#/garbage"));
+    await page.waitForFunction(() => window.location.hash === "#/", null, { timeout: 5000 });
+    const garbage = { hash: await currentHash(), emptyState: (await page.locator("[data-empty-state]").count()) > 0 };
+    step("route.normalise", { unknown, bogus, garbage });
+    if (!unknown.emptyState || bogus.activePage !== "overview" || !garbage.emptyState) fail("hash normalisation failed");
+    await page.evaluate((id) => (window.location.hash = `#/d/${id}/overview`), airId);
+    await waitProfile("air_quality.csv");
   }
 
 
@@ -578,6 +726,12 @@ try {
     step("sales_basic.derived", { recCards: await page.locator("[id^=rec-card-]").count(), topEmptyNotice, topCards, derivedDisclosed, definitionalCards });
     await shot("31-sales-basic-derived");
     if (!topEmptyNotice || topCards !== 0 || !derivedDisclosed) fail(`sales_basic derived check failed: notice=${topEmptyNotice} topCards=${topCards} disclosed=${derivedDisclosed}`);
+    await gotoPage("Overview");
+    const derivedRow = (await page.locator("[data-derived-column=sales]").textContent())?.trim();
+    const warningRows = await page.locator("[data-warnings-section] [data-warning-severity]").count();
+    step("sales_basic.overview.derived", { derivedRow: derivedRow?.slice(0, 120), warningRows });
+    await shot("33-overview-sales-derived");
+    if (!derivedRow || !/unit_price × quantity × \(1 − discount\)/.test(derivedRow) || warningRows < 1) fail("Overview derived / warnings sections missing on sales_basic");
   }
 
   // ---- hour_like: near-duplicate suppression (stage 14) -------------------
@@ -598,6 +752,12 @@ try {
     if (recCards === 0 || atempCards !== 0 || pairCards !== 0 || topIsPair || !nearDupDisclosed) {
       fail(`hour_like near-duplicate check failed: cards=${recCards} atemp=${atempCards} pair=${pairCards} topIsPair=${topIsPair} disclosed=${nearDupDisclosed}`);
     }
+    await gotoPage("Overview");
+    const nearDupRow = (await page.locator("[data-near-duplicate=temp]").textContent())?.trim();
+    const derivedCnt = (await page.locator("[data-derived-column=cnt]").count()) > 0;
+    step("hour_like.overview.derived", { nearDupRow: nearDupRow?.slice(0, 120), derivedCnt });
+    await shot("34-overview-hour-like");
+    if (!nearDupRow || !/atemp/.test(nearDupRow) || !derivedCnt) fail("Overview near-duplicate / derived rows missing on hour_like");
   }
 
   // ---- render payload shapes (must match the pre-16.2 UI) ----------------

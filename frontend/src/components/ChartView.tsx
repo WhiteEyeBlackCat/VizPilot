@@ -2,19 +2,40 @@ import { useMemo } from "react";
 
 import { EChartsView } from "../charts/echarts/EChartsView";
 import { buildOption, isEmpty } from "../charts/echarts/option";
+import type { VizOption } from "../charts/echarts/echarts";
 import type { BarChartData, RenderResult } from "../types";
 
 const CHART_HEIGHT = 360;
+// the title row the theme reserves (grid.top 56) shrinks to the y-axis name
+// row when the surrounding UI already names the chart
+const HIDDEN_TITLE_GRID_TOP = 28;
 
 interface Props {
   result: RenderResult;
   /** px number or any CSS height (the enlarged dialog passes a vh value) */
   height?: number | string;
+  /** false: hide the in-canvas title (the preview panel header shows it) */
+  showTitle?: boolean;
 }
 
-export function ChartView({ result, height = CHART_HEIGHT }: Props) {
+/** Presentation-only override on top of the adapter's option: the data
+ *  mapping in option.ts is untouched. */
+function withoutTitle(option: VizOption): VizOption {
+  const title = Array.isArray(option.title)
+    ? option.title.map((t) => ({ ...t, show: false }))
+    : { ...(option.title ?? {}), show: false };
+  const grid =
+    option.grid && !Array.isArray(option.grid) ? { ...option.grid, top: HIDDEN_TITLE_GRID_TOP } : option.grid;
+  return { ...option, title, grid };
+}
+
+export function ChartView({ result, height = CHART_HEIGHT, showTitle = true }: Props) {
   // the option is derived from the immutable RenderResult: memoised per chart
-  const option = useMemo(() => (isEmpty(result) ? null : buildOption(result)), [result]);
+  const option = useMemo(() => {
+    if (isEmpty(result)) return null;
+    const built = buildOption(result);
+    return showTitle ? built : withoutTitle(built);
+  }, [result, showTitle]);
 
   if (!option) {
     return (
@@ -29,7 +50,7 @@ export function ChartView({ result, height = CHART_HEIGHT }: Props) {
   const excluded = range ? range.excluded_below + range.excluded_above : 0;
 
   return (
-    <div>
+    <div data-chart-title={showTitle ? "shown" : "hidden"}>
       <EChartsView option={option} height={height} />
       <div className="flex gap-3 px-1 text-xs text-muted-foreground">
         {result.sampled && <span>已抽樣（顯示 {result.n_points} 點）</span>}

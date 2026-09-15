@@ -79,6 +79,8 @@ export interface AppState {
   workspaceByDataset: Record<string, SavedChart[]>;
   explore: ExploreForm;
   insightsExploratoryOpen: boolean;
+  /** the last spec generated from Explore for this dataset (shown as a recap) */
+  lastExploreSpec: ChartSpec | null;
 }
 
 export const initialState: AppState = {
@@ -93,12 +95,14 @@ export const initialState: AppState = {
   workspaceByDataset: {},
   explore: initialExploreForm,
   insightsExploratoryOpen: false,
+  lastExploreSpec: null,
 };
 
 export type Action =
   | { type: "DATASETS_LOADED"; datasets: DatasetMeta[] }
   | { type: "DATASET_ADDED"; meta: DatasetMeta }
   | { type: "SELECT_DATASET"; meta: DatasetMeta }
+  | { type: "CLEAR_SELECTION" }
   | { type: "PROFILE_LOADED"; datasetId: string; profile: DatasetProfile }
   | { type: "RECS_LOADED"; datasetId: string; recs: RecommendationsResponse; final: boolean }
   | { type: "AI_DONE"; datasetId: string }
@@ -159,6 +163,25 @@ export function reducer(state: AppState, action: Action): AppState {
         preview: null, // the workspace of the previous dataset is kept, keyed by id
         explore: initialExploreForm,
         insightsExploratoryOpen: false,
+        lastExploreSpec: null,
+      };
+
+    case "CLEAR_SELECTION":
+      // the hash no longer names a dataset (unknown id, "#/"): back to the
+      // empty state; per-dataset workspaces are kept
+      if (!state.meta) return state;
+      return {
+        ...state,
+        meta: null,
+        profile: null,
+        recs: null,
+        recsFinal: false,
+        aiPending: false,
+        preview: null,
+        panelOpen: false,
+        explore: initialExploreForm,
+        insightsExploratoryOpen: false,
+        lastExploreSpec: null,
       };
 
     case "PROFILE_LOADED":
@@ -183,7 +206,12 @@ export function reducer(state: AppState, action: Action): AppState {
     case "SET_PREVIEW":
       if (state.meta?.dataset_id !== action.datasetId) return state; // dataset switched while rendering
       previewSeq += 1;
-      return { ...state, preview: { ...action.preview, seq: previewSeq }, panelOpen: true };
+      return {
+        ...state,
+        preview: { ...action.preview, seq: previewSeq },
+        panelOpen: true,
+        lastExploreSpec: action.preview.source === "explore" ? action.preview.result.spec : state.lastExploreSpec,
+      };
 
     case "CLOSE_PREVIEW":
       return { ...state, preview: null, panelOpen: false };
