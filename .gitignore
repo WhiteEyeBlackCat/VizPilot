@@ -1,5 +1,9 @@
-# Claude Code local config
-.claude/
+# Claude Code local config (only the shared context docs are tracked)
+.claude/*
+!.claude/CLAUDE.md
+!.claude/ARCHITECTURE.md
+!.claude/CONTRACTS.md
+!.claude/CURRENT_STATE.md
 
 # Python
 __pycache__/
