@@ -32,17 +32,17 @@ export const PALETTE = [
 ];
 
 export const COLORS = {
-  surface: "#171b21", // --surface: card / sidebar
+  surface: "#171a21", // --surface = hsl(var(--card)): card / sidebar
   elevated: "#20242c", // --elevated: tooltip, popover, preview panel
-  text: "#e6e9ef", // --foreground: near-white
-  muted: "#9ca3b0", // --muted-foreground: cool grey
+  text: "#e7e9ef", // --foreground (hsl 220 20% 92%): near-white
+  muted: "#9ea6b3", // --muted-foreground (hsl 218 12% 66%): cool grey
   axisLine: "#3a4150", // one step above the border: the axis must be visible
   splitLine: "#23272f", // --border-subtle: low-contrast grid
   tooltipBorder: "#2c3140", // --border
   outlier: "#f87171", // --danger
   mean: "#e6e9ef", // diamond marker on the box plot
   boxFill: "#1e3a5f", // deep blue tint under the PALETTE[0] border
-  cellBorder: "#171b21", // heatmap cell separator = surface, so cells float
+  cellBorder: "#171a21", // heatmap cell separator = surface, so cells float
 };
 
 // diverging correlation scale for a dark surface: negative blue / zero a

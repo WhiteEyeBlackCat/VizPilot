@@ -1,14 +1,18 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { ApiError } from "../api";
+import type { ExploreField, ExploreForm, FieldUpdate } from "../store";
 import type { Aggregation, ChartSpec, ChartType, ColumnProfile, DatasetProfile } from "../types";
 import { ErrorList } from "./ErrorList";
 import { FieldSelect } from "./FieldSelect";
-import { SectionCard } from "./SectionCard";
 import { Button } from "@/components/ui/button";
 
 interface Props {
   profile: DatasetProfile;
+  /** form values live in the app store (stage 16.2) so they survive
+   *  navigation and preview-panel changes */
+  form: ExploreForm;
+  onField: (field: ExploreField, value: FieldUpdate<string>) => void;
   onGenerate: (spec: ChartSpec) => Promise<void>;
 }
 
@@ -18,12 +22,15 @@ const NUMERIC_DTYPE = /^(U?Int|Float)\d+$/;
 
 const names = (cols: ColumnProfile[]) => cols.map((c) => c.name);
 
-export function ManualBuilder({ profile, onGenerate }: Props) {
-  const [type, setType] = useState<ChartType>("bar");
-  const [x, setX] = useState("");
-  const [y, setY] = useState("");
-  const [group, setGroup] = useState("");
-  const [agg, setAgg] = useState("");
+export function ManualBuilder({ profile, form, onField, onGenerate }: Props) {
+  // same names and setter semantics as the former useState pairs (value or
+  // updater), backed by the store; the logic below is unchanged
+  const { type, x, y, group, agg } = form;
+  const setType = useCallback((v: FieldUpdate<string>) => onField("type", v), [onField]);
+  const setX = useCallback((v: FieldUpdate<string>) => onField("x", v), [onField]);
+  const setY = useCallback((v: FieldUpdate<string>) => onField("y", v), [onField]);
+  const setGroup = useCallback((v: FieldUpdate<string>) => onField("group", v), [onField]);
+  const setAgg = useCallback((v: FieldUpdate<string>) => onField("agg", v), [onField]);
   const [busy, setBusy] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
 
@@ -123,7 +130,7 @@ export function ManualBuilder({ profile, onGenerate }: Props) {
   };
 
   return (
-    <SectionCard title="手動建圖">
+    <div className="space-y-3" data-manual-builder>
       <div className="flex flex-wrap items-end gap-3">
         <FieldSelect
           label="圖表類型"
@@ -149,6 +156,6 @@ export function ManualBuilder({ profile, onGenerate }: Props) {
         </Button>
       </div>
       <ErrorList errors={errors} />
-    </SectionCard>
+    </div>
   );
 }

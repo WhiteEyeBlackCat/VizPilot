@@ -2,11 +2,14 @@ import * as React from "react"
 
 import { cn } from "@/lib/utils"
 
+// wrapperProps lets a wide table make its scroll container a focusable,
+// labelled region (axe scrollable-region-focusable); additive to the
+// shadcn template
 const Table = React.forwardRef<
   HTMLTableElement,
-  React.HTMLAttributes<HTMLTableElement>
->(({ className, ...props }, ref) => (
-  <div className="relative w-full overflow-auto">
+  React.HTMLAttributes<HTMLTableElement> & { wrapperProps?: React.HTMLAttributes<HTMLDivElement> }
+>(({ className, wrapperProps, ...props }, ref) => (
+  <div {...wrapperProps} className={cn("relative w-full overflow-auto", wrapperProps?.className)}>
     <table
       ref={ref}
       className={cn("w-full caption-bottom text-sm", className)}
@@ -73,7 +76,7 @@ const TableHead = React.forwardRef<
   <th
     ref={ref}
     className={cn(
-      "h-10 px-2 text-left align-middle font-medium text-muted-foreground [&:has([role=checkbox])]:pr-0 [&>[role=checkbox]]:translate-y-[2px]",
+      "whitespace-nowrap h-10 px-2 text-left align-middle font-medium text-muted-foreground [&:has([role=checkbox])]:pr-0 [&>[role=checkbox]]:translate-y-[2px]",
       className
     )}
     {...props}
