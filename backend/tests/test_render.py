@@ -360,3 +360,78 @@ def test_numeric_x_line_stride_sampled() -> None:
     assert n_points <= LINE_MAX_POINTS
     xs = chart_data["series"][0]["x"]
     assert xs == sorted(xs) and xs[0] == 0.0
+
+
+# --- stage 9 #6: clipped histogram over a sentinel-laden column ------------------
+
+
+def _sentinel_profile(df, name="v", lo=None, hi=None, sentinels=((9999.0, 3), (-999.0, 2))):
+    from app.profiling.models import RobustRange, SentinelCandidate
+
+    profile = profile_dataset(df, "0" * 32, 10**6)
+    col = next(c for c in profile.columns if c.name == name)
+    col.quality.suspected_sentinels = [
+        SentinelCandidate(value=v, count=c, signals=["extreme", "repeated", "pattern"]) for v, c in sentinels
+    ]
+    col.quality.sentinel_row_count = sum(c for _, c in sentinels)
+    col.quality.robust_range = RobustRange(lo=lo, hi=hi) if lo is not None else None
+    return profile
+
+
+def _sentinel_df():
+    clean = [float(i) for i in range(20, 40)]  # 20 rows in 20..39
+    return pl.DataFrame({"v": clean + [9999.0, 9999.0, 9999.0, -999.0, -999.0, None, float("nan")],
+                         "g": (["a", "b"] * 14)[:27]})
+
+
+def test_histogram_clipped_to_robust_range_discloses_excluded_rows() -> None:
+    df = _sentinel_df()
+    profile = _sentinel_profile(df, lo=15.0, hi=45.0)
+    result = render_chart(df, ChartSpec(title="h", type="histogram", x="v", bins=5), profile)
+    bins = result["chart_data"]["bins"]
+    rng = result["display_range"]
+    assert rng == {
+        "lo": 15.0, "hi": 45.0, "excluded_below": 2, "excluded_above": 3,
+        "reason": "suspected sentinel values (9999 x3, -999 x2) lie outside the display range",
+    }
+    assert bins["edges"][0] == 15.0 and bins["edges"][-1] == 45.0 and len(bins["edges"]) == 6
+    valid_rows = 25  # 27 minus the null and the NaN
+    assert sum(bins["counts"]) + rng["excluded_below"] + rng["excluded_above"] == valid_rows
+    assert sum(bins["counts"]) == 20
+    assert "display_range" not in result["chart_data"]
+
+
+def test_histogram_clipped_grouped_shares_edges_and_invariant() -> None:
+    df = _sentinel_df()
+    profile = _sentinel_profile(df, lo=15.0, hi=45.0)
+    result = render_chart(df, ChartSpec(title="h", type="histogram", x="v", bins=5, group_by="g"), profile)
+    data = result["chart_data"]
+    assert all(s["edges"] == data["bins"]["edges"] for s in data["series"])
+    excluded = result["display_range"]["excluded_below"] + result["display_range"]["excluded_above"]
+    assert sum(sum(s["counts"]) for s in data["series"]) + excluded == 25
+
+
+def test_histogram_clean_column_has_no_display_range() -> None:
+    df = pl.DataFrame({"v": [float(i) for i in range(10)]})
+    result = _render(df, type="histogram", x="v", bins=5)
+    assert result["display_range"] is None
+    assert result["chart_data"]["bins"]["edges"][0] == 0.0 and result["chart_data"]["bins"]["edges"][-1] == 9.0
+
+
+def test_histogram_sentinels_without_range_or_degenerate_range_show_full_range() -> None:
+    df = _sentinel_df()
+    for kwargs in (dict(), dict(lo=30.0, hi=30.0), dict(lo=-2000.0, hi=20000.0)):
+        profile = _sentinel_profile(df, **kwargs)
+        result = render_chart(df, ChartSpec(title="h", type="histogram", x="v"), profile)
+        assert result["display_range"] is None
+        edges = result["chart_data"]["bins"]["edges"]
+        assert edges[0] == -999.0 and edges[-1] == 9999.0  # raw range, nothing hidden
+        assert sum(result["chart_data"]["bins"]["counts"]) == 25
+
+
+def test_render_api_response_carries_display_range_key(client: TestClient) -> None:
+    csv = "v\n" + "\n".join(f"{i * 1.5}" for i in range(40)) + "\n"
+    dataset_id = client.post("/api/datasets", files={"file": ("h.csv", csv.encode())}).json()["dataset_id"]
+    body = _post_render(client, dataset_id, type="histogram", x="v").json()
+    assert "display_range" in body and body["display_range"] is None
+    assert "NaN" not in str(body) and "Infinity" not in str(body)

@@ -26,10 +26,12 @@ export function ManualBuilder({ profile, onGenerate }: Props) {
   const cols = profile.columns;
   const options = useMemo(() => {
     const numeric = cols.filter((c) => c.semantic_type === "numeric");
+    // mirrors backend spec._is_numeric_y: numeric-backed categoricals are an
+    // acceptable y unless they are nominal codes (stage 9 #4 — never a quantity)
     const numericY = cols.filter(
       (c) =>
         c.semantic_type === "numeric" ||
-        (c.semantic_type === "categorical" && NUMERIC_DTYPE.test(c.original_dtype)),
+        (c.semantic_type === "categorical" && !c.nominal && NUMERIC_DTYPE.test(c.original_dtype)),
     );
     const datetime = cols.filter((c) => c.semantic_type === "datetime");
     const categorical = cols.filter(

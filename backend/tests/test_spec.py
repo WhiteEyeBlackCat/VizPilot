@@ -244,3 +244,60 @@ def test_id_and_text_columns_banned_as_axes(profile) -> None:
 def test_errors_are_collected_not_short_circuited(profile) -> None:
     errors = _errors(profile, type="scatter", x="city", y="note", aggregation="mean")
     assert len(errors) >= 3  # bad x type, banned y, forbidden aggregation
+
+
+# --- stage 9 (stage 4): nominal codes are labels, never a numeric y ----------
+
+
+@pytest.fixture(scope="module")
+def nominal_profile():
+    import random
+
+    rng = random.Random(107)
+    n = 400
+    p = _profile(
+        pl.DataFrame(
+            {
+                "code": [rng.randint(1, 8) for _ in range(n)],  # Int64, 8 labels -> categorical + nominal
+                "rating": [rng.randint(1, 5) for _ in range(n)],  # Int64 categorical, numeric-backed y allowed
+                "value": [rng.uniform(0, 1) for _ in range(n)],
+                "value2": [rng.uniform(0, 1) for _ in range(n)],
+                "ts": [datetime(2024, 1, 1) + timedelta(days=i) for i in range(n)],
+                "zip_code": [rng.randint(10_000, 99_999) for _ in range(n)],
+            }
+        )
+    )
+    types = {c.name: (c.semantic_type, c.nominal) for c in p.columns}
+    assert types["code"] == ("categorical", True) and types["rating"] == ("categorical", False)
+    assert types["zip_code"] == ("id", False)
+    return p
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        dict(type="bar", x="rating", y="code", aggregation="mean"),
+        dict(type="box", x="rating", y="code"),
+        dict(type="line", x="ts", y="code", aggregation="mean", time_granularity="month"),
+        dict(type="scatter", x="value", y="code"),
+    ],
+)
+def test_nominal_code_rejected_as_y(nominal_profile, kwargs) -> None:
+    _assert_error(nominal_profile, "must be numeric", **kwargs)
+
+
+def test_numeric_backed_rating_still_allowed_as_y(nominal_profile) -> None:
+    assert _errors(nominal_profile, type="bar", x="code", y="rating", aggregation="mean") == []
+
+
+def test_nominal_code_allowed_as_category_axis(nominal_profile) -> None:
+    assert _errors(nominal_profile, type="bar", x="code", aggregation="count") == []
+    assert _errors(nominal_profile, type="bar", x="code", y="value", aggregation="mean") == []
+    assert _errors(nominal_profile, type="box", x="code", y="value") == []
+    assert _errors(nominal_profile, type="scatter", x="value", y="value2", group_by="code") == []
+
+
+def test_id_typed_zip_code_banned_from_every_axis(nominal_profile) -> None:
+    _assert_error(nominal_profile, "cannot be used as a chart axis", type="histogram", x="zip_code")
+    _assert_error(nominal_profile, "cannot be used as a chart axis", type="line", x="ts", y="zip_code", aggregation="mean")
+    _assert_error(nominal_profile, "cannot be used as a chart axis", type="bar", x="code", y="zip_code", aggregation="mean")

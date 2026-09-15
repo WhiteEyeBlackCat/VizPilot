@@ -160,11 +160,29 @@ def _describe_column(col: ColumnProfile) -> str:
     if col.missing_ratio > 0:
         base += f", {col.missing_ratio:.0%} missing"
     base += ")"
+    if col.semantic_type == "id":
+        # stage 9 #4: identifiers are metadata only — never an axis
+        return f"{base}: identifier, not usable as a chart axis"
     if col.semantic_type == "numeric":
-        return f"{base}: mean={col.mean}, std={col.std}, min={col.min}, max={col.max}"
+        line = f"{base}: mean={col.mean}, std={col.std}, min={col.min}, max={col.max}"
+        # stage 9 #6 (decision B.7): quality flags, summary-level only — the
+        # distinct suspected values and a count, never rows
+        quality = getattr(col, "quality", None)
+        sentinels = getattr(quality, "suspected_sentinels", None) or []
+        if sentinels:
+            values = ", ".join(_format_number(s.value) for s in sorted(sentinels, key=lambda s: s.value))
+            line += f"; suspected sentinel values: {values} (mean/min/max are distorted)"
+        extreme = int(getattr(quality, "extreme_value_count", 0) or 0)
+        if extreme:
+            line += f"; {extreme} extreme values"
+        return line
     if col.semantic_type in ("categorical", "boolean"):
         top = ", ".join(str(t.value) for t in (col.top_values or [])[:3])
-        return f"{base}: {col.n_categories} categories, top: {top}"
+        summary = f"{base}: {col.n_categories} categories, top: {top}"
+        if getattr(col, "nominal", False):
+            # numeric-looking code: a label, never a quantity to average
+            summary += " (nominal code - not a quantity; never use as y or aggregate it)"
+        return summary
     if col.semantic_type == "datetime":
         return f"{base}: {col.min} to {col.max}, frequency={col.inferred_frequency}"
     return base
@@ -182,6 +200,10 @@ def _top_correlations(profile: DatasetProfile) -> list[tuple[str, str, float]]:
                 pairs.append((a, corr.columns[j], value))
     pairs.sort(key=lambda p: -abs(p[2]))
     return pairs[:MAX_CORR_PAIRS]
+
+
+def _format_number(value: float) -> str:
+    return str(int(value)) if float(value).is_integer() else f"{value:g}"
 
 
 def _truncate_cell(value: Any) -> Any:

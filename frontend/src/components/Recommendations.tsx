@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import { ApiError } from "../api";
-import type { ChartSpec, Insight, Recommendation, RecommendationsResponse, Tier } from "../types";
+import type { ChartSpec, Insight, Recommendation, RecommendationsResponse, Tier, Warning, WarningSeverity } from "../types";
 
 interface Props {
   recs: RecommendationsResponse | null;
@@ -15,11 +15,39 @@ const SUPPORTED_BADGE = {
   unverified: { label: "未驗證", className: "bg-slate-200 text-slate-500" },
 } as const;
 
+// stage 9 confidence warnings: severe = red, warning = amber, info = grey
+const WARNING_CHIP: Record<WarningSeverity, string> = {
+  severe: "bg-red-100 text-red-700",
+  warning: "bg-amber-100 text-amber-700",
+  info: "bg-slate-100 text-slate-500",
+};
+
 const TIER_SECTIONS: { tier: Tier; title: string }[] = [
   { tier: "top", title: "推薦重點" },
   { tier: "secondary", title: "次要" },
   { tier: "exploratory", title: "探索" },
 ];
+
+function warningChips(warnings: Warning[] | undefined) {
+  if (!warnings || warnings.length === 0) return null;
+  return (
+    <ul className="mb-1 flex flex-wrap gap-1">
+      {warnings.map((w, i) => (
+        <li key={i} className={`rounded px-1.5 py-0.5 text-xs ${WARNING_CHIP[w.severity] ?? WARNING_CHIP.info}`}>
+          {w.message}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function confidenceTitle(rec: Recommendation): string {
+  const c = rec.confidence!;
+  return (
+    `樣本 ${Math.round(c.sample_size * 100)}% · 缺失 ${Math.round(c.missingness * 100)}%` +
+    ` · 使用 ${c.n_effective}/${c.n_total} 列（${c.n_source === "exact" ? "精確" : "估計"}）`
+  );
+}
 
 function variables(spec: ChartSpec): string {
   const parts: string[] = [];
@@ -84,7 +112,15 @@ export function Recommendations({ recs, aiPending, onGenerate }: Props) {
           </span>
         </div>
         <p className="mb-1 flex-1 text-xs text-slate-600">{rec.spec.reason}</p>
-        <p className="mb-2 text-xs text-slate-400">{variables(rec.spec)}</p>
+        {warningChips(rec.warnings)}
+        <p className="mb-2 text-xs text-slate-400">
+          {variables(rec.spec)}
+          {rec.confidence && rec.confidence.overall < 1 && (
+            <span className="ml-2" title={confidenceTitle(rec)}>
+              信心 {Math.round(rec.confidence.overall * 100)}%
+            </span>
+          )}
+        </p>
         <button
           className="self-start rounded bg-blue-600 px-3 py-1 text-xs text-white hover:bg-blue-700 disabled:opacity-50"
           disabled={busyPriority !== null}
@@ -133,6 +169,14 @@ export function Recommendations({ recs, aiPending, onGenerate }: Props) {
         <div className="mb-3 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
           {recs.message}
         </div>
+      )}
+
+      {recs?.warnings && recs.warnings.length > 0 && (
+        <ul className="mb-3 space-y-1 rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+          {recs.warnings.map((w, i) => (
+            <li key={i}>{w.message}</li>
+          ))}
+        </ul>
       )}
 
       {recs && recs.insights.length > 0 && (

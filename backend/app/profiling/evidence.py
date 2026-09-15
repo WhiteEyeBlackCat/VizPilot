@@ -8,6 +8,7 @@ whole table stays in the millisecond-to-sub-second range.
 import math
 from datetime import timedelta
 from itertools import combinations
+from typing import NamedTuple
 
 import polars as pl
 
@@ -21,6 +22,7 @@ from .models import (
     TimeBucket,
     TimeEffect,
 )
+from .pairwise import pairwise_pearson
 
 MAX_CAT_CATEGORIES = 20
 MAX_CAT_COLUMNS = 15  # above this, keep the lowest-cardinality ones (critique #9)
@@ -56,29 +58,72 @@ def compute_evidence(
     )
 
 
+class EtaResult(NamedTuple):
+    eta_squared: float
+    n_groups: int
+    n_total: int
+    n_min: int
+    group_counts: dict[str, int]  # str(group value) -> valid rows; only non-empty groups
+
+
 def adjusted_eta_squared(df: pl.DataFrame, cat: str, num: str) -> tuple[float, int] | None:
     """1 - MS_within/MS_total, clipped at 0. Raw eta-squared is inflated on
     high-cardinality small samples (blocking #1), the df-corrected form is not.
-    Returns None when undefined (constant num, <2 groups, no within-group df)."""
-    data = df.select(cat, num).drop_nulls()
-    if data.schema[num].is_float():
-        data = data.filter(pl.col(num).is_finite())
-    n = data.height
-    k = data[cat].n_unique()
-    if k < 2 or n - k < 2:
-        return None
-    grand = data[num].mean()
-    ss_total = ((data[num] - grand) ** 2).sum()
-    if ss_total is None or ss_total <= 0:
-        return None
-    # maintain_order keeps the float summation order deterministic across runs
-    ss_within = (
-        data.group_by(cat, maintain_order=True)
-        .agg(((pl.col(num) - pl.col(num).mean()) ** 2).sum().alias("ss"))["ss"]
-        .sum()
-    )
-    adjusted = 1 - (ss_within / (n - k)) / (ss_total / (n - 1))
-    return max(float(adjusted), 0.0), k
+    Returns None when undefined (constant num, <2 groups, no within-group df).
+    Single-pair convenience wrapper over adjusted_eta_squared_many."""
+    result = adjusted_eta_squared_many(df, cat, [num])[num]
+    return None if result is None else (result.eta_squared, result.n_groups)
+
+
+def adjusted_eta_squared_many(
+    df: pl.DataFrame, cat: str, nums: list[str]
+) -> dict[str, EtaResult | None]:
+    """adjusted_eta_squared for every num against one cat in two polars
+    executions instead of one per pair (stage 9 #1: 180 pairs cost 3.9s).
+
+    Row set per num is unchanged: cat non-null, num non-null and finite —
+    non-finite floats are masked to null so mean/sum/count skip them exactly
+    like the former drop_nulls + is_finite filter. SS_total stays two-pass
+    (grand mean first, then squared deviations) so the arithmetic matches the
+    single-pair form to floating tolerance; maintain_order keeps the group
+    summation order deterministic."""
+    if not nums:
+        return {}
+    exprs = []
+    for num in nums:
+        col = pl.col(num)
+        if df.schema[num].is_float():
+            col = pl.when(col.is_finite()).then(col).otherwise(None)
+        exprs.append(col.alias(num))
+    data = df.filter(pl.col(cat).is_not_null()).select(pl.col(cat), *exprs)
+    grand = data.select(pl.col(num).mean().alias(num) for num in nums).row(0, named=True)
+    aggs = []
+    for num in nums:
+        mean = grand[num]
+        aggs.append(pl.col(num).count().alias(f"n:{num}"))
+        aggs.append(((pl.col(num) - pl.col(num).mean()) ** 2).sum().alias(f"ssw:{num}"))
+        aggs.append(((pl.col(num) - pl.lit(mean)) ** 2).sum().alias(f"sst:{num}"))
+    groups = data.group_by(cat, maintain_order=True).agg(aggs)
+    keys = [str(key) for key in groups[cat].to_list()]  # same labelling as render/SlopeHet
+
+    results: dict[str, EtaResult | None] = {}
+    for num in nums:
+        counts = groups[f"n:{num}"]
+        non_empty = counts.filter(counts > 0)
+        k = len(non_empty)
+        n = int(counts.sum())
+        if grand[num] is None or k < 2 or n - k < 2:
+            results[num] = None
+            continue
+        ss_total = groups[f"sst:{num}"].sum()
+        if ss_total is None or ss_total <= 0:
+            results[num] = None
+            continue
+        ss_within = groups[f"ssw:{num}"].sum()
+        adjusted = 1 - (ss_within / (n - k)) / (ss_total / (n - 1))
+        group_counts = {key: int(c) for key, c in zip(keys, counts.to_list()) if c > 0}
+        results[num] = EtaResult(max(float(adjusted), 0.0), k, n, int(non_empty.min()), group_counts)
+    return results
 
 
 def _eligible_cats(columns: list[ColumnProfile]) -> list[ColumnProfile]:
@@ -97,12 +142,22 @@ def _cat_num_effects(
     df: pl.DataFrame, cats: list[ColumnProfile], nums: list[ColumnProfile]
 ) -> list[CatNumEffect]:
     effects = []
+    num_names = [num.name for num in nums]
     for cat in cats:
-        for num in nums:
-            result = adjusted_eta_squared(df, cat.name, num.name)
+        results = adjusted_eta_squared_many(df, cat.name, num_names)
+        for num in num_names:
+            result = results[num]
             if result is not None:
                 effects.append(
-                    CatNumEffect(cat=cat.name, num=num.name, eta_squared=result[0], n_groups=result[1])
+                    CatNumEffect(
+                        cat=cat.name,
+                        num=num,
+                        eta_squared=result.eta_squared,
+                        n_groups=result.n_groups,
+                        n_total=result.n_total,
+                        n_min=result.n_min,
+                        group_counts=result.group_counts,
+                    )
                 )
     return effects
 
@@ -143,24 +198,35 @@ def _time_effects(
         span = _datetime_span_days(df[dt.name])
         if span is None:
             continue
-        for num in nums:
-            # coarsen when the finer bucket has no within-group df
-            # (e.g. one observation per day)
-            bucket: TimeBucket | None = span_bucket(span)
-            while bucket is not None:
-                bucketed = df.select(
-                    pl.col(dt.name).dt.truncate(_BUCKET_TRUNC[bucket]).alias("_bucket"),
-                    pl.col(num.name),
+        # one batched pass per bucket; a num whose finer bucket has no
+        # within-group df (e.g. one observation per day) is retried at the
+        # coarser bucket, as before — only the nums still pending are retried
+        found: dict[str, TimeEffect] = {}
+        pending = [num.name for num in nums]
+        bucket: TimeBucket | None = span_bucket(span)
+        while bucket is not None and pending:
+            bucketed = df.select(
+                pl.col(dt.name).dt.truncate(_BUCKET_TRUNC[bucket]).alias("_bucket"),
+                *[pl.col(num) for num in pending],
+            )
+            results = adjusted_eta_squared_many(bucketed, "_bucket", pending)
+            still_pending = []
+            for num in pending:
+                result = results[num]
+                if result is None:
+                    still_pending.append(num)
+                    continue
+                found[num] = TimeEffect(
+                    datetime_col=dt.name,
+                    num=num,
+                    eta_squared=result.eta_squared,
+                    bucket=bucket,
+                    n_total=result.n_total,
+                    n_min=result.n_min,
                 )
-                result = adjusted_eta_squared(bucketed, "_bucket", num.name)
-                if result is not None:
-                    effects.append(
-                        TimeEffect(
-                            datetime_col=dt.name, num=num.name, eta_squared=result[0], bucket=bucket
-                        )
-                    )
-                    break
-                bucket = _COARSER[bucket]
+            pending = still_pending
+            bucket = _COARSER[bucket]
+        effects += [found[num.name] for num in nums if num.name in found]  # stable num order
     return effects
 
 
@@ -172,7 +238,8 @@ def _spearman_matrix(df: pl.DataFrame, correlations: Correlations | None) -> Cor
     pl.corr(method="spearman") re-ranks 100k rows twice per pair (measured
     5.2s at 100k x 30 columns), so the rank-once approximation is used —
     exact without nulls, and ranks shift only marginally when pairwise-null
-    rows are dropped."""
+    rows are dropped. The pairwise Pearson itself is the single-execution
+    helper shared with the profiler (stage 9 #1)."""
     if correlations is None:
         return None
     cols = correlations.columns
@@ -184,15 +251,10 @@ def _spearman_matrix(df: pl.DataFrame, correlations: Correlations | None) -> Cor
         .alias(c)
         for c in cols
     )
-    n = len(cols)
-    matrix: list[list[float | None]] = [[None] * n for _ in range(n)]
-    for i in range(n):
-        matrix[i][i] = 1.0
-        for j in range(i + 1, n):
-            pair = ranked.select(cols[i], cols[j]).drop_nulls()
-            value = pair.select(pl.corr(cols[i], cols[j])).item() if pair.height >= 2 else None
-            matrix[i][j] = matrix[j][i] = _finite(value)
-    return Correlations(columns=cols, matrix=matrix, truncated=correlations.truncated)
+    matrix, counts = pairwise_pearson(ranked, cols)
+    return Correlations(
+        columns=cols, matrix=matrix, truncated=correlations.truncated, pair_counts=counts
+    )
 
 
 # --- interactions -----------------------------------------------------------
@@ -240,16 +302,25 @@ def _interactions(
     effects = []
     for label1, label2 in pairs:
         for num in top_nums:
-            strength = _interaction_strength(frame, label1, label2, num)
-            if strength is not None:
+            result = _interaction_effect(frame, label1, label2, num)
+            if result is not None:
+                strength, n_total = result
                 effects.append(
-                    InteractionEffect(cat1=label1, cat2=label2, num=num, strength=strength)
+                    InteractionEffect(
+                        cat1=label1, cat2=label2, num=num, strength=strength, n_total=n_total
+                    )
                 )
     return effects
 
 
 def _interaction_strength(df: pl.DataFrame, f1: str, f2: str, num: str) -> float | None:
-    """Additive-prediction residual share of variance.
+    result = _interaction_effect(df, f1, f2, num)
+    return None if result is None else result[0]
+
+
+def _interaction_effect(df: pl.DataFrame, f1: str, f2: str, num: str) -> tuple[float, int] | None:
+    """Additive-prediction residual share of variance, with the number of
+    rows in the kept cells.
 
     Marginal effects use UNWEIGHTED means of cell means: with raw weighted
     marginals, an unbalanced but purely additive design produces a large fake
@@ -295,7 +366,7 @@ def _interaction_strength(df: pl.DataFrame, f1: str, f2: str, num: str) -> float
         w * (m - (row_mean[i] + col_mean[j] - grand)) ** 2
         for i, j, w, m in kept.select(f1, f2, "_n", "_m").iter_rows()
     )
-    return float(ss_interaction / ss_total)
+    return float(ss_interaction / ss_total), data.height
 
 
 # --- slope heterogeneity ----------------------------------------------------

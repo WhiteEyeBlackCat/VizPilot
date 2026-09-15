@@ -13,12 +13,15 @@ from .models import (
     PROFILE_VERSION,
     CastParams,
     ColumnProfile,
+    ColumnQuality,
     Correlations,
     DatasetProfile,
     Frequency,
     TopValue,
 )
-from .types import SAMPLE_SEED, apply_casts, infer_semantic_type
+from .pairwise import pairwise_pearson
+from .quality import robust_quality
+from .types import SAMPLE_SEED, apply_casts, infer_column, missing_token_count
 
 MAX_CORRELATION_COLUMNS = 30
 SAMPLE_ROWS_N = 5
@@ -29,13 +32,13 @@ def profile_dataset(df: pl.DataFrame, dataset_id: str, sample_threshold: int) ->
     sampled = n_rows > sample_threshold
     sample = df.sample(sample_threshold, seed=SAMPLE_SEED) if sampled else df
 
-    inferred = {name: infer_semantic_type(sample[name]) for name in df.columns}
-    casts = {name: params for name, (_, params) in inferred.items() if params is not None}
+    inferred = {name: infer_column(sample[name]) for name in df.columns}
+    casts = {name: params for name, (_, params, _) in inferred.items() if params is not None}
     casted = apply_casts(sample, casts)
 
     columns = [
-        _column_profile(name, df[name], casted[name], sem, casts.get(name), n_rows)
-        for name, (sem, _) in inferred.items()
+        _column_profile(name, df[name], sample[name], casted[name], sem, casts.get(name), n_rows, nominal)
+        for name, (sem, _, nominal) in inferred.items()
     ]
     numeric_cols = [c.name for c in columns if c.semantic_type == "numeric"]
     correlations = _correlations(casted, numeric_cols)
@@ -45,6 +48,7 @@ def profile_dataset(df: pl.DataFrame, dataset_id: str, sample_threshold: int) ->
         n_rows=n_rows,
         n_cols=df.width,
         sampled=sampled,
+        profiled_rows=casted.height,
         columns=columns,
         correlations=correlations,
         evidence=compute_evidence(casted, columns, correlations),
@@ -55,10 +59,12 @@ def profile_dataset(df: pl.DataFrame, dataset_id: str, sample_threshold: int) ->
 def _column_profile(
     name: str,
     full: pl.Series,
+    raw_sample: pl.Series,
     casted: pl.Series,
     semantic_type: str,
     cast_params: CastParams | None,
     n_rows: int,
+    nominal: bool = False,
 ) -> ColumnProfile:
     missing_count = full.null_count()
     non_null = casted.drop_nulls()
@@ -70,6 +76,8 @@ def _column_profile(
         missing_ratio=missing_count / n_rows if n_rows else 0.0,
         unique_count=non_null.n_unique(),
         cast_params=cast_params,
+        nominal=nominal,
+        quality=_column_quality(raw_sample, casted, cast_params, semantic_type == "numeric"),
     )
     if semantic_type == "numeric":
         values = non_null.filter(non_null.is_finite()) if non_null.dtype.is_float() else non_null
@@ -97,6 +105,39 @@ def _column_profile(
     return profile
 
 
+def _column_quality(
+    raw_sample: pl.Series, casted: pl.Series, cast_params: CastParams | None, numeric: bool = False
+) -> ColumnQuality:
+    """Sample-level validity counts for every column (stage 9 #2/#3/#5). Cast
+    failures show up as nulls the raw sample did not have; on the numeric cast
+    path the known missing tokens among them are reported separately; NaN/inf
+    are counted on the casted column. Numeric columns also get the robust
+    block (stage 9 #6) computed on their finite values."""
+    profiled_rows = len(casted)
+    missing = raw_sample.null_count()
+    cast_failures = casted.null_count() - missing  # >= 0: casts only ever add nulls
+    tokens = 0
+    if cast_params is not None and cast_params.target == "numeric" and raw_sample.dtype == pl.String:
+        tokens = missing_token_count(raw_sample)
+    non_null = casted.drop_nulls()
+    non_finite = int((~non_null.is_finite()).sum()) if non_null.dtype.is_float() else 0
+    invalid = cast_failures - tokens + non_finite
+    valid = profiled_rows - missing - tokens - invalid
+    robust = {}
+    if numeric:
+        finite = non_null.filter(non_null.is_finite()) if non_null.dtype.is_float() else non_null
+        robust = robust_quality(finite)
+    return ColumnQuality(
+        profiled_rows=profiled_rows,
+        missing_count=missing,
+        missing_token_count=tokens,
+        invalid_count=invalid,
+        valid_count=valid,
+        valid_ratio=valid / profiled_rows if profiled_rows else 0.0,
+        **robust,
+    )
+
+
 def _infer_frequency(non_null: pl.Series) -> Frequency:
     # unique() first: long-format data repeats each timestamp per group
     distinct = non_null.unique()
@@ -120,20 +161,8 @@ def _correlations(casted: pl.DataFrame, numeric_cols: list[str]) -> Correlations
         return None
     truncated = len(numeric_cols) > MAX_CORRELATION_COLUMNS
     cols = numeric_cols[:MAX_CORRELATION_COLUMNS]
-    n = len(cols)
-    matrix: list[list[float | None]] = [[None] * n for _ in range(n)]
-    for i in range(n):
-        matrix[i][i] = 1.0
-        for j in range(i + 1, n):
-            # per-pair pl.corr on pairwise non-null rows (df.corr needs numpy);
-            # NaN/inf rows are dropped too, matching the numeric-stats treatment
-            pair = casted.select(cols[i], cols[j]).drop_nulls()
-            for name in (cols[i], cols[j]):
-                if pair.schema[name].is_float():
-                    pair = pair.filter(pl.col(name).is_finite())
-            value = pair.select(pl.corr(cols[i], cols[j])).item() if pair.height >= 2 else None
-            matrix[i][j] = matrix[j][i] = _finite(value)
-    return Correlations(columns=cols, matrix=matrix, truncated=truncated)
+    matrix, counts = pairwise_pearson(casted, cols)
+    return Correlations(columns=cols, matrix=matrix, truncated=truncated, pair_counts=counts)
 
 
 def _finite(value: Any) -> float | None:

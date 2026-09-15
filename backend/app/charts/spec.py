@@ -40,9 +40,13 @@ class ChartSpec(BaseModel):
 
 
 def _is_numeric_y(col: ColumnProfile) -> bool:
-    # rule 5: numeric-backed categorical (e.g. 1-5 rating) is an acceptable y
+    # rule 5: numeric-backed categorical (e.g. 1-5 rating) is an acceptable y —
+    # unless its numbers are labels (nominal codes, stage 9 #4): averaging a
+    # product code is meaningless
     return col.semantic_type == "numeric" or (
-        col.semantic_type == "categorical" and bool(_NUMERIC_DTYPE_RE.match(col.original_dtype))
+        col.semantic_type == "categorical"
+        and not col.nominal
+        and bool(_NUMERIC_DTYPE_RE.match(col.original_dtype))
     )
 
 

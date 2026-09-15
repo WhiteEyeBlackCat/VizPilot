@@ -211,3 +211,45 @@ def test_fenced_json_with_trailing_prose_parses(profile, candidates) -> None:
         profile, candidates
     )
     assert resp.insights == ["a"]
+
+
+def test_prompt_marks_nominal_and_id_columns() -> None:
+    # stage 9 #4: the LLM must not treat a numeric-looking code as a quantity
+    # nor propose an identifier as an axis; only metadata is added, no values
+    df = pl.DataFrame(
+        {
+            "user_id": [f"u{i:03d}" for i in range(30)],
+            "code": [101, 102, 103] * 10,
+            "amount": [float(i) for i in range(30)],
+        }
+    )
+    profile = profile_dataset(df, "0" * 32, BIG)
+    code = next(c for c in profile.columns if c.name == "code")
+    code.semantic_type, code.nominal, code.n_categories = "categorical", True, 3
+    _, user = build_messages(profile, [], include_sample_rows=False)
+    content = user["content"]
+    code_line = next(line for line in content.splitlines() if line.startswith("- code"))
+    assert "nominal code" in code_line and "not a quantity" in code_line
+    id_line = next(line for line in content.splitlines() if line.startswith("- user_id"))
+    assert "identifier" in id_line and "not usable as a chart axis" in id_line
+    amount_line = next(line for line in content.splitlines() if line.startswith("- amount"))
+    assert "nominal" not in amount_line and "mean=" in amount_line
+
+
+def test_prompt_notes_suspected_sentinels_and_extremes() -> None:
+    from app.profiling.models import SentinelCandidate
+
+    df = pl.DataFrame({"t": [float(i) for i in range(30)], "clean": [float(i) for i in range(30)]})
+    profile = profile_dataset(df, "0" * 32, BIG)
+    t = next(c for c in profile.columns if c.name == "t")
+    t.quality.suspected_sentinels = [
+        SentinelCandidate(value=9999.0, count=3, signals=["extreme"]),
+        SentinelCandidate(value=-999.0, count=2, signals=["extreme"]),
+    ]
+    t.quality.extreme_value_count = 4
+    _, user = build_messages(profile, [], include_sample_rows=False)
+    lines = user["content"].splitlines()
+    t_line = next(line for line in lines if line.startswith("- t "))
+    assert "suspected sentinel values: -999, 9999" in t_line and "4 extreme values" in t_line
+    clean_line = next(line for line in lines if line.startswith("- clean"))
+    assert "sentinel" not in clean_line and "extreme" not in clean_line

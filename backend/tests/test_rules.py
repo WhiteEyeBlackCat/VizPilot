@@ -234,11 +234,15 @@ def test_recommendations_endpoint_shape(client: TestClient) -> None:
     resp = client.get(f"/api/datasets/{dataset_id}/recommendations")
     assert resp.status_code == 200
     body = resp.json()
-    assert set(body) == {"charts", "insights", "message"}
-    assert body["insights"] == [] and body["message"] is None
+    # exact key sets: the response shape is the frontend contract (stage 9
+    # added the additive `warnings` / `confidence` fields)
+    assert set(body) == {"charts", "insights", "message", "warnings"}
+    assert body["insights"] == [] and body["message"] is None and body["warnings"] == []
     assert len(body["charts"]) >= 3
     first = body["charts"][0]
-    assert set(first) == {"spec", "score", "source", "tier"}
+    assert set(first) == {"spec", "score", "source", "tier", "confidence", "warnings"}
+    assert first["confidence"]["n_source"] in ("exact", "estimated")
+    assert "tier_cap" not in first
     assert first["source"] == "rules"
     assert first["tier"] in ("top", "secondary", "exploratory")
     assert first["spec"]["priority"] == 1
@@ -257,3 +261,31 @@ def test_recommendations_empty_with_message(client: TestClient) -> None:
     body = client.get(f"/api/datasets/{dataset_id}/recommendations").json()
     assert body["charts"] == []
     assert isinstance(body["message"], str) and body["message"]
+
+
+# --- stage 9 #6: the histogram skew bonus is not earned by suspected sentinels
+
+
+def test_histogram_skew_bonus_not_earned_by_sentinels() -> None:
+    import random
+
+    from app.charts.rules import evaluate_llm_spec
+    from app.charts.spec import ChartSpec
+    from app.profiling.models import SentinelCandidate
+
+    rng = random.Random(41)
+    values = [rng.gauss(25, 2) for _ in range(585)] + [9999.0] * 15  # skew manufactured by a sentinel
+    genuine = [rng.lognormvariate(0, 1) for _ in range(600)]  # genuinely skewed
+    profile = _profile(pl.DataFrame({"t": values, "rev": genuine}))
+    t = next(c for c in profile.columns if c.name == "t")
+    assert t.skewness is not None and abs(t.skewness) > 1
+    t.quality.suspected_sentinels = [SentinelCandidate(value=9999.0, count=15, signals=["extreme", "repeated", "pattern"])]
+    recs = recommend_charts(profile)
+    hist_t = next(r for r in recs if r.spec.type == "histogram" and r.spec.x == "t")
+    hist_rev = next(r for r in recs if r.spec.type == "histogram" and r.spec.x == "rev")
+    # compare base scores: the confidence layer may also discount either
+    # column (rev's heavy tail is a legitimate extreme_value case)
+    assert hist_t.score / hist_t.confidence.overall == pytest.approx(0.5)  # no bonus
+    assert hist_rev.score / hist_rev.confidence.overall == pytest.approx(0.55)  # genuine skew keeps it
+    assert evaluate_llm_spec(ChartSpec(title="h", type="histogram", x="t"), profile)[0] == 0.5
+    assert evaluate_llm_spec(ChartSpec(title="h", type="histogram", x="rev"), profile)[0] == 0.55

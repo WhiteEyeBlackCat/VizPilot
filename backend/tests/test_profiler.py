@@ -301,3 +301,304 @@ def test_profile_cache_file_and_dataset_listing(client: TestClient, settings) ->
     # profile cache files must not leak into the dataset listing
     listed = client.get("/api/datasets").json()
     assert [m["dataset_id"] for m in listed] == [dataset_id]
+
+
+# --- stage 9: single-execution pairwise correlations --------------------------
+
+
+def _reference_pairwise(df: pl.DataFrame, cols: list[str]) -> list[list[float | None]]:
+    """The pre-stage-9 per-pair algorithm (select/drop_nulls/filter/corr),
+    kept here as the semantic oracle for the batched implementation."""
+    n = len(cols)
+    matrix: list[list[float | None]] = [[None] * n for _ in range(n)]
+    for i in range(n):
+        matrix[i][i] = 1.0
+        for j in range(i + 1, n):
+            pair = df.select(cols[i], cols[j]).drop_nulls()
+            for name in (cols[i], cols[j]):
+                if pair.schema[name].is_float():
+                    pair = pair.filter(pl.col(name).is_finite())
+            value = pair.select(pl.corr(cols[i], cols[j])).item() if pair.height >= 2 else None
+            if value is not None:
+                value = float(value)
+                value = value if value == value and abs(value) != float("inf") else None
+            matrix[i][j] = matrix[j][i] = value
+    return matrix
+
+
+def _dirty_numeric_df() -> pl.DataFrame:
+    import random
+
+    rng = random.Random(9)
+    n = 300
+
+    def noisy(scale):
+        out = []
+        for i in range(n):
+            r = rng.random()
+            if r < 0.05:
+                out.append(None)
+            elif r < 0.08:
+                out.append(float("nan"))
+            elif r < 0.10:
+                out.append(float("inf"))
+            else:
+                out.append(scale * i + rng.gauss(0, 20))
+        return out
+
+    return pl.DataFrame(
+        {
+            "a": noisy(1.0),
+            "b": noisy(-2.0),
+            "c": [rng.gauss(0, 1) for _ in range(n)],
+            "i": [i if i % 7 else None for i in range(n)],  # Int64 with nulls
+            "k": [i * 3 for i in range(n)],  # Int64, no nulls
+            "const": [5.0] * n,
+            "sparse": [float(i) if i < 2 else None for i in range(n)],  # only 2 valid rows
+        }
+    )
+
+
+def _assert_matrix_close(actual, expected) -> None:
+    for row_a, row_e in zip(actual, expected):
+        for a, e in zip(row_a, row_e):
+            if e is None:
+                assert a is None
+            else:
+                assert a == pytest.approx(e, abs=1e-12)
+
+
+def test_pairwise_pearson_matches_single_pair_reference() -> None:
+    from app.profiling.pairwise import pairwise_pearson
+
+    df = _dirty_numeric_df()
+    cols = df.columns
+    matrix, counts = pairwise_pearson(df, cols)
+    _assert_matrix_close(matrix, _reference_pairwise(df, cols))
+    # symmetric, unit diagonal
+    for i in range(len(cols)):
+        assert matrix[i][i] == 1.0
+        for j in range(len(cols)):
+            assert matrix[i][j] == matrix[j][i] and counts[i][j] == counts[j][i]
+
+
+def test_pairwise_pearson_counts_are_pairwise_complete() -> None:
+    from app.profiling.pairwise import pairwise_pearson
+
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, None, float("nan"), 6.0],
+            "y": [1.0, None, 3.0, 4.0, 5.0, float("inf")],
+            "z": [1, 2, 3, 4, 5, 6],
+        }
+    )
+    matrix, counts = pairwise_pearson(df, ["x", "y", "z"])
+    assert counts[0][0] == 4 and counts[1][1] == 4 and counts[2][2] == 6  # valid rows per column
+    assert counts[0][1] == 2  # rows 0 and 2 only
+    assert counts[0][2] == 4 and counts[1][2] == 4
+    assert matrix[0][1] == pytest.approx(1.0)  # (1,1),(3,3)
+    assert matrix[0][2] == pytest.approx(1.0)
+
+
+def test_pairwise_pearson_sparse_and_constant_pairs_are_none() -> None:
+    from app.profiling.pairwise import pairwise_pearson
+
+    df = pl.DataFrame({"a": [1.0, 2.0, 3.0], "one": [1.0, None, None], "c": [2.0, 2.0, 2.0]})
+    matrix, counts = pairwise_pearson(df, ["a", "one", "c"])
+    assert counts[0][1] == 1 and matrix[0][1] is None  # < 2 rows
+    assert counts[0][2] == 3 and matrix[0][2] is None  # constant -> NaN -> None
+
+
+def test_profile_correlations_carry_pair_counts() -> None:
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, None], "y": [2.0, 4.0, 6.0, None, 10.0]})
+    corr = _profile(df).correlations
+    assert corr.pair_counts == [[4, 3], [3, 4]]
+    assert corr.matrix[0][1] == pytest.approx(1.0)
+    profile = _profile(pl.DataFrame({"x": [1.0, 2.0], "c": ["a", "b"]}))
+    assert profile.profiled_rows == 2 and profile.correlations is None
+
+
+def test_correlations_use_a_bounded_number_of_executions(monkeypatch: pytest.MonkeyPatch) -> None:
+    # stage 9 #1 regression: 40 numeric columns used to cost 435 per-pair
+    # dataframe executions; the matrix must now come from one select
+    calls = {"select": 0, "collect": 0}
+    real_select = pl.DataFrame.select
+    real_collect = pl.LazyFrame.collect
+
+    def counting_select(self, *args, **kwargs):
+        calls["select"] += 1
+        return real_select(self, *args, **kwargs)
+
+    def counting_collect(self, *args, **kwargs):
+        calls["collect"] += 1
+        return real_collect(self, *args, **kwargs)
+
+    monkeypatch.setattr(pl.DataFrame, "select", counting_select)
+    monkeypatch.setattr(pl.LazyFrame, "collect", counting_collect)
+    data = {f"c{i:02d}": [float((i + 1) * j % 17) for j in range(50)] for i in range(40)}
+    corr = profiler_module._correlations(pl.DataFrame(data), list(data))
+    assert corr is not None and corr.truncated and len(corr.columns) == 30
+    assert calls["select"] + calls["collect"] <= 2
+
+
+def test_sampled_profile_counts_are_sample_level() -> None:
+    df = pl.DataFrame({"v": [float(i) for i in range(200)], "w": [float(i * i) for i in range(200)]})
+    profile = profile_dataset(df, "0" * 32, sample_threshold=50)
+    assert profile.sampled and profile.n_rows == 200 and profile.profiled_rows == 50
+    assert profile.correlations.pair_counts[0][1] == 50
+
+
+# --- stage 9 (stage 2): per-column quality counts ---------------------------
+
+
+def test_every_column_has_quality_with_consistent_counts() -> None:
+    df = pl.DataFrame(
+        {
+            "num": [1.0, None, float("nan"), float("inf"), 5.0, 6.0],
+            "ints": [1, 2, None, 4, 5, 6],
+            "cat": ["a", "b", None, "a", "b", "a"],
+            "flag": [True, False, True, None, True, False],
+            "empty": pl.Series([None] * 6, dtype=pl.String),
+            "text": [f"a long free-form sentence with number {i} in it" for i in range(6)],
+        }
+    )
+    profile = _profile(df)
+    assert profile.profiled_rows == 6
+    quality = {c.name: c.quality for c in profile.columns}
+    assert all(q is not None for q in quality.values())
+    for q in quality.values():
+        assert q.profiled_rows == 6
+        assert q.valid_count == 6 - q.missing_count - q.missing_token_count - q.invalid_count
+        assert q.valid_ratio == pytest.approx(q.valid_count / 6)
+        assert q.missing_token_count == 0  # attributed in stage 3
+        assert q.q1 is None and q.robust_range is None and q.suspected_sentinels == []
+
+    assert (quality["num"].missing_count, quality["num"].invalid_count, quality["num"].valid_count) == (1, 2, 3)
+    assert (quality["ints"].missing_count, quality["ints"].invalid_count) == (1, 0)
+    assert (quality["cat"].missing_count, quality["cat"].valid_count) == (1, 5)
+    assert (quality["flag"].missing_count, quality["flag"].valid_count) == (1, 5)
+    assert (quality["empty"].missing_count, quality["empty"].valid_count, quality["empty"].valid_ratio) == (6, 0, 0.0)
+    assert quality["text"].valid_count == 6
+
+
+def test_quality_is_sample_level_when_sampled() -> None:
+    df = pl.DataFrame({"v": [float(i) if i % 4 else None for i in range(400)]})
+    profile = profile_dataset(df, "0" * 32, sample_threshold=100)
+    q = _col(profile, "v").quality
+    assert profile.sampled and q.profiled_rows == 100
+    assert q.missing_count + q.valid_count == 100
+    assert _col(profile, "v").missing_count == 100  # full-table raw nulls
+
+
+def test_quality_and_nominal_survive_json_roundtrip() -> None:
+    df = pl.DataFrame({"v": [1.0, None, 3.0], "c": ["x", "y", "x"]})
+    profile = _profile(df)
+    assert all(not c.nominal for c in profile.columns)
+    reloaded = DatasetProfile.model_validate_json(profile.model_dump_json())
+    assert reloaded == profile
+    assert reloaded.profile_version == PROFILE_VERSION
+
+
+def test_quality_counts_datetime_parse_failures_as_invalid() -> None:
+    # 10 parseable of 11 non-null (> 90% probe ratio) -> datetime; the one
+    # unparseable value becomes a null the raw column did not have
+    values = [f"2024-01-{i + 1:02d}" for i in range(10)] + ["bogus", None]
+    profile = _profile(pl.DataFrame({"when": values}))
+    col = _col(profile, "when")
+    assert col.semantic_type == "datetime"
+    assert (col.quality.missing_count, col.quality.invalid_count, col.quality.valid_count) == (1, 1, 10)
+    assert col.missing_count == 1  # raw nulls only
+
+
+def test_quality_counts_numeric_cast_failures_as_invalid() -> None:
+    # 58 of 59 non-token strings parse -> numeric; "n/a" is a known missing
+    # token (stage 3), "five" fails the numeric gate: both become nulls the
+    # raw column did not have, attributed to their own counters
+    values = [f"{i:,}" for i in range(1000, 1058)] + ["n/a", "five", None]
+    profile = _profile(pl.DataFrame({"amount": values}))
+    col = _col(profile, "amount")
+    assert col.semantic_type == "numeric" and col.cast_params.thousands
+    q = col.quality
+    assert (q.missing_count, q.missing_token_count, q.invalid_count, q.valid_count) == (1, 1, 1, 58)
+    assert col.quality.valid_ratio == pytest.approx(58 / 61)
+    assert col.missing_count == 1  # raw full-table nulls keep their meaning
+
+
+# --- stage 9 (stage 3): dirty numeric through the profile and render API ------
+
+# 25 values per cycle: 2 missing tokens, 1 invalid, 22 numeric (22/23 non-token
+# values parse, above the 0.95 gate share) -> numeric, 4 cycles = 100 rows
+DIRTY_PRICE_VALUES = [
+    "$1,234.50", "$899", " 99 ", "N/A", "1234.5", "$2,000", "42", "unknown", "7.25", "$15", "16",
+    "17.5", "$18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "12kg",
+] * 4
+DIRTY_PRICE_CSV = (
+    "id,price\n"
+    + "\n".join(f'{i},"{v}"' for i, v in enumerate(DIRTY_PRICE_VALUES))
+    + "\n"
+)
+
+
+def test_profile_attributes_tokens_and_invalids_for_price() -> None:
+    values = DIRTY_PRICE_VALUES
+    profile = _profile(pl.DataFrame({"price": values}))
+    col = _col(profile, "price")
+    assert col.semantic_type == "numeric"
+    assert col.cast_params.currency and col.cast_params.thousands and not col.cast_params.percent
+    q = col.quality
+    assert (q.missing_count, q.missing_token_count, q.invalid_count, q.valid_count) == (0, 8, 4, 88)
+    assert q.valid_ratio == pytest.approx(0.88)
+    assert col.missing_count == 0  # raw nulls only
+    assert col.max == 2000.0 and col.min == 7.25
+    # replay on the full frame reproduces the probe's nulls
+    replayed = apply_semantic_casts(pl.DataFrame({"price": values}), profile)["price"]
+    assert replayed.null_count() == q.missing_token_count + q.invalid_count
+
+
+def test_render_histogram_over_dirty_price_via_api(client: TestClient) -> None:
+    dataset_id = client.post(
+        "/api/datasets", files={"file": ("dirty.csv", DIRTY_PRICE_CSV.encode())}
+    ).json()["dataset_id"]
+    profile = client.get(f"/api/datasets/{dataset_id}/profile").json()
+    price = next(c for c in profile["columns"] if c["name"] == "price")
+    assert price["semantic_type"] == "numeric"
+    assert price["quality"]["missing_token_count"] == 8 and price["quality"]["invalid_count"] == 4
+    resp = client.post(
+        "/api/charts/render",
+        json={"dataset_id": dataset_id, "spec": {"title": "t", "type": "histogram", "x": "price"}},
+    )
+    assert resp.status_code == 200, resp.text
+    bins = resp.json()["chart_data"]["bins"]
+    assert sum(bins["counts"]) == 88  # tokens and invalid values are not binned
+    assert bins["edges"][0] == pytest.approx(7.25) and bins["edges"][-1] == pytest.approx(2000.0)
+
+
+# --- stage 9 (stage 4): nominal / id in the profile --------------------------
+
+
+def test_profile_marks_nominal_codes_and_keeps_id_metadata() -> None:
+    import random
+
+    rng = random.Random(103)
+    n = 500
+    df = pl.DataFrame(
+        {
+            "user_id": [rng.randint(1, 60) for _ in range(n)],
+            "code": [rng.randint(1, 49) for _ in range(n)],
+            "zip_code": [rng.randint(10_000, 99_999) for _ in range(n)],
+            "amount": [rng.uniform(1, 100) for _ in range(n)],
+        }
+    )
+    profile = _profile(df)
+    code = _col(profile, "code")
+    assert code.semantic_type == "categorical" and code.nominal
+    assert code.n_categories == 49 and code.top_values  # categorical stats present
+    zip_code = _col(profile, "zip_code")
+    assert zip_code.semantic_type == "id" and not zip_code.nominal
+    assert zip_code.unique_count > 400 and zip_code.missing_ratio == 0.0  # metadata retained
+    assert zip_code.quality is not None and zip_code.quality.valid_count == n
+    assert _col(profile, "user_id").semantic_type == "id"
+    assert profile.correlations is None  # amount is the only numeric column left
+    assert all(c.name not in ("code", "zip_code", "user_id") for c in profile.columns if c.semantic_type == "numeric")
+    reloaded = DatasetProfile.model_validate_json(profile.model_dump_json())
+    assert reloaded == profile

@@ -214,7 +214,12 @@ def test_exponential_gets_nonlinear_note() -> None:
     scatter = _find(_recs(df), "scatter")
     assert scatter is not None
     assert "non-linear" in scatter.spec.reason
-    assert scatter.score > 0.85  # scored on the Spearman channel
+    # scored on the Spearman channel: the evidence (base) score clears 0.85.
+    # exp(x) has a legitimately heavy tail, so the stage 9 robustness factor
+    # may apply a gentle extreme_value discount on top — that is a separate,
+    # disclosed layer, not a weaker evidence score
+    assert scatter.score / scatter.confidence.overall > 0.85
+    assert scatter.confidence.robustness >= 1 - 0.2  # never harsher than the saturated extreme discount
 
 
 # --- case 5: the sales_basic lexicographic-bias regression ------------------

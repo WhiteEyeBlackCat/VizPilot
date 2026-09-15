@@ -14,12 +14,21 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from ..profiling.models import ColumnProfile, Correlations, DatasetProfile, Evidence
+from .confidence import (
+    MAX_MISSING_RATIO,
+    Confidence,
+    TierCap,
+    Warning,
+    assess,
+    has_suspected_sentinels,
+    with_caution,
+)
 from .spec import ChartSpec, TimeGranularity, validate_spec
 
 MAX_CHARTS = 12
 MAX_PER_TYPE = 3  # diversity cap (stage3 blocking #1)
 MAX_PER_X = 2  # within a type, one x column may fill at most 2 slots
-MAX_MISSING_RATIO = 0.5
+# MAX_MISSING_RATIO lives in confidence.py (stage 9) and is re-exported here
 MAX_GRANULARITY_POINTS = 500
 SCATTER_MIN_CORR = 0.3
 SCATTER_MAX_PAIRS = 5
@@ -38,12 +47,40 @@ UNVERIFIED_SCORE = 0.5  # combinations outside the evidence scan
 
 class Recommendation(BaseModel):
     spec: ChartSpec
+    # FINAL score = base evidence score x confidence.overall (stage 9); the
+    # base is recoverable as score / confidence.overall
     score: float
     source: Literal["rules", "llm"] = "rules"
     tier: Tier = "exploratory"
-    # LLM-verification ceiling ("secondary"/"exploratory"); internal only —
-    # applied by assign_tiers and never serialized into the API response
+    confidence: Confidence | None = None  # stage 9, additive
+    warnings: list[Warning] = []  # stage 9, additive
+    # tier ceiling ("secondary"/"exploratory") from LLM verification and/or
+    # the confidence layer; internal only — applied by assign_tiers and never
+    # serialized into the API response
     tier_cap: Tier | None = Field(default=None, exclude=True)
+
+
+_CAP_RANK: dict[Tier | None, int] = {None: 0, "secondary": 1, "exploratory": 2}
+
+
+def stricter_cap(a: Tier | None, b: TierCap | Tier | None) -> Tier | None:
+    """The tighter of two tier ceilings (None < secondary < exploratory)."""
+    return a if _CAP_RANK[a] >= _CAP_RANK[b] else b
+
+
+def apply_confidence(recs: list[Recommendation], profile: DatasetProfile) -> None:
+    """Runs every candidate through the confidence chain (stage 9): discounts
+    the score, attaches the structured confidence/warnings, tightens the tier
+    ceiling and appends the caution suffix to the reason. Called once per
+    candidate — by recommend_charts for rules charts and by the LLM merge for
+    new LLM charts — so fixed-score and evidence-scored charts are treated alike."""
+    for rec in recs:
+        confidence, warnings, cap = assess(rec.spec, profile)
+        rec.score = rec.score * confidence.overall
+        rec.confidence = confidence
+        rec.warnings = warnings
+        rec.tier_cap = stricter_cap(rec.tier_cap, cap)
+        rec.spec.reason = with_caution(rec.spec.reason, warnings)
 
 
 def choose_time_granularity(unique_count: int, span_days: float) -> TimeGranularity:
@@ -129,6 +166,7 @@ def recommend_charts(profile: DatasetProfile) -> list[Recommendation]:
     candidates += _heatmap_chart(numeric_cols)
 
     valid = _dedup(r for r in candidates if not validate_spec(r.spec, profile))
+    apply_confidence(valid, profile)  # before the caps: slots go to confident charts
     ranked = apply_diversity_caps(valid)
     for i, rec in enumerate(ranked):
         rec.spec.priority = i + 1
@@ -363,7 +401,10 @@ def _histogram_charts(numeric_cols: list[ColumnProfile]) -> list[Recommendation]
     for num in numeric_cols:
         if num.std is None or num.std <= 0:
             continue
-        skewed = num.skewness is not None and abs(num.skewness) > 1
+        # the skew bonus rewards a genuinely skewed distribution; skew
+        # manufactured by suspected sentinels is the artefact the robustness
+        # factor penalises, so it must not also earn the bonus (stage 9 #6)
+        skewed = num.skewness is not None and abs(num.skewness) > 1 and not has_suspected_sentinels(num)
         recs.append(
             Recommendation(
                 spec=ChartSpec(
@@ -411,7 +452,12 @@ def evaluate_llm_spec(spec: ChartSpec, profile: DatasetProfile) -> tuple[float, 
         return 0.65, "neutral"
     if spec.type == "histogram":
         col = columns.get(spec.x or "")
-        skewed = col is not None and col.skewness is not None and abs(col.skewness) > 1
+        skewed = (
+            col is not None
+            and col.skewness is not None
+            and abs(col.skewness) > 1
+            and not has_suspected_sentinels(col)  # same rule as _histogram_charts
+        )
         return 0.5 + (0.05 if skewed else 0.0), "neutral"
     if spec.type in ("bar", "box") and spec.y is None:
         return 0.6, "neutral"  # count bar: no group-effect hypothesis

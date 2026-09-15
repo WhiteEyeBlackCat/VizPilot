@@ -12,14 +12,18 @@ from typing import Any, Literal
 
 from pydantic import ValidationError
 
+from ..charts.confidence import Warning, excluded_column_warnings, with_caution
 from ..charts.rules import (
+    TOP_SCORE_FLOOR,
     Recommendation,
     Tier,
     VerificationLevel,
+    apply_confidence,
     apply_diversity_caps,
     assign_tiers,
     evaluate_llm_spec,
     recommend_charts,
+    stricter_cap,
 )
 from ..charts.spec import ChartSpec, validate_spec
 from ..profiling.models import DatasetProfile
@@ -80,29 +84,40 @@ class RecommendationService:
 
     def _build(self, profile: DatasetProfile, use_llm: bool) -> dict[str, Any]:
         rules = recommend_charts(profile)
+        # dataset-level notes (columns the rule engine left out for missingness)
+        # ride along on every path, LLM or not
+        dataset_warnings = excluded_column_warnings(profile)
         if not use_llm:
-            return _shape(rules, [], None)
+            return _shape(rules, [], None, dataset_warnings)
 
         try:
             response = self._provider.recommend_charts(profile, rules)
         except LLMError as exc:
             logger.warning("LLM call failed (%s): %s", exc.category, exc)
-            return _shape(rules, [], FALLBACK_MESSAGE.format(reason=exc.category))
+            return _shape(rules, [], FALLBACK_MESSAGE.format(reason=exc.category), dataset_warnings)
 
         merged, insights, attempted, kept = _merge(profile, rules, response)
         message = None
         if attempted > 0 and kept == 0:
             message = FALLBACK_MESSAGE.format(reason="all suggestions were invalid")
-        return _shape(merged, insights, message)
+        return _shape(merged, insights, message, dataset_warnings)
 
 
 def _shape(
-    recs: list[Recommendation], insights: list[dict[str, Any]], message: str | None
+    recs: list[Recommendation],
+    insights: list[dict[str, Any]],
+    message: str | None,
+    dataset_warnings: list[Warning],
 ) -> dict[str, Any]:
     charts = [rec.model_dump() for rec in recs]
     if message is None and not charts:
         message = "No charts could be recommended for this dataset."
-    return {"charts": charts, "insights": insights, "message": message}
+    return {
+        "charts": charts,
+        "insights": insights,
+        "message": message,
+        "warnings": [w.model_dump() for w in dataset_warnings],
+    }
 
 
 def _parse_suggestion(item: Any) -> LLMChartSuggestion | None:
@@ -182,16 +197,25 @@ class _Merger:
         key = _key(spec)
         if key in self.by_key:
             # duplicate of a rules chart: keep the rules spec (and its
-            # evidence score), adopt the LLM reason
+            # evidence score), adopt the LLM reason — re-applying the
+            # confidence caution the rules chart already carries
+            target = self.by_key[key]
             if suggestion.reason:
-                self.by_key[key].spec.reason = suggestion.reason
-        elif key not in self.added:
-            if level == "unverified":
-                note = f" ({UNVERIFIED_NOTE})"
-                spec.reason = (spec.reason + note) if spec.reason else UNVERIFIED_NOTE
-            self.added[key] = Recommendation(
-                spec=spec, score=score, source="llm", tier_cap=_TIER_CAP[level]
-            )
+                target.spec.reason = with_caution(suggestion.reason, target.warnings)
+        else:
+            if key not in self.added:
+                if level == "unverified":
+                    note = f" ({UNVERIFIED_NOTE})"
+                    spec.reason = (spec.reason + note) if spec.reason else UNVERIFIED_NOTE
+                rec = Recommendation(spec=spec, score=score, source="llm", tier_cap=_TIER_CAP[level])
+                apply_confidence([rec], self.profile)  # same chain as the rules charts
+                self.added[key] = rec
+            target = self.added[key]
+        # a hypothesis is only "strong" if it still clears the top floor after
+        # the confidence discount (tiny / heavily missing data -> weak)
+        if level == "strong" and target.score < TOP_SCORE_FLOOR:
+            level = "weak"
+            target.tier_cap = stricter_cap(target.tier_cap, _TIER_CAP[level])
         self.llm_priority[key] = min(suggestion.priority, self.llm_priority.get(key, suggestion.priority))
         self.kept += 1
         return key, level

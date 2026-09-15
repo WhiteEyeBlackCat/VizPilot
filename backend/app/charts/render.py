@@ -11,6 +11,7 @@ import polars as pl
 from ..profiling.models import DatasetProfile
 from ..profiling.types import SAMPLE_SEED, apply_semantic_casts
 from ..serialization import jsonify_scalar
+from .confidence import has_suspected_sentinels, sentinel_summary
 from .rules import choose_time_granularity
 from .spec import ChartSpec
 
@@ -52,11 +53,16 @@ def render_chart(df: pl.DataFrame, spec: ChartSpec, profile: DatasetProfile) -> 
     chart_data, sampled, n_points = renderer(df, spec, profile)
     if n_points > HARD_MAX_POINTS:
         raise RenderError(f"chart would contain {n_points} points (hard limit {HARD_MAX_POINTS})")
+    # stage 9 #6: a histogram over a sentinel-laden column is binned over the
+    # robust range; the rows left outside are counted and disclosed here,
+    # never dropped silently (None for every other case)
+    display_range = chart_data.pop("display_range", None)
     return {
         "spec": spec.model_dump(),
         "chart_data": chart_data,
         "sampled": sampled,
         "n_points": n_points,
+        "display_range": display_range,
     }
 
 
@@ -230,14 +236,52 @@ def _bin_counts(values: pl.Series, edges: list[float], n_bins: int) -> list[int]
     return counts
 
 
+def _display_range(values: pl.Series, column) -> tuple[float, float, int, int] | None:
+    """Robust display window for a column with suspected sentinels: A's
+    robust_range (far-out fences recomputed without the sentinel rows,
+    intersected with the data range). None when the column is clean, when no
+    range is available, or when the window is degenerate / empty — the full
+    range is then shown as before."""
+    if column is None or not has_suspected_sentinels(column):
+        return None
+    robust = getattr(column.quality, "robust_range", None)
+    if robust is None or robust.lo >= robust.hi:
+        return None
+    lo, hi = float(robust.lo), float(robust.hi)
+    below = int((values < lo).sum())
+    above = int((values > hi).sum())
+    if below + above == 0 or below + above >= len(values):
+        return None
+    return lo, hi, below, above
+
+
 def _render_histogram(df: pl.DataFrame, spec: ChartSpec, profile: DatasetProfile):
     x, group = spec.x, spec.group_by
     data = _clean(df, spec, [x])  # nulls and NaN/inf excluded from binning
     if not data.height:
         return {"bins": {"edges": [], "counts": []}, "y_label": _y_label(spec)}, False, 0
 
+    column = next((c for c in profile.columns if c.name == x), None)
+    window = _display_range(data[x], column)
+    display_range = None
+    if window is not None:
+        lo, hi, below, above = window
+        # raw rows are untouched; only the binned window narrows, and the
+        # excluded counts travel with the response
+        data = data.filter((pl.col(x) >= lo) & (pl.col(x) <= hi))
+        display_range = {
+            "lo": lo,
+            "hi": hi,
+            "excluded_below": below,
+            "excluded_above": above,
+            "reason": (
+                f"suspected sentinel values ({sentinel_summary(column)}) "
+                "lie outside the display range"
+            ),
+        }
     values = data[x]
-    lo, hi = float(values.min()), float(values.max())
+    if window is None:
+        lo, hi = float(values.min()), float(values.max())
     if lo == hi:  # constant column: one bucket holding everything
         edges, n_bins = [lo - 0.5, hi + 0.5], 1
     else:
@@ -248,6 +292,7 @@ def _render_histogram(df: pl.DataFrame, spec: ChartSpec, profile: DatasetProfile
     chart_data: dict[str, Any] = {
         "bins": {"edges": edges, "counts": _bin_counts(values, edges, n_bins)},
         "y_label": _y_label(spec),
+        "display_range": display_range,
     }
     n_points = n_bins
     if group is not None:

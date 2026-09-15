@@ -36,6 +36,7 @@ export interface ColumnProfile {
   missing_ratio: number;
   unique_count: number;
   cast_params: unknown;
+  nominal?: boolean; // numeric-backed categorical that is a code, never a quantity (stage 9)
   min: number | string | null;
   max: number | string | null;
   mean: number | null;
@@ -89,11 +90,35 @@ export interface ChartSpec {
 export type Tier = "top" | "secondary" | "exploratory";
 export type Supported = "strong" | "weak" | "unverified";
 
+// Stage 9 confidence layer (additive fields; older backends omit them)
+export type WarningSeverity = "info" | "warning" | "severe";
+
+export interface Warning {
+  code: string;
+  severity: WarningSeverity;
+  message: string;
+  meta: Record<string, unknown>;
+}
+
+export interface Confidence {
+  sample_size: number;
+  missingness: number;
+  robustness: number;
+  overall: number;
+  n_total: number;
+  n_effective: number;
+  missing_ratio: number;
+  min_group_n: number | null;
+  n_source: "exact" | "estimated";
+}
+
 export interface Recommendation {
   spec: ChartSpec;
-  score: number;
+  score: number; // final score = base evidence score x confidence.overall
   source: "rules" | "llm";
   tier: Tier;
+  confidence?: Confidence | null;
+  warnings?: Warning[];
 }
 
 export interface Insight {
@@ -106,6 +131,7 @@ export interface RecommendationsResponse {
   charts: Recommendation[];
   insights: Insight[];
   message: string | null;
+  warnings?: Warning[]; // dataset-level (e.g. columns excluded for missingness)
 }
 
 export interface XYSeries {
@@ -167,9 +193,20 @@ export type ChartData =
   | BoxChartData
   | HeatmapChartData;
 
+// Stage 9: histogram over a sentinel-laden column is binned over the robust
+// range; the rows outside it are counted here, never dropped silently
+export interface DisplayRange {
+  lo: number;
+  hi: number;
+  excluded_below: number;
+  excluded_above: number;
+  reason: string;
+}
+
 export interface RenderResult {
   spec: ChartSpec;
   chart_data: ChartData;
   sampled: boolean;
   n_points: number;
+  display_range?: DisplayRange | null;
 }

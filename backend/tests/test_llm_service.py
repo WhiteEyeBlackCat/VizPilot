@@ -71,7 +71,7 @@ def test_rules_only_path_identical_to_stage3(profile) -> None:
     service, provider = _service(LLMResponse(insights=["ignored"], charts=[NEW_CHART]))
     result = service.get(profile, use_llm=False)
     expected = [rec.model_dump() for rec in recommend_charts(profile)]
-    assert result == {"charts": expected, "insights": [], "message": None}
+    assert result == {"charts": expected, "insights": [], "message": None, "warnings": []}
     assert provider.calls == 0
 
 
