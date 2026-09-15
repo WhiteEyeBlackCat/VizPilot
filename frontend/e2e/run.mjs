@@ -6,6 +6,10 @@
 //
 // Requires: backend running on 8100 serving frontend/dist, Playwright's
 // Chromium installed (npx playwright install chromium). See e2e/README.md.
+//
+// Layout (stage 15): tabs 總覽 / 推薦圖表 / 手動建圖; the two chart pages are
+// split with a shared RStudio-style plots pane on the right
+// ([data-plots-pane], data-count / data-current attributes).
 
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -32,6 +36,7 @@ if (existsSync(xlibs)) {
 
 const dataset = (name) => join(repo, "dataset", name);
 const CHART_SEL = "[data-chart-view]";
+const PANE_SEL = "[data-plots-pane]";
 
 const summary = { tag, base, profileRetries: 0, pageErrors: [], consoleErrors: [], steps: [] };
 const step = (name, data) => {
@@ -52,6 +57,17 @@ const shot = async (name, locator) => {
   else await page.screenshot({ path, fullPage: true });
   return path;
 };
+
+async function gotoTab(name) {
+  const tab = page.getByRole("tab", { name });
+  await tab.click();
+  await page.waitForFunction(
+    (n) => document.querySelector(`[role=tab][aria-selected=true]`)?.textContent?.trim() === n,
+    name,
+    { timeout: 5000 },
+  );
+  await page.waitForTimeout(150);
+}
 
 /** Works for both a native <select> (labelled by a wrapping <label>) and a
  *  Radix/shadcn Select trigger (role=combobox with aria-label). */
@@ -80,18 +96,20 @@ async function labelledOptions(label) {
   return opts.map((t) => t.trim()).filter((t) => t && t !== "—");
 }
 
+/** Upload through the header button's file input; the app then switches to
+ *  the 推薦圖表 page. Profile readiness is exposed as data-profile=loaded. */
 async function upload(file) {
   const before = await page.locator("[id^=rec-card-]").count();
-  await page.locator("input[type=file]").setInputFiles(dataset(file));
-  // The profile request can hit a known backend race right after upload
-  // (concurrent writers of the same profile cache tmp file -> 500); the
-  // recommendations still arrive. Re-selecting the dataset re-issues the
-  // profile request. Retries are counted, never hidden.
-  const overview = page.getByRole("heading", { name: /B\. 資料總覽/ });
+  await page.locator("input[type=file]").first().setInputFiles(dataset(file));
+  // The profile request can hit a backend race right after upload (fixed in
+  // stage 9b, kept as a guard); re-selecting the dataset re-issues it.
+  // Retries are counted, never hidden.
   for (let attempt = 0; ; attempt++) {
-    const ok = await overview.waitFor({ timeout: 15000 }).then(() => true, () => false);
+    const ok = await page
+      .waitForSelector("[data-profile=loaded]", { timeout: 15000 })
+      .then(() => true, () => false);
     if (ok) break;
-    if (attempt >= 2) throw new Error(`overview (profile) never appeared for ${file} after ${attempt} retries`);
+    if (attempt >= 2) throw new Error(`profile never loaded for ${file} after ${attempt} retries`);
     summary.profileRetries += 1;
     console.log(`[e2e] profile retry ${attempt + 1} for ${file}`);
     const switcher = page.getByLabel("選擇既有資料集").first();
@@ -107,8 +125,18 @@ async function upload(file) {
   await page.waitForTimeout(500);
 }
 
+const pane = () => page.locator(PANE_SEL).first();
+async function paneState() {
+  const p = pane();
+  if ((await p.count()) === 0) return { count: 0, current: 0, counter: null };
+  return p.evaluate((el) => ({
+    count: Number(el.dataset.count),
+    current: Number(el.dataset.current),
+    counter: el.querySelector("[data-plots-counter]")?.textContent?.trim() ?? null,
+  }));
+}
 async function chartCount() {
-  return page.locator(CHART_SEL).count();
+  return (await paneState()).count;
 }
 
 /** The ECharts instance behind a chart host: canvas present, its pixel size,
@@ -141,58 +169,79 @@ async function probeTooltip(locator) {
   });
 }
 
+async function waitForCount(n) {
+  await page.waitForFunction(
+    ([sel, want]) => Number(document.querySelector(sel)?.dataset.count) === want,
+    [PANE_SEL, n],
+    { timeout: 60000 },
+  );
+  await page.waitForTimeout(1200); // let the chart library finish drawing
+}
+
+/** Manual builder page: pick options, generate, and return the plot that is
+ *  now current in the pane (the newest chart becomes current). */
 async function generateManual({ type, x, y, group }) {
+  await gotoTab("手動建圖");
   const before = await chartCount();
   await pick("圖表類型", type);
   if (x) await pick("X 軸", x);
   if (y) await pick("Y 軸", y);
   if (group) await pick("分組", group);
   await page.getByRole("button", { name: "生成圖表" }).click();
-  await page.waitForFunction(
-    ([sel, n]) => document.querySelectorAll(sel).length > n,
-    [CHART_SEL, before],
-    { timeout: 60000 },
-  );
-  await page.waitForTimeout(1200); // let the chart library finish drawing
-  const chart = page.locator(CHART_SEL).last();
-  return { chart, count: await chartCount() };
+  await waitForCount(before + 1);
+  const chart = pane().locator(CHART_SEL).first();
+  return { chart, ...(await paneState()) };
 }
 
 try {
   await page.goto(base, { waitUntil: "networkidle" });
-  step("open", { title: await page.title() });
+  const tabsBefore = await page.getByRole("tab").evaluateAll((els) =>
+    els.map((e) => ({ name: e.textContent.trim(), disabled: e.hasAttribute("disabled") || e.getAttribute("aria-disabled") === "true" })),
+  );
+  step("open", { title: await page.title(), tabsBefore });
 
   // ---- air_quality: overview, recommendations, six chart types ----------
   await upload("air_quality.csv");
+  const activeTab = await page.locator("[role=tab][aria-selected=true]").textContent();
   const recCards = await page.locator("[id^=rec-card-]").count();
   const tiers = {};
   for (const t of ["推薦重點", "次要", "探索"]) {
     tiers[t] = (await page.getByRole("heading", { level: 3, name: new RegExp(`^${t}`) }).count()) > 0;
   }
+  const split = await page.locator("[data-split]").first().getAttribute("data-split");
   step("air_quality.uploaded", {
-    columnsInOverview: await page.locator("table tbody tr").count(),
+    activeTab: activeTab?.trim(),
     recCards,
     tiers,
+    split,
+    paneVisible: (await pane().count()) > 0,
     generateButtons: await page.getByRole("button", { name: "Generate" }).count(),
   });
-  await shot("01-overview-recs");
+  await shot("01-recommend-page");
 
-  // recommendation-driven generation (first card)
+  await gotoTab("總覽");
+  step("air_quality.overview", { columnsInOverview: await page.locator("table tbody tr").count() });
+  await shot("00-overview-page");
+  await gotoTab("推薦圖表");
+
+  // recommendation-driven generation (first card) -> shows in the right pane
   {
     const before = await chartCount();
     await page.getByRole("button", { name: "Generate" }).first().click();
-    await page.waitForFunction(
-      ([sel, n]) => document.querySelectorAll(sel).length > n,
-      [CHART_SEL, before],
-      { timeout: 60000 },
-    );
-    await page.waitForTimeout(1200);
-    const info = await inspectChart(page.locator(CHART_SEL).last());
-    step("air_quality.generate-from-recommendation", { charts: await chartCount(), ...info });
-    await shot("02-rec-chart", page.locator(CHART_SEL).last());
+    await waitForCount(before + 1);
+    const info = await inspectChart(pane().locator(CHART_SEL).first());
+    const paneBox = await pane().boundingBox();
+    const contentBox = await page.locator("[data-page-content]").first().boundingBox();
+    step("air_quality.generate-from-recommendation", {
+      ...(await paneState()),
+      ...info,
+      paneRightOfContent: Boolean(paneBox && contentBox && paneBox.x >= contentBox.x + contentBox.width - 1),
+    });
+    await shot("02-rec-chart-in-pane");
   }
 
   // manual builder: option filtering per type
+  await gotoTab("手動建圖");
   await pick("圖表類型", "box");
   step("builder.box.options", {
     x: await labelledOptions("X 軸"),
@@ -210,6 +259,8 @@ try {
     group: await labelledOptions("分組"),
     aggDisabledWithoutY: await page.getByLabel("聚合").first().isDisabled(),
   });
+  // the pane is shared: the chart generated on the recommendations page is here too
+  step("builder.pane-shared", await paneState());
 
   const manual = [
     { name: "line", type: "line", x: "timestamp", y: "temperature" },
@@ -220,31 +271,59 @@ try {
     { name: "heatmap", type: "heatmap" },
   ];
   for (const m of manual) {
-    const { chart, count } = await generateManual(m);
+    const { chart, ...state } = await generateManual(m);
     const info = await inspectChart(chart);
-    step(`manual.${m.name}`, { charts: count, ...info });
-    await shot(`10-manual-${m.name}`, chart.locator("xpath=.."));
+    step(`manual.${m.name}`, { ...state, ...info });
+    await shot(`10-manual-${m.name}`, pane());
     const tip = await probeTooltip(chart);
     step(`manual.${m.name}.tooltip`, tip);
-    if (tip.shown) await shot(`10-manual-${m.name}-tooltip`, chart.locator("xpath=.."));
+    if (tip.shown) await shot(`10-manual-${m.name}-tooltip`, pane());
   }
-  await shot("11-workspace-all");
+  await shot("11-manual-page-all");
+
+  // plots pane navigation: ◀ ▶, thumbnail strip, remove
+  {
+    const total = await chartCount();
+    await page.getByRole("button", { name: "上一張" }).click();
+    const afterPrev = await paneState();
+    await page.getByRole("button", { name: "下一張" }).click();
+    const afterNext = await paneState();
+    await page.locator("[data-plots-strip] button").first().click();
+    await page.waitForTimeout(400);
+    const afterThumb = await paneState();
+    const firstTitle = await pane().locator("[data-plots-strip] button").first().textContent();
+    await shot("12-pane-navigation", pane());
+    await page.getByRole("button", { name: "移除" }).click();
+    await waitForCount(total - 1);
+    const afterRemove = await paneState();
+    step("pane.navigation", {
+      total,
+      afterPrev,
+      afterNext,
+      afterThumb,
+      firstThumb: firstTitle?.trim().slice(0, 60),
+      afterRemove,
+      ok:
+        afterPrev.current === total - 1 &&
+        afterNext.current === total &&
+        afterThumb.current === 1 &&
+        afterRemove.count === total - 1 &&
+        afterRemove.current === 1,
+    });
+  }
 
   // enlarged view: the "放大" button opens a dialog that draws the same
   // RenderResult in a second, bigger ECharts instance; Escape closes it and
   // the instance is disposed with the dialog
   {
-    const inlineCharts = await chartCount();
-    await page.getByRole("button", { name: "放大" }).first().click();
+    const inline = await inspectChart(pane().locator(CHART_SEL).first());
+    await page.getByRole("button", { name: "放大" }).click();
     const dialog = page.locator("[data-chart-dialog]");
     await dialog.waitFor({ timeout: 10000 });
     await page.waitForTimeout(1200);
-    const big = dialog.locator(CHART_SEL);
-    const info = await inspectChart(big);
-    const inline = await inspectChart(page.locator(CHART_SEL).first());
-    step("workspace.enlarge", {
+    const info = await inspectChart(dialog.locator(CHART_SEL));
+    step("pane.enlarge", {
       dialogOpen: true,
-      chartsWhileOpen: await chartCount(),
       inlineCanvas: inline.canvasSize,
       dialogCanvas: info.canvasSize,
       bigger: Boolean(info.canvasSize && inline.canvasSize && info.canvasSize[0] > inline.canvasSize[0]),
@@ -253,13 +332,12 @@ try {
     await shot("13-enlarged-dialog");
     await page.keyboard.press("Escape");
     await dialog.waitFor({ state: "detached", timeout: 10000 });
-    step("workspace.enlarge.closed", { charts: await chartCount(), same: (await chartCount()) === inlineCharts });
+    step("pane.enlarge.closed", { ...(await paneState()), inlineCharts: await page.locator(CHART_SEL).count() });
   }
 
-  // 422 path: line with a categorical x that needs aggregation is fine, so
-  // provoke a real validation error instead: scatter with x == y is blocked
-  // by the builder, so use box without y (backend rejects: y required)
+  // 422 path: box without y (backend rejects: y required)
   {
+    await gotoTab("手動建圖");
     await pick("圖表類型", "box");
     await pick("X 軸", "station");
     await page.getByRole("button", { name: "生成圖表" }).click();
@@ -267,16 +345,33 @@ try {
     await err.waitFor({ timeout: 15000 }).catch(() => {});
     const errorShown = await page.locator("ul li, [role=alert]").filter({ hasText: /y/i }).count();
     step("builder.422", { errorShown: errorShown > 0 });
-    await shot("12-builder-422");
+    await shot("14-builder-422");
+  }
+
+  // narrow viewport: the split stacks vertically (plots pane below)
+  {
+    await page.setViewportSize({ width: 800, height: 1100 });
+    await page.waitForTimeout(600);
+    const split = await page.locator("[data-split]").first().getAttribute("data-split");
+    const paneBox = await pane().boundingBox();
+    const contentBox = await page.locator("[data-page-content]").first().boundingBox();
+    step("layout.narrow", {
+      split,
+      stacked: Boolean(paneBox && contentBox && paneBox.y >= contentBox.y + contentBox.height - 1),
+      chartsStillThere: await chartCount(),
+    });
+    await shot("15-narrow-stacked");
+    await page.setViewportSize({ width: 1400, height: 1000 });
+    await page.waitForTimeout(600);
   }
 
   // ---- outliers: histogram over a sentinel-laden column -> display_range --
   await upload("outliers.csv");
   {
-    const { chart, count } = await generateManual({ type: "histogram", x: "temperature" });
+    const { chart, ...state } = await generateManual({ type: "histogram", x: "temperature" });
     const note = await page.getByText(/顯示範圍/).count();
-    step("outliers.histogram.display_range", { charts: count, displayRangeNote: note > 0 });
-    await shot("20-outliers-histogram", chart.locator("xpath=.."));
+    step("outliers.histogram.display_range", { ...state, displayRangeNote: note > 0, canvas: (await inspectChart(chart)).canvas });
+    await shot("20-outliers-histogram", pane());
   }
 
   // ---- tiny_dataset: confidence warnings on recommendation cards --------
@@ -284,13 +379,16 @@ try {
   {
     const chips = await page.locator("[id^=rec-card-] li").count();
     const topEmptyNotice = await page.getByText(/沒有圖表在資料中展現足夠強的證據/).count();
-    step("tiny.warnings", { recCards: await page.locator("[id^=rec-card-]").count(), warningChips: chips, topEmptyNotice: topEmptyNotice > 0 });
+    step("tiny.warnings", {
+      recCards: await page.locator("[id^=rec-card-]").count(),
+      warningChips: chips,
+      topEmptyNotice: topEmptyNotice > 0,
+      paneCleared: await chartCount(),
+    });
     await shot("30-tiny-warnings");
   }
 
   // ---- sales_basic: derived-column demotion (stage 13) -------------------
-  // sales = unit_price × quantity × (1 − discount): the formula charts must
-  // not be "top" and the response must disclose the identity
   await upload("sales_basic.csv");
   {
     const topEmptyNotice = (await page.getByText(/沒有圖表在資料中展現足夠強的證據/).count()) > 0;
