@@ -322,7 +322,7 @@ function boxOption(result: RenderResult): VizOption {
     type: "boxplot",
     name: d.y_label,
     data: stats,
-    itemStyle: { color: "#dbeafe", borderColor: PALETTE[0], borderWidth: 1.5 },
+    itemStyle: { color: COLORS.boxFill, borderColor: PALETTE[0], borderWidth: 1.5 },
     tooltip: {
       formatter: (p) => {
         const item = Array.isArray(p) ? p[0] : p;
@@ -412,9 +412,10 @@ function heatmapOption(result: RenderResult): VizOption {
     label: {
       show: true,
       fontSize: 11,
+      color: COLORS.text,
       formatter: (p) => (p.value as HeatmapCell)[2].toFixed(2),
     },
-    itemStyle: { borderColor: "#ffffff", borderWidth: 1 },
+    itemStyle: { borderColor: COLORS.cellBorder, borderWidth: 1 },
     emphasis: { itemStyle: { borderColor: COLORS.text } },
   };
   return {

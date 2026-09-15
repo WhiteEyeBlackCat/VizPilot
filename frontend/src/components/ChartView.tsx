@@ -18,7 +18,7 @@ export function ChartView({ result, height = CHART_HEIGHT }: Props) {
 
   if (!option) {
     return (
-      <div className="flex h-64 items-center justify-center rounded bg-slate-50 text-sm text-slate-400">
+      <div className="flex h-64 items-center justify-center rounded-md bg-muted/40 text-sm text-muted-foreground">
         此組合無資料
       </div>
     );
@@ -31,11 +31,11 @@ export function ChartView({ result, height = CHART_HEIGHT }: Props) {
   return (
     <div>
       <EChartsView option={option} height={height} />
-      <div className="flex gap-3 px-1 text-xs text-slate-400">
+      <div className="flex gap-3 px-1 text-xs text-muted-foreground">
         {result.sampled && <span>已抽樣（顯示 {result.n_points} 點）</span>}
         {truncated && <span>類別過多，僅顯示前 {result.spec.top_n ?? 20} 名</span>}
         {range && (
-          <span className="text-amber-700" title={range.reason}>
+          <span className="text-warning" title={range.reason}>
             顯示範圍 {range.lo}–{range.hi}；另有 {excluded} 筆極端值未在圖中（{range.reason}）
           </span>
         )}

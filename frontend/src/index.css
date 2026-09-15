@@ -2,112 +2,75 @@
 @tailwind components;
 @tailwind utilities;
 
-body {
-  @apply bg-slate-100 text-foreground;
-}
-
+/* Design tokens — the single source of every colour in the UI (stage 16.1).
+ *
+ * The app is dark only (index.html carries class="dark" so shadcn's dark:
+ * variants apply); there is no light palette to keep in sync. Components
+ * consume these through the Tailwind semantic classes in tailwind.config.js
+ * (bg-surface, bg-elevated, text-muted-foreground, border-subtle, text-info …)
+ * and never restate a colour. The ECharts theme (src/charts/echarts/theme.ts)
+ * mirrors the hex tokens below; src/design/tokens.test.ts fails when the two
+ * drift apart.
+ *
+ * Surface hierarchy (darkest → lightest): background (page) → surface (card,
+ * sidebar) → elevated (preview panel, popovers, dialogs). Text: foreground
+ * (near-white, never pure white) and muted-foreground (cool grey). One accent
+ * (indigo). Semantic tones are for text, dots and edges — not card fills. */
 @layer base {
   :root {
+    /* --- shadcn semantic variables (HSL triplets) --------------------- */
+    --background: 222 24% 8%; /* page: deep charcoal-navy  #10141a */
+    --foreground: 220 20% 92%; /* text primary              #e6e9ef */
 
-    --background: 0 0% 100%;
+    --card: 222 18% 11%; /* surface                      #171b21 */
+    --card-foreground: 220 20% 92%;
 
-    --foreground: 222.2 84% 4.9%;
+    --popover: 222 16% 15%; /* elevated                   #20242c */
+    --popover-foreground: 220 20% 92%;
 
-    --card: 0 0% 100%;
+    --primary: 239 84% 64%; /* accent: indigo #5659f0 — white label 5.1:1, fill 3.4:1 on surface */
+    --primary-foreground: 0 0% 100%;
 
-    --card-foreground: 222.2 84% 4.9%;
+    --secondary: 222 14% 16%; /* quiet fills                 #23272f */
+    --secondary-foreground: 220 20% 92%;
 
-    --popover: 0 0% 100%;
+    --muted: 222 14% 16%;
+    --muted-foreground: 218 12% 66%; /* text secondary: cool grey #9ca3b0 */
 
-    --popover-foreground: 222.2 84% 4.9%;
+    --accent: 222 16% 19%; /* hover / selected fill       #292e38 */
+    --accent-foreground: 220 20% 92%;
 
-    --primary: 222.2 47.4% 11.2%;
+    --destructive: 0 72% 51%; /* #dc2626, white text on it */
+    --destructive-foreground: 0 0% 100%;
 
-    --primary-foreground: 210 40% 98%;
+    --border: 222 14% 20%; /* low-contrast edge           #2c3140 */
+    --input: 222 14% 22%;
+    --ring: 234 89% 74%; /* indigo-400                  #818cf8 */
 
-    --secondary: 210 40% 96.1%;
+    --radius: 0.375rem;
 
-    --secondary-foreground: 222.2 47.4% 11.2%;
+    /* --- app tokens (hex; also consumed by the ECharts theme) ---------- */
+    --surface: #171b21;
+    --elevated: #20242c;
+    --border-subtle: #23272f;
 
-    --muted: 210 40% 96.1%;
+    --info: #60a5fa; /* blue-400 */
+    --success: #34d399; /* emerald-400 */
+    --warning: #fbbf24; /* amber-400 */
+    --danger: #f87171; /* red-400 */
 
-    --muted-foreground: 215.4 16.3% 46.9%;
-
-    --accent: 210 40% 96.1%;
-
-    --accent-foreground: 222.2 47.4% 11.2%;
-
-    --destructive: 0 84.2% 60.2%;
-
-    --destructive-foreground: 210 40% 98%;
-
-    --border: 214.3 31.8% 91.4%;
-
-    --input: 214.3 31.8% 91.4%;
-
-    --ring: 222.2 84% 4.9%;
-
-    --chart-1: 12 76% 61%;
-
-    --chart-2: 173 58% 39%;
-
-    --chart-3: 197 37% 24%;
-
-    --chart-4: 43 74% 66%;
-
-    --chart-5: 27 87% 67%;
-
-    --radius: 0.5rem
-  }
-  .dark {
-
-    --background: 222.2 84% 4.9%;
-
-    --foreground: 210 40% 98%;
-
-    --card: 222.2 84% 4.9%;
-
-    --card-foreground: 210 40% 98%;
-
-    --popover: 222.2 84% 4.9%;
-
-    --popover-foreground: 210 40% 98%;
-
-    --primary: 210 40% 98%;
-
-    --primary-foreground: 222.2 47.4% 11.2%;
-
-    --secondary: 217.2 32.6% 17.5%;
-
-    --secondary-foreground: 210 40% 98%;
-
-    --muted: 217.2 32.6% 17.5%;
-
-    --muted-foreground: 215 20.2% 65.1%;
-
-    --accent: 217.2 32.6% 17.5%;
-
-    --accent-foreground: 210 40% 98%;
-
-    --destructive: 0 62.8% 30.6%;
-
-    --destructive-foreground: 210 40% 98%;
-
-    --border: 217.2 32.6% 17.5%;
-
-    --input: 217.2 32.6% 17.5%;
-
-    --ring: 212.7 26.8% 83.9%;
-
-    --chart-1: 220 70% 50%;
-
-    --chart-2: 160 60% 45%;
-
-    --chart-3: 30 80% 55%;
-
-    --chart-4: 280 65% 60%;
-
-    --chart-5: 340 75% 55%
+    /* chart palette: the 400-weight hues read on dark surfaces (each ≥ 3:1
+     * against --surface); ordered for maximum separation between neighbours,
+     * neighbours also differ in luminance for the common red-green
+     * deficiencies */
+    --chart-1: #60a5fa; /* blue */
+    --chart-2: #fbbf24; /* amber */
+    --chart-3: #34d399; /* emerald */
+    --chart-4: #a78bfa; /* violet */
+    --chart-5: #f87171; /* red */
+    --chart-6: #22d3ee; /* cyan */
+    --chart-7: #e879f9; /* fuchsia */
+    --chart-8: #94a3b8; /* slate */
   }
 }
 
@@ -115,7 +78,10 @@ body {
   * {
     @apply border-border;
   }
+  html {
+    color-scheme: dark;
+  }
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground antialiased;
   }
 }

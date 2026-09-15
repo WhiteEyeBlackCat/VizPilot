@@ -16,6 +16,7 @@ import lineSingle from "../__fixtures__/line_single.json";
 import type { BarChartData, BoxChartData, HistogramChartData, RenderResult } from "../../types";
 import { echarts } from "./echarts";
 import { buildOption } from "./option";
+import { COLORS, PALETTE } from "./theme";
 
 const fx = (json: unknown) => json as RenderResult;
 
@@ -68,7 +69,7 @@ describe("SSR rendering", () => {
     expect(hasText(svg, "mean(pm25)")).toBe(true); // y-axis name
     // every bar starts right of the y-axis label column: grid.left is only
     // 16px, so a larger offset proves the layout reserved room for the labels
-    const barX = marks(svg, 'fill="#2563eb"').map((tag) => Number((tag.match(/d="M\s*([\d.]+)/) ?? [])[1]));
+    const barX = marks(svg, `fill="${PALETTE[0]}"`).map((tag) => Number((tag.match(/d="M\s*([\d.]+)/) ?? [])[1]));
     expect(barX.length).toBe((fx(barSingle).chart_data as BarChartData).categories.length);
     for (const x of barX) expect(x).toBeGreaterThan(40);
   });
@@ -101,7 +102,7 @@ describe("SSR rendering", () => {
     const svg = renderSvg(r);
     expect(svg.startsWith("<svg")).toBe(true);
     // bars are <path> elements filled with the first palette colour
-    expect(marks(svg, 'fill="#2563eb"').length).toBe(d.categories.length);
+    expect(marks(svg, `fill="${PALETTE[0]}"`).length).toBe(d.categories.length);
     for (const c of d.categories) expect(hasText(svg, String(c))).toBe(true);
     expect(hasText(svg, d.y_label)).toBe(true);
     expect(hasText(svg, r.spec.title)).toBe(true);
@@ -114,7 +115,7 @@ describe("SSR rendering", () => {
     const r = fx(barGroupedNull);
     const d = r.chart_data as BarChartData;
     const svg = renderSvg(r);
-    const drawn = marks(svg, 'fill="#2563eb"').length + marks(svg, 'fill="#f59e0b"').length;
+    const drawn = marks(svg, `fill="${PALETTE[0]}"`).length + marks(svg, `fill="${PALETTE[1]}"`).length;
     const nonNull = d.series.reduce((acc, s) => acc + s.values.filter((v) => v !== null).length, 0);
     expect(nonNull).toBe(d.categories.length * d.series.length - 1);
     expect(drawn).toBe(nonNull);
@@ -124,7 +125,7 @@ describe("SSR rendering", () => {
     const r = fx(histogramDisplayRange);
     const d = r.chart_data as HistogramChartData;
     const svg = renderSvg(r);
-    expect(marks(svg, 'fill="#2563eb"').length).toBe(d.bins.counts.length);
+    expect(marks(svg, `fill="${PALETTE[0]}"`).length).toBe(d.bins.counts.length);
     expect(hasText(svg, "count")).toBe(true);
   });
 
@@ -140,9 +141,9 @@ describe("SSR rendering", () => {
     const r = fx(boxOutliers);
     const d = r.chart_data as BoxChartData;
     const svg = renderSvg(r);
-    expect(marks(svg, 'fill="#dbeafe"').length).toBe(d.groups.length);
+    expect(marks(svg, `fill="${COLORS.boxFill}"`).length).toBe(d.groups.length);
     const outliers = d.groups.reduce((a, g) => a + g.outliers.length, 0);
-    expect(marks(svg, 'fill="#ef4444"').length).toBe(outliers);
+    expect(marks(svg, `fill="${COLORS.outlier}"`).length).toBe(outliers);
     for (const g of d.groups) expect(hasText(svg, g.name)).toBe(true);
   });
 
@@ -151,14 +152,14 @@ describe("SSR rendering", () => {
     const svg = renderSvg(r);
     // 3x3 minus the two null cells; the diagonal is labelled 1.00
     expect(count(svg, />1\.00</g)).toBe(3);
-    expect(marks(svg, 'stroke="#fff').length).toBe(7);
+    expect(marks(svg, `stroke="${COLORS.cellBorder}"`).length).toBe(7);
     for (const c of ["value", "metric_a", "metric_b"]) expect(count(svg, new RegExp(`>${c}<`, "g"))).toBeGreaterThanOrEqual(2);
   });
 
   it("line grouped: three polylines and a legend with the group names", () => {
     const r = fx(lineGrouped);
     const svg = renderSvg(r);
-    for (const c of ["#2563eb", "#f59e0b", "#10b981"]) {
+    for (const c of PALETTE.slice(0, 3)) {
       expect(polylines(svg, c).length).toBe(1);
       expect(marks(svg, `stroke="${c}"`, 'fill="#fff"').length).toBe(30); // one symbol per day
     }

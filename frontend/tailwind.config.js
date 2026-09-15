@@ -11,6 +11,8 @@ export default {
         md: "calc(var(--radius) - 2px)",
         sm: "calc(var(--radius) - 4px)",
       },
+      // Every colour class maps to a token in src/index.css. Components use
+      // these semantic names only; no raw Tailwind hues (slate-500 …).
       colors: {
         background: "hsl(var(--background))",
         foreground: "hsl(var(--foreground))",
@@ -45,12 +47,23 @@ export default {
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",
         ring: "hsl(var(--ring))",
+        // surface hierarchy and semantic tones (hex tokens)
+        surface: "var(--surface)",
+        elevated: "var(--elevated)",
+        subtle: "var(--border-subtle)",
+        info: "var(--info)",
+        success: "var(--success)",
+        warning: "var(--warning)",
+        danger: "var(--danger)",
         chart: {
-          1: "hsl(var(--chart-1))",
-          2: "hsl(var(--chart-2))",
-          3: "hsl(var(--chart-3))",
-          4: "hsl(var(--chart-4))",
-          5: "hsl(var(--chart-5))",
+          1: "var(--chart-1)",
+          2: "var(--chart-2)",
+          3: "var(--chart-3)",
+          4: "var(--chart-4)",
+          5: "var(--chart-5)",
+          6: "var(--chart-6)",
+          7: "var(--chart-7)",
+          8: "var(--chart-8)",
         },
       },
     },

@@ -124,7 +124,7 @@ export function Recommendations({ recs, aiPending, onGenerate }: Props) {
         id={`rec-card-${priority}`}
         className={cn(
           "flex flex-col p-3 shadow-none transition-colors",
-          highlighted === priority && "border-violet-500 bg-violet-50",
+          highlighted === priority && "border-primary bg-primary/10",
         )}
       >
         <div className="mb-1 flex items-start justify-between gap-2">
@@ -176,7 +176,7 @@ export function Recommendations({ recs, aiPending, onGenerate }: Props) {
           <Button
             variant="outline"
             size="sm"
-            className="h-6 shrink-0 border-violet-300 px-2 text-xs text-violet-700 hover:bg-violet-100 hover:text-violet-800"
+            className="h-6 shrink-0 border-primary/40 px-2 text-xs text-ring hover:bg-primary/15 hover:text-ring"
             onClick={() => showChart(insight.chart_priority!)}
           >
             看圖
@@ -203,13 +203,13 @@ export function Recommendations({ recs, aiPending, onGenerate }: Props) {
   return (
     <SectionCard title={title}>
       {recs?.message && (
-        <Alert className="mb-3 border-amber-200 bg-amber-50 text-amber-800">
+        <Alert variant="warning" className="mb-3">
           <AlertDescription>{recs.message}</AlertDescription>
         </Alert>
       )}
 
       {recs?.warnings && recs.warnings.length > 0 && (
-        <Alert className="mb-3 bg-muted/50 text-muted-foreground">
+        <Alert variant="muted" className="mb-3">
           <AlertDescription>
             <ul className="space-y-1 text-xs">
               {recs.warnings.map((w, i) => (
@@ -221,7 +221,7 @@ export function Recommendations({ recs, aiPending, onGenerate }: Props) {
       )}
 
       {recs && recs.insights.length > 0 && (
-        <ul className="mb-3 space-y-2 rounded-md bg-violet-50 p-3 text-sm text-violet-900">
+        <ul className="mb-3 space-y-2 rounded-md border-l-2 border-primary bg-elevated p-3 text-sm">
           {recs.insights.map(insightCard)}
         </ul>
       )}
