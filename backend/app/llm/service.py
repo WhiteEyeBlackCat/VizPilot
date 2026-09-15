@@ -50,6 +50,7 @@ from .coverage import (
     CoverageHit,
     ValidatedHypothesis,
     apply_confidence_cap,
+    bin_extremes_lines,
     check_coverage,
     corroborated,
     definitional_conflict,
@@ -71,13 +72,14 @@ NO_PATTERNS_MESSAGE = "No strong non-definitional and analytically useful patter
 _SNAKE_TOKEN = re.compile(r"\b[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+\b")
 # numbers the LLM writes are never evidence: "(eta² = 0.99)", "r=0.8", "n = 12", "(0.45)"
 _STAT_NUMBER = re.compile(
-    r"\b(?:adjusted\s+)?(?:eta[²2]?|eta-squared|r[²2]?|rho|corr(?:elation)?|n|p|z|d|ks|spread|effect(?:\s+size)?)"
+    r"(?:\b(?:adjusted\s+)?(?:eta[²2]?|eta-squared|r[²2]?|rho|corr(?:elation)?|n|p|z|d|ks|spread|effect(?:\s+size)?)|η[²2]?)"
     r"\s*[=:≈]\s*-?\d+(?:\.\d+)?%?",
     re.IGNORECASE,
 )
 _PAREN_NUMBER = re.compile(r"\s*\([^()]*\d[^()]*\)")
 _EMPTY_PAREN = re.compile(r"\s*\(\s*[,;:\s]*\)")
 _NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
+_ISO_DATE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
 _WORD = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
 
 SpecKey = tuple[str | None, ...]
@@ -455,6 +457,7 @@ class _Workflow:
 
         validated: list[ValidatedHypothesis] = []
         probe_queue: list[_Candidate] = []
+        seen_claims: dict[tuple, int] = {}
         for c in candidates:
             if c.test_type is None:
                 # a chart-only claim is verified through the probe the chart
@@ -471,6 +474,11 @@ class _Workflow:
                 if conflict:
                     self._drop(c.id, c.hypothesis, conflict)
                     continue
+            claim = (c.test_type, tuple(sorted(c.columns.items())))
+            if claim in seen_claims:
+                self._drop(c.id, c.hypothesis, f"duplicate of hypothesis {seen_claims[claim]} (same test and columns)")
+                continue
+            seen_claims[claim] = c.id
             hit = check_coverage(c.test_type, c.columns, self.profile)
 
             if hit is None:
@@ -735,6 +743,7 @@ class _Workflow:
     ) -> tuple[list[Recommendation], list[dict[str, Any]]]:
         wording = self._final_wording(validated, final) if final is not None else {}
         self.trace.final_call = final is not None
+        names = set(self.columns)
 
         rows: list[dict[str, Any]] = []
         for v in validated:
@@ -743,12 +752,13 @@ class _Workflow:
                 self._drop_validated(v, "no supporting chart could be drawn")
                 continue
             words = wording.get(v.id)
-            text = words["text"] if words else _template(v)
+            if words:
+                text, source = words["text"], "llm2"
+            else:
+                text, source = self._fallback_text(v, names)
             why = words["why_it_matters"] if words and words["why_it_matters"] else v.reason
             priority = max(1, min(5, int(words["priority"] if words else v.importance)))
-            self.trace.wording.append(
-                {"id": v.id, "statement": v.statement, "final_text": text, "source": "llm2" if words else "template"}
-            )
+            self.trace.wording.append({"id": v.id, "statement": v.statement, "final_text": text, "source": source})
             rows.append(
                 {
                     "text": text[:MAX_INSIGHT_CHARS],
@@ -784,6 +794,17 @@ class _Workflow:
             for r in rows[:MAX_INSIGHTS]
         ]
         return merged, insights
+
+    def _fallback_text(self, v: ValidatedHypothesis, names: set[str]) -> tuple[str, str]:
+        """Without accepted LLM #2 wording the statement is used only if it
+        passes the same gate (its bare numbers and dates must be backend
+        numbers); otherwise a neutral, number-free sentence built from the
+        test and the backend effect."""
+        problem = _wording_problem(v.statement, v, names)
+        if problem is None:
+            return _template(v), "template"
+        self.trace.errors.append(f"statement {v.id}: {problem} — neutral wording used")
+        return _neutral(v), "neutral"
 
     def _integrate_candidates(self, v: ValidatedHypothesis) -> SpecKey | None:
         """The backend chart first, the LLM's own chart as fallback; both go
@@ -865,34 +886,82 @@ def _wording_problem(text: str, v: ValidatedHypothesis, names: set[str]) -> str 
     mentioned = {w for w in _WORD.findall(text) if w in names and w not in allowed}
     if mentioned:
         return f"names columns outside the hypothesis {sorted(mentioned)}"
-    evidence_numbers = _numbers_in(v.evidence) | {float(v.effect_value), float(v.n)}
+    evidence_numbers = quotable_numbers(v)
+    # an ISO date is quoted as its parts (2025-04-26 -> 2025 4 26), never as "-4"
+    text = _ISO_DATE.sub(lambda m: " ".join(str(int(g)) for g in m.groups()), text)
     for token in _NUMBER.findall(text):
         if not _number_supported(token, evidence_numbers):
             return f"number {token} is not in the validated evidence"
     return None
 
 
-def _numbers_in(value: Any) -> set[float]:
-    out: set[float] = set()
-    if isinstance(value, bool):
-        return out
-    if isinstance(value, (int, float)):
-        if value == value and abs(value) != float("inf"):
+# evidence keys whose numeric value may be quoted verbatim
+_QUOTABLE_KEYS = frozenset(
+    {
+        "eta_squared", "max_diff_sd", "pooled_std", "binned_eta2", "r2_pearson", "pearson_r",
+        "nonlinear_gap", "spread", "threshold", "min_abs_corr", "max_abs_corr", "max_ks",
+        "median_spread", "strength", "overall_corr", "n_groups", "n_buckets", "n_min", "n_cells",
+    }
+)
+# per-row keys inside groups / cells / pairs / change points
+_QUOTABLE_ROW_KEYS = frozenset(
+    {"mean", "median", "std", "q25", "q75", "iqr", "n", "corr", "slope", "ks", "before_mean",
+     "after_mean", "effect_size", "diff_sd", "n_before", "n_after"}
+)
+
+
+def quotable_numbers(v: ValidatedHypothesis) -> set[float]:
+    """The numbers LLM #2 (or the statement) may quote for a hypothesis: the
+    effect and n, per-group means / spreads / correlations, the change
+    point's means and date parts, the highest and lowest bin means. Bin
+    edges, per-bin counts and group labels are deliberately NOT quotable —
+    a label like "13" or an edge like "2" must not make "2x" or "hr 13" pass."""
+    out: set[float] = {float(v.effect_value), float(v.n)}
+    ev = v.evidence
+    for key, value in ev.items():
+        if key in _QUOTABLE_KEYS and isinstance(value, (int, float)) and not isinstance(value, bool):
             out.add(float(value))
-    elif isinstance(value, dict):
-        for item in value.values():
-            out |= _numbers_in(item)
-    elif isinstance(value, (list, tuple)):
-        for item in value:
-            out |= _numbers_in(item)
-    elif isinstance(value, str):
-        # ISO dates in change points: their year / month / day are quotable
-        for part in _NUMBER.findall(value):
-            try:
-                out.add(float(part))
-            except ValueError:
-                pass
+    groups = ev.get("groups")
+    if isinstance(groups, dict):  # slope heterogeneity: label -> corr
+        out |= {float(c) for c in groups.values() if isinstance(c, (int, float)) and not isinstance(c, bool)}
+    for rows_key in ("groups", "cells", "pairs", "series", "group_series"):
+        rows = ev.get(rows_key)
+        if isinstance(rows, dict):
+            rows = [r for series in rows.values() if isinstance(series, list) for r in series]
+        if isinstance(rows, list):
+            for row in rows:
+                if isinstance(row, dict):
+                    out |= _row_numbers(row)
+    change = ev.get("change_point")
+    if isinstance(change, dict):
+        out |= _row_numbers(change)
+        out |= _date_parts(change.get("change_at"))
+    bins = ev.get("bins")
+    if isinstance(bins, list):
+        means = [b["y_mean"] for b in bins if isinstance(b, dict) and isinstance(b.get("y_mean"), (int, float))]
+        if means:
+            out |= {float(max(means)), float(min(means))}
     return out
+
+
+def _row_numbers(row: dict[str, Any]) -> set[float]:
+    return {
+        float(value)
+        for key, value in row.items()
+        if key in _QUOTABLE_ROW_KEYS and isinstance(value, (int, float)) and not isinstance(value, bool)
+    }
+
+
+def _date_parts(value: Any) -> set[float]:
+    """'2025-04-26T00:00:00' -> {2025, 4, 26} (never -4 / -26)."""
+    if not isinstance(value, str):
+        return set()
+    date = value.split("T", 1)[0]
+    parts: set[float] = set()
+    for part in date.split("-"):
+        if part.isdigit():
+            parts.add(float(part))
+    return parts
 
 
 def _number_supported(token: str, evidence: set[float]) -> bool:
@@ -903,7 +972,12 @@ def _number_supported(token: str, evidence: set[float]) -> bool:
     decimals = len(token.split(".")[1]) if "." in token else 0
     for value in evidence:
         for candidate in (value, value * 100.0):  # a ratio may be quoted as a percentage
-            if abs(round(candidate, decimals) - written) < 10 ** (-decimals) / 2 + 1e-9:
+            if decimals == 0:
+                # an integer must be an exact backend integer (n, a count, a
+                # date part): "6" must not pass because some std rounds to 6
+                if abs(candidate - written) < 1e-9:
+                    return True
+            elif abs(round(candidate, decimals) - written) < 10 ** (-decimals) / 2 + 1e-9:
                 return True
     return False
 
@@ -916,6 +990,27 @@ def _as_int(value: Any) -> int | None:
     if isinstance(value, str) and value.strip().lstrip("hH").isdigit():
         return int(value.strip().lstrip("hH"))
     return None
+
+
+_NEUTRAL = {
+    "group_difference": "{target} varies by {group}",
+    "distribution_difference": "the distribution of {target} differs by {group}",
+    "grouped_relationship": "{x} and {y} are related within every {group} group",
+    "slope_difference": "the {x}-{y} relationship differs by {group}",
+    "nonlinear_relationship": "{y} varies non-linearly with {x}",
+    "time_pattern": "{target} varies over {time}",
+    "interaction": "the effect of {factor1} on {target} depends on {factor2}",
+}
+
+
+def _neutral(v: ValidatedHypothesis) -> str:
+    """A number-free description of the finding (test + columns) followed by
+    the backend effect; used when the LLM's own words cannot be verified."""
+    pattern = _NEUTRAL.get(v.test_type, "{columns} show a verified pattern")
+    core = pattern.format(**{**{"columns": ", ".join(v.columns.values())}, **v.columns})
+    shape = v.evidence.get("shape")
+    detail = f"{shape.replace('_', ' ')}; " if isinstance(shape, str) else ""
+    return f"{core[0].upper()}{core[1:]} ({detail}{v.effect_label}: {v.effect_value:.2f}, n={v.n})."
 
 
 def _template(v: ValidatedHypothesis) -> str:
@@ -939,10 +1034,8 @@ def _probe_lines(result: ProbeResult) -> list[str]:
                 + ", ".join(f"{g['group']}={g['corr']:.2f} (n={g['n']})" for g in groups if g.get("corr") is not None)
             )
     if isinstance(ev.get("bins"), list) and ev["bins"]:
-        lines.append(
-            f"shape {ev.get('shape')}; y mean per x bin (low to high): "
-            + ", ".join(f"{b['y_mean']:.3g}" for b in ev["bins"])
-        )
+        lines.append(f"shape {ev.get('shape')}")
+        lines += bin_extremes_lines(result.columns.get("x", "x"), result.columns.get("y", "y"), ev["bins"])
     if isinstance(ev.get("ks_pair"), list):
         lines.append(f"largest distribution gap between {ev['ks_pair'][0]} and {ev['ks_pair'][1]} (KS {ev.get('max_ks')})")
     change = ev.get("change_point")

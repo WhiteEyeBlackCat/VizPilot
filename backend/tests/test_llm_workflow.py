@@ -355,9 +355,11 @@ def test_llm_numbers_are_stripped_from_the_statement(profile, df) -> None:
     result, _ = _run(profile, df, [hyp])
     (insight,) = result["insights"]
     assert "0.99" not in insight["text"] and "9999" not in insight["text"]
-    assert insight["text"].startswith("Segment e sells far more, about 80% more (adjusted eta-squared")
+    # the labelled numbers are stripped; the bare "80%" is an LLM number the
+    # backend never measured, so the neutral wording replaces the statement
+    assert insight["text"].startswith("Sales varies by segment (adjusted eta-squared")
     (record,) = result["debug"]["wording"]
-    assert record["statement"] == "Segment e sells far more, about 80% more." and record["source"] == "template"
+    assert record["statement"] == "Segment e sells far more, about 80% more." and record["source"] == "neutral"
 
 
 def test_statement_with_unknown_column_token_is_dropped(profile, df) -> None:
@@ -481,3 +483,78 @@ def test_noise_dataset_yields_zero_insights() -> None:
         result, _ = _run(profile, df, batch)
         assert result["insights"] == [], [d["reason"] for d in result["debug"]["dropped"]]
         assert all("without a real relationship" in d["reason"] or "fail" in d["reason"] for d in result["debug"]["dropped"])
+
+
+# --- stage 17.3 round 3 -------------------------------------------------------------------
+
+
+def test_statement_bare_numbers_fall_back_to_neutral_wording(profile, df) -> None:
+    hyp = _h("Segment e sells about 60% more (η² = 0.99), 2.5 times the rest.", "group_difference", {"group": "segment", "target": "sales"}, None, 5)
+    result, _ = _run(profile, df, [hyp])
+    (insight,) = result["insights"]
+    assert "60%" not in insight["text"] and "2.5" not in insight["text"] and "0.99" not in insight["text"]
+    assert insight["text"].startswith("Sales varies by segment (adjusted eta-squared")
+    (record,) = result["debug"]["wording"]
+    assert record["source"] == "neutral"
+    assert any("statement 1: number" in e for e in result["debug"]["errors"])
+
+
+def test_statement_with_backend_number_keeps_template(profile, df) -> None:
+    hyp = _h("Segment e sells far more across 600 rows.", "group_difference", {"group": "segment", "target": "sales"}, None, 5)
+    result, _ = _run(profile, df, [hyp])
+    (insight,) = result["insights"]
+    assert insight["text"].startswith("Segment e sells far more across 600 rows (")
+    assert result["debug"]["wording"][0]["source"] == "template"
+
+
+def test_nonlinear_coverage_is_directed_and_matches_the_probe(profile, df) -> None:
+    from app.probes import ProbeRequest, run_probes
+
+    stored = next(s for s in profile.evidence.layer2.nonlinear if {s.x, s.y} == {"x", "u"})
+    forward = {"x": stored.x, "y": stored.y}
+    reverse = {"x": stored.y, "y": stored.x}
+    cov, _ = _run(profile, df, [_h("forward", "nonlinear_relationship", forward, None)])
+    assert cov["debug"]["probes"] == [] and cov["debug"]["covered_by_existing_evidence"]
+    (probe_fwd,) = run_probes(df, profile, [ProbeRequest(type="nonlinear_relationship", columns=forward)])
+    assert cov["debug"]["covered_by_existing_evidence"][0]["verdict"] == probe_fwd.verdict
+    assert cov["insights"][0]["effect"]["value"] == pytest.approx(probe_fwd.effect_size, abs=1e-6)
+    rev, _ = _run(profile, df, [_h("reverse", "nonlinear_relationship", reverse, None)])
+    assert rev["debug"]["covered_by_existing_evidence"] == []
+    (probe_rev,) = run_probes(df, profile, [ProbeRequest(type="nonlinear_relationship", columns=reverse)])
+    (ran,) = rev["debug"]["probes"]
+    assert ran["verdict"] == probe_rev.verdict
+
+
+def test_llm2_may_quote_the_change_point_date(profile, df) -> None:
+    change = next((c for c in profile.evidence.layer2.change_points if c.num == "growth" and c.strength != "none"), None)
+    if change is None:
+        pytest.skip("no graded change point on growth in this fixture")
+    day = change.change_at[:10]
+    hyps = _two_covered() + [_h("growth shifts over time.", "time_pattern", {"time": "ts", "target": "growth"}, None, 3)]
+    final = {"insights": [{"hypothesis_id": 3, "text": f"Growth shifts level around {day}.", "why_it_matters": "?", "priority": 3}]}
+    result, _ = _run(profile, df, hyps, final=final)
+    assert any(i["text"] == f"Growth shifts level around {day}." for i in result["insights"])
+    wrong = {"insights": [{"hypothesis_id": 3, "text": "Growth shifts level around 2025-04-19.", "why_it_matters": "?", "priority": 3}]}
+    result, _ = _run(profile, df, hyps, final=wrong)
+    assert not any("2025-04-19" in i["text"] for i in result["insights"])
+
+
+def test_duplicate_claims_are_collapsed_after_the_gate(profile, df) -> None:
+    hyps = [
+        _h("Segment e sells far more.", "group_difference", {"group": "segment", "target": "sales"}, None, 5),
+        _h("Sales differ across segments.", None, None, _bar("segment", "sales"), 4),
+    ]
+    result, _ = _run(profile, df, hyps)
+    assert len(result["insights"]) == 1
+    (dropped,) = result["debug"]["dropped"]
+    assert "duplicate of hypothesis 1" in dropped["reason"]
+
+
+def test_grouped_bar_implies_an_interaction_probe(profile, df) -> None:
+    chart = {"title": "sales by segment and flag", "type": "bar", "x": "segment", "y": "sales", "group_by": "flag", "aggregation": "mean", "priority": 1}
+    result, _ = _run(profile, df, [_h("flag changes how segment affects sales.", None, None, chart)])
+    # the claim is judged as an interaction (here: layer 1 has segment x flag
+    # -> sales at ~0 and says no), never as a plain group difference on x
+    assert result["insights"] == []
+    (dropped,) = result["debug"]["dropped"]
+    assert "interaction share of variance" in dropped["reason"]

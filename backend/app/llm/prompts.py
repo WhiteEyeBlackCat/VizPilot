@@ -47,7 +47,9 @@ only choose type and columns:
 - grouped_relationship {x, y, group}: the x-y relationship holds inside EVERY group.
 - slope_difference {x, y, group}: the x-y relationship DIFFERS between groups (moderation).
 - nonlinear_relationship {x, y}: y depends on x non-linearly (U shape, saturation, peaks).
-- time_pattern {time, target, group?}: target changes over time (trend, seasonality, level shift).
+- time_pattern {time, target}: target changes over time (trend, seasonality, level shift). A time \
+pattern that differs BY GROUP can only be proposed when the evidence lists that time x group \
+interaction (it cannot be probed).
 - interaction {factor1, factor2, target}: the effect of one factor on target depends on the other.
 Role constraints (violations are rejected, not run): group / factor1 / factor2 = categorical or \
 boolean with 2-20 categories (distribution_difference: up to 50); x / y / target = numeric (a \
@@ -408,7 +410,7 @@ def _final_user_content(profile: DatasetProfile, validated: list[ValidatedHypoth
     lines = [f"Dataset: {profile.n_rows} rows, {profile.n_cols} columns.", "", "Columns involved:"]
     by_name = {c.name: c for c in profile.columns}
     for name in used:
-        lines.append(f"- {_describe_column(by_name[name])}")
+        lines.append(f"- {_describe_column_brief(by_name[name])}")
     lines += ["", "Validated hypotheses (backend-verified; numbers are authoritative):"]
     for v in validated:
         lines.append(
@@ -466,6 +468,28 @@ def _describe_column(col: ColumnProfile) -> str:
     if col.semantic_type == "datetime":
         return f"{base}: {col.min} to {col.max}, frequency={col.inferred_frequency}"
     return base
+
+
+def _describe_column_brief(col: ColumnProfile) -> str:
+    """LLM #2 column line: type and a rounded range only (no quality flags,
+    no extreme-value counts — nothing the analyst could mistake for a fact
+    to report)."""
+    base = f"{col.name} ({col.semantic_type})"
+    if col.semantic_type == "numeric":
+        return f"{base}: mean={_round3(col.mean)}, min={_round3(col.min)}, max={_round3(col.max)}"
+    if col.semantic_type in ("categorical", "boolean"):
+        top = ", ".join(str(t.value) for t in (col.top_values or [])[:3])
+        return f"{base}: {col.n_categories} categories, e.g. {top}"
+    if col.semantic_type == "datetime":
+        return f"{base}: {str(col.min)[:10]} to {str(col.max)[:10]}"
+    return base
+
+
+def _round3(value: Any) -> Any:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return value
+    rounded = round(float(value), 3)
+    return int(rounded) if float(rounded).is_integer() else rounded
 
 
 def _top_correlations(profile: DatasetProfile) -> list[tuple[str, str, float]]:

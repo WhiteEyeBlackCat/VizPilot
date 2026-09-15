@@ -239,16 +239,19 @@ def _strong_line_mention(profile) -> dict:
 
 def test_insights_capped_and_truncated(profile) -> None:
     chart = _strong_line_mention(profile)
-    hypotheses = [_hyp(f"i{n}" + "x" * 400, chart) for n in range(7)]
+    hypotheses = [_hyp(f"claim {letter} " + "x" * 400, chart) for letter in "abcdefg"]
     service, provider = _service({"hypotheses": hypotheses})
     result = service.get(profile, use_llm=True, include_debug=True)
     insights = result["insights"]
-    assert len(insights) == 5  # cap kept from stage 5 (now the hypothesis cap)
-    assert all(len(i["text"]) == 300 for i in insights)  # truncation kept
-    assert all(i["supported"] == "strong" for i in insights)
-    assert [d["reason"] for d in result["debug"]["dropped"]] == ["beyond the hypothesis cap"] * 2
-    # several validated findings answered by the evidence tables -> one LLM #2 call
-    assert provider.final_calls == 1
+    # seven wordings of one claim: the hypothesis cap keeps five, the
+    # (test, columns) dedup keeps one of those
+    assert len(insights) == 1 and insights[0]["supported"] == "strong"
+    assert len(insights[0]["text"]) == 300  # truncation kept
+    reasons = [d["reason"] for d in result["debug"]["dropped"]]
+    assert reasons.count("beyond the hypothesis cap") == 2
+    assert sum(r.startswith("duplicate of hypothesis") for r in reasons) == 4
+    # a single finding answered by the evidence tables -> no LLM #2 call
+    assert provider.final_calls == 0
 
 
 def test_cache_per_dataset_and_per_llm_flag(profile) -> None:

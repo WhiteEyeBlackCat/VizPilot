@@ -186,17 +186,16 @@ def check_coverage(test_type: str, columns: dict[str, str], profile: DatasetProf
 
     if test_type == "nonlinear_relationship":
         x, y = columns["x"], columns["y"]
-        signal = next((s for s in l2.nonlinear if {s.x, s.y} == {x, y}), None)
+        # directed: layer 2 keeps one direction per pair (the larger gap); the
+        # reverse claim is a different statistic and goes to a probe
+        signal = next((s for s in l2.nonlinear if (s.x, s.y) == (x, y)), None)
         if signal is None:
             return None
         thresholds = THRESHOLDS["nonlinear_relationship"]
         verdict = _verdict(signal.nonlinear_gap, thresholds)
-        means = ", ".join(_fmt(b.y_mean) for b in signal.bins)
         r2 = "n/a" if signal.r2_pearson is None else f"{signal.r2_pearson:.2f}"
-        lines = [
-            f"shape {signal.shape}; binned eta-squared {signal.binned_eta2:.2f} vs linear r2 {r2}",
-            f"{signal.y} mean per {signal.x} bin (low to high): {means}",
-        ]
+        lines = [f"shape {signal.shape}; binned eta-squared {signal.binned_eta2:.2f} vs linear r2 {r2}"]
+        lines += bin_extremes_lines(signal.x, signal.y, [b.model_dump() for b in signal.bins])
         return CoverageHit(
             verdict=verdict,
             effect_label="nonlinear_gap = binned eta-squared - Pearson r-squared",
@@ -376,14 +375,32 @@ def corroborated(test_type: str, columns: dict[str, str], hit: CoverageHit, prof
 # --- probe inference from a chart (legacy / chart-only hypotheses) ----------------
 
 
+def bin_extremes_lines(x: str, y: str, bins: list[dict[str, Any]]) -> list[str]:
+    """The shape of a binned relationship in two lines: the highest and the
+    lowest bin with their x range (bin edges are not quotable numbers, so
+    they stay descriptive)."""
+    usable = [b for b in bins if isinstance(b.get("y_mean"), (int, float))]
+    if not usable:
+        return []
+    top = max(usable, key=lambda b: b["y_mean"])
+    low = min(usable, key=lambda b: b["y_mean"])
+    return [
+        f"highest mean {y} {_fmt(top['y_mean'])} for {x} in [{_fmt(top['lo'])}, {_fmt(top['hi'])}]",
+        f"lowest mean {y} {_fmt(low['y_mean'])} for {x} in [{_fmt(low['lo'])}, {_fmt(low['hi'])}]",
+    ]
+
+
 def infer_probe(spec: ChartSpec, profile: DatasetProfile) -> tuple[str, dict[str, str]] | None:
     """The probe a chart-only hypothesis implicitly asks for: bar -> group
-    difference, box -> distribution difference, grouped scatter -> slope
-    difference, plain scatter -> non-linear dependence, line -> time pattern.
-    Heatmaps and histograms carry no testable claim."""
+    difference (grouped bar -> interaction), box -> distribution difference,
+    grouped scatter -> slope difference, plain scatter -> non-linear
+    dependence, line -> time pattern. Heatmaps and histograms carry no
+    testable claim."""
     columns = {c.name: c for c in profile.columns}
     x = columns.get(spec.x or "")
     y = columns.get(spec.y or "")
+    if spec.type == "bar" and x is not None and y is not None and spec.group_by:
+        return "interaction", {"factor1": x.name, "factor2": spec.group_by, "target": y.name}
     if spec.type in ("bar", "box") and x is not None and y is not None:
         probe = "group_difference" if spec.type == "bar" else "distribution_difference"
         return probe, {"group": x.name, "target": y.name}
