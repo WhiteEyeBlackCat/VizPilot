@@ -4,12 +4,21 @@ import { echarts, type ECharts, type VizOption } from "./echarts";
 
 interface Props {
   option: VizOption;
-  height?: number;
+  /** px number or any CSS height value */
+  height?: number | string;
 }
 
 /** The chart instance is reachable from the host element (e2e / debugging). */
 export interface EChartsHost extends HTMLDivElement {
   __echarts?: ECharts;
+}
+
+/** Hide every visible tooltip of the ECharts instances on the page (e.g.
+ *  before an overlay opens, so a hovered tooltip cannot float above it). */
+export function hideAllTips(): void {
+  document.querySelectorAll<HTMLDivElement>("[data-chart-view]").forEach((host) => {
+    echarts.getInstanceByDom(host)?.dispatchAction({ type: "hideTip" });
+  });
 }
 
 /** Thin React binding over echarts/core: one instance per mount, option

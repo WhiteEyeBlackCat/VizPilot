@@ -1,8 +1,8 @@
 // Pure RenderResult -> ECharts option conversion. No React, no DOM, no
 // echarts runtime import (types only) so it is unit-testable and the only
-// place ECharts-specific structure lives. Semantics mirror chartTraces.ts
-// (the Plotly adapter) one-to-one: nothing is re-aggregated, re-sorted or
-// re-binned here — the backend RenderResult is the single source of truth.
+// place ECharts-specific structure lives. Nothing is re-aggregated,
+// re-sorted or re-binned here — the backend RenderResult is the single
+// source of truth. Semantics are documented per chart type below.
 
 import type {
   BarSeriesOption,
@@ -22,6 +22,7 @@ import type {
   HistogramChartData,
   LineChartData,
   RenderResult,
+  TimeGranularity,
 } from "../../types";
 import type { VizOption } from "./echarts";
 import {
@@ -62,6 +63,55 @@ const pairs = (x: (number | string | null)[], y: (number | null)[]): Pair[] =>
 const isTemporalX = (data: LineChartData): boolean =>
   data.series.some((s) => s.x.some((v) => typeof v === "string"));
 
+// Time-axis tick labels per time_granularity (the backend writes the chosen
+// granularity back into result.spec when it aggregates; a raw hourly series
+// keeps it null, so the intraday case is detected from the timestamps).
+// ECharts picks a primary unit per tick and uses that unit's entry, so the
+// first tick of a new year (or month at finer granularities) carries the
+// coarser context automatically.
+export type TimeLabelFormatter = Record<string, string>;
+
+const MONTHLY: TimeLabelFormatter = { year: "{yyyy}-{MM}", month: "{yyyy}-{MM}", day: "{yyyy}-{MM}" };
+const DAILY: TimeLabelFormatter = {
+  year: "{yyyy}-{MM}-{dd}",
+  month: "{MM}-{dd}",
+  day: "{MM}-{dd}",
+  hour: "{MM}-{dd}",
+  minute: "{MM}-{dd}",
+  second: "{MM}-{dd}",
+  millisecond: "{MM}-{dd}",
+};
+const INTRADAY: TimeLabelFormatter = {
+  year: "{yyyy}-{MM}-{dd}",
+  month: "{MM}-{dd}",
+  day: "{MM}-{dd}",
+  hour: "{MM}-{dd} {HH}:{mm}",
+  minute: "{HH}:{mm}",
+  second: "{HH}:{mm}:{ss}",
+  millisecond: "{HH}:{mm}:{ss}",
+};
+
+/** True when any ISO timestamp carries a time of day other than midnight. */
+export const hasIntradayX = (data: LineChartData): boolean =>
+  data.series.some((s) =>
+    s.x.some((v) => typeof v === "string" && /T(?!00:00:00(?:\.0+)?$)\d{2}:\d{2}/.test(v)),
+  );
+
+export function timeLabelFormatter(
+  granularity: TimeGranularity | null | undefined,
+  intraday = false,
+): TimeLabelFormatter {
+  switch (granularity) {
+    case "month":
+      return MONTHLY;
+    case "day":
+    case "week":
+      return DAILY;
+    default: // "raw" or null: the backend did not bucket the timestamps
+      return intraday ? INTRADAY : DAILY;
+  }
+}
+
 function baseOption(result: RenderResult, zoomable: boolean, legendShown: boolean): VizOption {
   return {
     color: PALETTE,
@@ -92,12 +142,17 @@ function lineOption(result: RenderResult): VizOption {
   return {
     ...baseOption(result, true, d.series.length > 1),
     tooltip: { ...tooltipBase, trigger: "axis", axisPointer: { type: "cross" }, valueFormatter: tooltipValue },
-    xAxis: {
-      ...axisBase,
-      type: temporal ? "time" : "value",
-      ...xAxisName(result.spec.x ?? ""),
-      ...(temporal ? {} : { scale: true }),
-    },
+    xAxis: temporal
+      ? {
+          ...axisBase,
+          type: "time",
+          ...xAxisName(result.spec.x ?? ""),
+          axisLabel: {
+            ...axisBase.axisLabel,
+            formatter: timeLabelFormatter(result.spec.time_granularity, hasIntradayX(d)),
+          },
+        }
+      : { ...axisBase, type: "value", scale: true, ...xAxisName(result.spec.x ?? "") },
     yAxis: { ...axisBase, type: "value", scale: true, ...yAxisName(d.y_label) },
     dataZoom: dataZoomInside(["x"]),
     series,
@@ -183,17 +238,21 @@ export function histogramBins(edges: number[], counts: number[]): HistogramBin[]
   return counts.map((count, i) => [edges[i], edges[i + 1], count]);
 }
 
-function renderBin(_params: CustomSeriesRenderItemParams, api: CustomSeriesRenderItemAPI) {
-  const lo = api.value(0) as number;
-  const hi = api.value(1) as number;
-  const count = api.value(2) as number;
-  const [x0, y1] = api.coord([lo, count]);
-  const [x1, y0] = api.coord([hi, 0]);
-  const style = api.style();
-  return {
-    type: "rect" as const,
-    shape: { x: x0, y: y1, width: Math.max(x1 - x0 - 1, 1), height: y0 - y1 },
-    style,
+/** renderItem for one histogram series; opacity is baked in per series
+ *  (grouped overlay) because a custom series cannot read itemStyle.opacity
+ *  through api.visual, and api.style() is deprecated. */
+function makeRenderBin(opacity: number) {
+  return (_params: CustomSeriesRenderItemParams, api: CustomSeriesRenderItemAPI) => {
+    const lo = api.value(0) as number;
+    const hi = api.value(1) as number;
+    const count = api.value(2) as number;
+    const [x0, y1] = api.coord([lo, count]);
+    const [x1, y0] = api.coord([hi, 0]);
+    return {
+      type: "rect" as const,
+      shape: { x: x0, y: y1, width: Math.max(x1 - x0 - 1, 1), height: y0 - y1 },
+      style: { fill: api.visual("color") as string, opacity },
+    };
   };
 }
 
@@ -206,7 +265,7 @@ function histogramOption(result: RenderResult): VizOption {
   const series: CustomSeriesOption[] = groups.map((g) => ({
     type: "custom",
     name: g.name,
-    renderItem: renderBin,
+    renderItem: makeRenderBin(grouped ? HISTOGRAM_GROUP_OPACITY : 1),
     encode: { x: [0, 1], y: 2, tooltip: [0, 1, 2] },
     data: histogramBins(g.edges, g.counts),
     itemStyle: { opacity: grouped ? HISTOGRAM_GROUP_OPACITY : 1 },
@@ -243,7 +302,7 @@ function histogramOption(result: RenderResult): VizOption {
 // --- box --------------------------------------------------------------------
 
 // ECharts boxplot tuples cannot hold null: a missing statistic becomes NaN,
-// which ECharts leaves undrawn (Plotly did the same with null)
+// which ECharts leaves undrawn (a null statistic must never become 0)
 export type BoxStats = [number, number, number, number, number];
 const stat = (v: number | null): number => (v === null ? NaN : v);
 
@@ -251,7 +310,7 @@ function boxOption(result: RenderResult): VizOption {
   const d = result.chart_data as BoxChartData;
   const names = d.groups.map((g) => g.name);
   // ECharts boxplot order: [min, Q1, median, Q3, max]; the backend's fences
-  // play the min/max role, exactly as Plotly's lowerfence/upperfence did
+  // play the min/max role (whisker ends), exactly as the backend computed them
   const stats: BoxStats[] = d.groups.map((g) => [
     stat(g.lower_fence),
     stat(g.q1),
@@ -377,7 +436,7 @@ function heatmapOption(result: RenderResult): VizOption {
       splitArea: { show: true },
       axisLabel: { ...axisBase.axisLabel, interval: 0, rotate: d.columns.length > 6 ? 45 : 0 },
     },
-    // row 0 at the top, like a matrix (Plotly: autorange reversed)
+    // row 0 at the top, like a matrix
     yAxis: { ...axisBase, type: "category", data: d.columns, inverse: true, splitArea: { show: true } },
     visualMap: {
       type: "continuous",

@@ -2,22 +2,21 @@ import { useMemo } from "react";
 
 import { EChartsView } from "../charts/echarts/EChartsView";
 import { buildOption, isEmpty } from "../charts/echarts/option";
-import { PlotlyView } from "../charts/plotly/PlotlyView";
-import { getRenderer } from "../charts/renderer";
 import type { BarChartData, RenderResult } from "../types";
 
 const CHART_HEIGHT = 360;
 
-export function ChartView({ result }: { result: RenderResult }) {
-  // decided once per page load; the option is derived from the immutable
-  // RenderResult so it is memoised per chart
-  const renderer = useMemo(getRenderer, []);
-  const option = useMemo(
-    () => (renderer === "echarts" && !isEmpty(result) ? buildOption(result) : null),
-    [renderer, result],
-  );
+interface Props {
+  result: RenderResult;
+  /** px number or any CSS height (the enlarged dialog passes a vh value) */
+  height?: number | string;
+}
 
-  if (isEmpty(result)) {
+export function ChartView({ result, height = CHART_HEIGHT }: Props) {
+  // the option is derived from the immutable RenderResult: memoised per chart
+  const option = useMemo(() => (isEmpty(result) ? null : buildOption(result)), [result]);
+
+  if (!option) {
     return (
       <div className="flex h-64 items-center justify-center rounded bg-slate-50 text-sm text-slate-400">
         此組合無資料
@@ -31,11 +30,7 @@ export function ChartView({ result }: { result: RenderResult }) {
 
   return (
     <div>
-      {option ? (
-        <EChartsView option={option} height={CHART_HEIGHT} />
-      ) : (
-        <PlotlyView result={result} height={CHART_HEIGHT} />
-      )}
+      <EChartsView option={option} height={height} />
       <div className="flex gap-3 px-1 text-xs text-slate-400">
         {result.sampled && <span>已抽樣（顯示 {result.n_points} 點）</span>}
         {truncated && <span>類別過多，僅顯示前 {result.spec.top_n ?? 20} 名</span>}

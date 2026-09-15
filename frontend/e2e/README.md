@@ -33,7 +33,7 @@ controls and Radix/shadcn `Select` triggers (matched by accessible label), so
 the same script validates the UI before and after the shadcn migration.
 Compare `screenshots/baseline/` (pre-migration) against a later tag.
 
-## Stage 11 additions
+## Chart checks (stages 11–12)
 
 - `npm run capture-fixtures` (`e2e/capture-fixtures.mjs`) records RenderResult
   snapshots from the real backend into `src/charts/__fixtures__/*.json`
@@ -42,7 +42,7 @@ Compare `screenshots/baseline/` (pre-migration) against a later tag.
   after any backend render change and commit the diff. `e2e/data/` holds
   small committed CSVs for shapes the synthetic sets never produce (a
   missing category × group cell, a null pairwise correlation).
-- `run.mjs` now reports which library drew each chart (`renderer`,
-  `seriesTypes`, canvas size), fires a real ECharts `showTip` on every
-  manual chart and screenshots the tooltip, and ends by reloading with
-  `?renderer=plotly` to prove the Plotly fallback still draws.
+- `run.mjs` reports the ECharts series types and canvas size of every chart,
+  fires a real `showTip` on each manual chart and screenshots the tooltip,
+  opens the enlarged-view dialog for the first chart (checks the second
+  instance is larger and is disposed on Escape), and asserts no page errors.

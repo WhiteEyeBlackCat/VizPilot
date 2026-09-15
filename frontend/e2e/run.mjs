@@ -31,7 +31,7 @@ if (existsSync(xlibs)) {
 }
 
 const dataset = (name) => join(repo, "dataset", name);
-const CHART_SEL = ".js-plotly-plot, [data-chart-view]";
+const CHART_SEL = "[data-chart-view]";
 
 const summary = { tag, base, profileRetries: 0, pageErrors: [], consoleErrors: [], steps: [] };
 const step = (name, data) => {
@@ -111,10 +111,10 @@ async function chartCount() {
   return page.locator(CHART_SEL).count();
 }
 
-/** Which library drew the last chart, and whether its canvas has pixels. */
+/** The ECharts instance behind a chart host: canvas present, its pixel size,
+ *  and the series types actually set. */
 async function inspectChart(locator) {
   return locator.evaluate((el) => {
-    if (el.classList.contains("js-plotly-plot")) return { renderer: "plotly", svg: el.querySelectorAll("svg").length };
     const canvas = el.querySelector("canvas");
     const chart = el.__echarts;
     return {
@@ -224,13 +224,37 @@ try {
     const info = await inspectChart(chart);
     step(`manual.${m.name}`, { charts: count, ...info });
     await shot(`10-manual-${m.name}`, chart.locator("xpath=.."));
-    if (info.renderer === "echarts") {
-      const tip = await probeTooltip(chart);
-      step(`manual.${m.name}.tooltip`, tip);
-      if (tip.shown) await shot(`10-manual-${m.name}-tooltip`, chart.locator("xpath=.."));
-    }
+    const tip = await probeTooltip(chart);
+    step(`manual.${m.name}.tooltip`, tip);
+    if (tip.shown) await shot(`10-manual-${m.name}-tooltip`, chart.locator("xpath=.."));
   }
   await shot("11-workspace-all");
+
+  // enlarged view: the "放大" button opens a dialog that draws the same
+  // RenderResult in a second, bigger ECharts instance; Escape closes it and
+  // the instance is disposed with the dialog
+  {
+    const inlineCharts = await chartCount();
+    await page.getByRole("button", { name: "放大" }).first().click();
+    const dialog = page.locator("[data-chart-dialog]");
+    await dialog.waitFor({ timeout: 10000 });
+    await page.waitForTimeout(1200);
+    const big = dialog.locator(CHART_SEL);
+    const info = await inspectChart(big);
+    const inline = await inspectChart(page.locator(CHART_SEL).first());
+    step("workspace.enlarge", {
+      dialogOpen: true,
+      chartsWhileOpen: await chartCount(),
+      inlineCanvas: inline.canvasSize,
+      dialogCanvas: info.canvasSize,
+      bigger: Boolean(info.canvasSize && inline.canvasSize && info.canvasSize[0] > inline.canvasSize[0]),
+      seriesTypes: info.seriesTypes,
+    });
+    await shot("13-enlarged-dialog");
+    await page.keyboard.press("Escape");
+    await dialog.waitFor({ state: "detached", timeout: 10000 });
+    step("workspace.enlarge.closed", { charts: await chartCount(), same: (await chartCount()) === inlineCharts });
+  }
 
   // 422 path: line with a categorical x that needs aggregation is fine, so
   // provoke a real validation error instead: scatter with x == y is blocked
@@ -262,18 +286,6 @@ try {
     const topEmptyNotice = await page.getByText(/沒有圖表在資料中展現足夠強的證據/).count();
     step("tiny.warnings", { recCards: await page.locator("[id^=rec-card-]").count(), warningChips: chips, topEmptyNotice: topEmptyNotice > 0 });
     await shot("30-tiny-warnings");
-  }
-  // ---- renderer fallback: ?renderer=plotly must still draw with Plotly ---
-  {
-    await page.goto(`${base}/?renderer=plotly`, { waitUntil: "networkidle" });
-    const switcher = page.getByLabel("選擇既有資料集").first();
-    await switcher.click();
-    await page.getByRole("option", { name: /^air_quality\.csv/ }).first().click();
-    await page.getByRole("heading", { name: /B\. 資料總覽/ }).waitFor({ timeout: 30000 });
-    const { chart, count } = await generateManual({ type: "scatter", x: "temperature", y: "humidity" });
-    const info = await inspectChart(chart);
-    step("fallback.plotly", { charts: count, ...info });
-    await shot("40-plotly-fallback", chart.locator("xpath=.."));
   }
 } catch (e) {
   summary.fatal = String(e && e.stack ? e.stack : e);

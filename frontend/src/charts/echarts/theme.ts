@@ -54,13 +54,14 @@ export function title(text: string): TitleComponentOption {
 }
 
 // room for the title row above, the y-axis name on the left and the x-axis
-// name below; containLabel keeps long category labels inside the canvas
+// name below. ECharts 6 default outerBounds layout (outerBoundsMode "auto",
+// outerBoundsContain "all") keeps axis labels AND axis names inside the
+// canvas; the deprecated containLabel is deliberately not used.
 export const grid: GridComponentOption = {
   left: 16,
   right: 24,
-  top: 48,
+  top: 56, // title row (top 6, 14px) + a clear gap above the y-axis name
   bottom: 40,
-  containLabel: true,
 };
 
 /** A bottom legend needs one more row under the x-axis name. */
@@ -117,7 +118,7 @@ export const legend: LegendComponentOption = {
 /** Toolbox: image export always; zoom/restore only for continuous axes. */
 export function toolbox(imageName: string, zoomable: boolean): ToolboxComponentOption {
   return {
-    right: 64, // clear of the card's remove button
+    right: 136, // clear of the workspace card's 放大 / 移除 buttons
     top: 4,
     itemSize: 14,
     iconStyle: { borderColor: COLORS.muted },

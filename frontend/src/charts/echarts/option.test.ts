@@ -42,6 +42,7 @@ import {
   histogramBins,
   isEmpty,
   LARGE_SCATTER_THRESHOLD,
+  timeLabelFormatter,
 } from "./option";
 
 const fx = (json: unknown) => json as RenderResult;
@@ -123,6 +124,24 @@ describe("line", () => {
     const s = seriesOf(r);
     expect((s[0] as LineSeriesOption).showSymbol).toBe(false);
     expect((s[0].data as unknown[]).length).toBe(r.n_points);
+  });
+
+  it("time axis labels follow the granularity the backend chose (spec.time_granularity)", () => {
+    // day granularity: month-day ticks, the first tick of a year carries the year
+    const day = axis(buildOption(fx(lineSingle)).xAxis);
+    expect(fx(lineSingle).spec.time_granularity).toBe("day");
+    expect(day.axisLabel).toMatchObject({ formatter: { day: "{MM}-{dd}", year: "{yyyy}-{MM}-{dd}" } });
+    // hourly series left unbucketed by the backend (granularity null): the
+    // timestamps are intraday, so hour ticks show the clock time
+    expect(fx(lineRawTime).spec.time_granularity ?? null).toBeNull();
+    const raw = axis(buildOption(fx(lineRawTime)).xAxis);
+    expect(raw.axisLabel).toMatchObject({ formatter: { hour: "{MM}-{dd} {HH}:{mm}", minute: "{HH}:{mm}" } });
+    expect(timeLabelFormatter("month")).toMatchObject({ month: "{yyyy}-{MM}", year: "{yyyy}-{MM}" });
+    expect(timeLabelFormatter("week")).toEqual(timeLabelFormatter("day"));
+    expect(timeLabelFormatter(null, false)).toEqual(timeLabelFormatter("day"));
+    expect(timeLabelFormatter("raw", true)).not.toEqual(timeLabelFormatter("day"));
+    // a numeric x axis has no time formatter
+    expect(axis(buildOption(fx(lineNumericX)).xAxis).axisLabel).not.toHaveProperty("formatter");
   });
 
   it("numeric x -> value axis (no time parsing of numbers)", () => {

@@ -2,7 +2,7 @@
 // no DOM) so the tests cover what actually gets drawn, not only the option
 // object: bar counts, axis labels, heatmap cell counts, histogram rectangles.
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import barGroupedNull from "../__fixtures__/bar_grouped_null.json";
 import barSingle from "../__fixtures__/bar_single.json";
@@ -11,15 +11,19 @@ import heatmapNullCell from "../__fixtures__/heatmap_null_cell.json";
 import histogramDisplayRange from "../__fixtures__/histogram_display_range.json";
 import histogramGrouped from "../__fixtures__/histogram_grouped.json";
 import lineGrouped from "../__fixtures__/line_grouped.json";
+import lineRawTime from "../__fixtures__/line_raw_time.json";
+import lineSingle from "../__fixtures__/line_single.json";
 import type { BarChartData, BoxChartData, HistogramChartData, RenderResult } from "../../types";
 import { echarts } from "./echarts";
 import { buildOption } from "./option";
 
 const fx = (json: unknown) => json as RenderResult;
 
-function renderSvg(result: RenderResult): string {
+function renderSvg(result: RenderResult, patch: (o: Record<string, unknown>) => void = () => {}): string {
   const chart = echarts.init(null, null, { renderer: "svg", ssr: true, width: 800, height: 400 });
-  chart.setOption({ ...buildOption(result), animation: false });
+  const option = buildOption(result) as Record<string, unknown>;
+  patch(option);
+  chart.setOption({ ...option, animation: false });
   const svg = chart.renderToSVGString();
   chart.dispose();
   return svg;
@@ -40,6 +44,57 @@ const polylines = (svg: string, color: string) =>
   );
 
 describe("SSR rendering", () => {
+  // ECharts logs deprecations (grid.containLabel, api.style) via console:
+  // the adapter must trigger none of them
+  let logged: string[] = [];
+  beforeEach(() => {
+    logged = [];
+    for (const m of ["warn", "error", "log"] as const) {
+      vi.spyOn(console, m).mockImplementation((...args: unknown[]) => {
+        logged.push(args.map(String).join(" "));
+      });
+    }
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("no deprecation warnings from the drawn options (containLabel, api.style)", () => {
+    for (const r of [barSingle, histogramGrouped, lineSingle, boxOutliers, heatmapNullCell]) renderSvg(fx(r));
+    expect(logged.filter((l) => /deprecat|containLabel|api\.style/i.test(l))).toEqual([]);
+  });
+
+  it("axis labels and names push the plot inward without containLabel (outerBounds default)", () => {
+    const svg = renderSvg(fx(barSingle));
+    expect(hasText(svg, "station")).toBe(true); // x-axis name
+    expect(hasText(svg, "mean(pm25)")).toBe(true); // y-axis name
+    // every bar starts right of the y-axis label column: grid.left is only
+    // 16px, so a larger offset proves the layout reserved room for the labels
+    const barX = marks(svg, 'fill="#2563eb"').map((tag) => Number((tag.match(/d="M\s*([\d.]+)/) ?? [])[1]));
+    expect(barX.length).toBe((fx(barSingle).chart_data as BarChartData).categories.length);
+    for (const x of barX) expect(x).toBeGreaterThan(40);
+  });
+
+  it("time axis: day-granularity ticks read MM-DD (ECharts default would show bare day numbers)", () => {
+    const labelled = renderSvg(fx(lineSingle));
+    const mmdd = /(?:>|\s)(\d{2}-\d{2}|\d{4}-\d{2}-\d{2})</g;
+    expect(Array.from(labelled.matchAll(mmdd)).length).toBeGreaterThanOrEqual(3);
+    // same option with the formatter removed: the default labels carry no MM-DD
+    const dflt = renderSvg(fx(lineSingle), (o) => {
+      const xa = o.xAxis as Record<string, unknown>;
+      xa.axisLabel = { color: "#000" };
+    });
+    expect(Array.from(dflt.matchAll(mmdd)).length).toBe(0);
+    // hourly (unbucketed) series over 30 days: ticks are still day-level
+    // (MM-DD); zoomed to a 12-hour window the hour-level ticks carry HH:mm
+    const raw = renderSvg(fx(lineRawTime));
+    expect(Array.from(raw.matchAll(mmdd)).length).toBeGreaterThanOrEqual(3);
+    const zoomed = renderSvg(fx(lineRawTime), (o) => {
+      const xa = o.xAxis as Record<string, unknown>;
+      xa.min = "2025-01-02T00:00:00";
+      xa.max = "2025-01-02T12:00:00";
+    });
+    expect(Array.from(zoomed.matchAll(/\d{2}-\d{2} (\d{2}:\d{2})</g)).length).toBeGreaterThanOrEqual(2);
+  });
+
   it("bar: one rect per category, labels in backend order", () => {
     const r = fx(barSingle);
     const d = r.chart_data as BarChartData;
