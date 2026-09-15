@@ -2,21 +2,28 @@
 OpenAI-compatible chat completions API over plain httpx, so Ollama, vLLM,
 llama.cpp server and LM Studio are all interchangeable via base_url/model.
 No provider SDK is imported.
+
+Stage 17.3: two calls — hypotheses (LLM #1) and, conditionally, the final
+wording (LLM #2). Both return the parsed response plus token/latency usage.
 """
 
 import json
-from typing import Protocol
+import time
+from typing import Any, Protocol, TypeVar
 
 import httpx
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from ..charts.rules import Recommendation
 from ..profiling.models import DatasetProfile
-from .prompts import build_messages
-from .schemas import LLMResponse
+from .coverage import ValidatedHypothesis
+from .prompts import build_final_messages, build_hypothesis_messages
+from .schemas import FinalResponse, HypothesisResponse, LLMUsage
 
 TEMPERATURE = 0.1
 MAX_TOKENS = 2000
+
+T = TypeVar("T", bound=BaseModel)
 
 
 class LLMError(Exception):
@@ -26,16 +33,25 @@ class LLMError(Exception):
 
 
 class LLMProvider(Protocol):
-    def recommend_charts(
+    def generate_hypotheses(
         self, profile: DatasetProfile, rule_candidates: list[Recommendation]
-    ) -> LLMResponse: ...
+    ) -> tuple[HypothesisResponse, LLMUsage]: ...
+
+    def finalize_insights(
+        self, profile: DatasetProfile, validated: list[ValidatedHypothesis]
+    ) -> tuple[FinalResponse, LLMUsage]: ...
 
 
 class DisabledProvider:
-    def recommend_charts(
+    def generate_hypotheses(
         self, profile: DatasetProfile, rule_candidates: list[Recommendation]
-    ) -> LLMResponse:
-        return LLMResponse()
+    ) -> tuple[HypothesisResponse, LLMUsage]:
+        return HypothesisResponse(), LLMUsage()
+
+    def finalize_insights(
+        self, profile: DatasetProfile, validated: list[ValidatedHypothesis]
+    ) -> tuple[FinalResponse, LLMUsage]:
+        return FinalResponse(), LLMUsage()
 
 
 class OpenAICompatProvider:
@@ -55,23 +71,39 @@ class OpenAICompatProvider:
             base_url=base_url.rstrip("/"), headers=headers, timeout=timeout_seconds, transport=transport
         )
 
+    def generate_hypotheses(
+        self, profile: DatasetProfile, rule_candidates: list[Recommendation]
+    ) -> tuple[HypothesisResponse, LLMUsage]:
+        messages = build_hypothesis_messages(profile, rule_candidates, self._include_sample_rows)
+        return self._complete(messages, HypothesisResponse)
+
+    def finalize_insights(
+        self, profile: DatasetProfile, validated: list[ValidatedHypothesis]
+    ) -> tuple[FinalResponse, LLMUsage]:
+        messages = build_final_messages(profile, validated)
+        return self._complete(messages, FinalResponse)
+
+    # the single-call name is kept as a thin alias for older callers
     def recommend_charts(
         self, profile: DatasetProfile, rule_candidates: list[Recommendation]
-    ) -> LLMResponse:
+    ) -> HypothesisResponse:
+        return self.generate_hypotheses(profile, rule_candidates)[0]
+
+    def _complete(self, messages: list[dict[str, str]], model_cls: type[T]) -> tuple[T, LLMUsage]:
         if not self._model:
             raise LLMError("misconfigured: model not set", "llm_model is empty")
-        messages = build_messages(profile, rule_candidates, self._include_sample_rows)
         last: Exception | None = None
         for _ in range(2):  # one retry for connection/HTTP/parse failures
             try:
-                return self._call(messages)
+                return self._call(messages, model_cls)
             except httpx.TimeoutException as exc:
                 raise LLMError("timeout", str(exc)) from exc  # timeouts never retry (critique #4)
             except (httpx.HTTPError, ValueError, ValidationError) as exc:
                 last = exc
         raise LLMError("request failed after retry", str(last)) from last
 
-    def _call(self, messages: list[dict[str, str]]) -> LLMResponse:
+    def _call(self, messages: list[dict[str, str]], model_cls: type[T]) -> tuple[T, LLMUsage]:
+        started = time.perf_counter()
         response = self._client.post(
             "/chat/completions",
             json={
@@ -83,8 +115,9 @@ class OpenAICompatProvider:
             },
         )
         response.raise_for_status()
+        body = response.json()
         try:
-            content = response.json()["choices"][0]["message"]["content"]
+            content = body["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError):
             raise ValueError("malformed chat completion envelope") from None
         # json_object mode is best-effort server-side; Pydantic is the authority (D4)
@@ -98,7 +131,25 @@ class OpenAICompatProvider:
             if start == -1 or end <= start:
                 raise
             payload = json.loads(extracted[start : end + 1])
-        return LLMResponse.model_validate(payload)
+        usage = _usage(body, messages, content, (time.perf_counter() - started) * 1000)
+        return model_cls.model_validate(payload), usage
+
+
+def _usage(body: Any, messages: list[dict[str, str]], content: str, latency_ms: float) -> LLMUsage:
+    raw = body.get("usage") if isinstance(body, dict) else None
+    prompt_tokens = completion_tokens = None
+    if isinstance(raw, dict):
+        prompt_tokens = raw.get("prompt_tokens") if isinstance(raw.get("prompt_tokens"), int) else None
+        completion_tokens = (
+            raw.get("completion_tokens") if isinstance(raw.get("completion_tokens"), int) else None
+        )
+    return LLMUsage(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        prompt_chars=sum(len(m.get("content", "")) for m in messages),
+        completion_chars=len(content or ""),
+        latency_ms=round(latency_ms, 1),
+    )
 
 
 def _extract_json(text: str) -> str:

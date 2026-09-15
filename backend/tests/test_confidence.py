@@ -24,7 +24,7 @@ from app.charts.confidence import (
 )
 from app.charts.rules import TOP_SCORE_FLOOR, Recommendation, recommend_charts
 from app.charts.spec import ChartSpec
-from app.llm.schemas import LLMResponse
+from app.llm.schemas import FinalResponse, HypothesisResponse, LLMUsage
 from app.llm.service import RecommendationService
 from app.profiling.profiler import profile_dataset
 
@@ -310,11 +310,14 @@ def test_excluded_column_warnings_only_for_missingness() -> None:
 
 
 class _FakeProvider:
-    def __init__(self, response: LLMResponse) -> None:
+    def __init__(self, response: HypothesisResponse) -> None:
         self.response = response
 
-    def recommend_charts(self, profile, rule_candidates) -> LLMResponse:
-        return self.response
+    def generate_hypotheses(self, profile, rule_candidates):
+        return self.response, LLMUsage()
+
+    def finalize_insights(self, profile, validated):
+        return FinalResponse(), LLMUsage()
 
 
 def test_llm_chart_on_tiny_data_is_weak_and_keeps_caution() -> None:
@@ -332,7 +335,7 @@ def test_llm_chart_on_tiny_data_is_weak_and_keeps_caution() -> None:
     }
     new = {"title": "age vs score", "type": "scatter", "x": "age", "y": "score", "reason": "guess", "priority": 2}
     service = RecommendationService(
-        _FakeProvider(LLMResponse(insights=[{"text": "dept matters", "chart": dedup}], charts=[new]))
+        _FakeProvider(HypothesisResponse(hypotheses=[{"statement": "dept matters", "chart": dedup}], charts=[new]))
     )
     result = service.get(profile, use_llm=True)
     (insight,) = result["insights"]
