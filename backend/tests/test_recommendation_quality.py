@@ -283,3 +283,75 @@ def test_recommendations_deterministic() -> None:
     first = [rec.model_dump() for rec in _recs(df)]
     second = [rec.model_dump() for rec in _recs(df)]
     assert first == second
+
+
+# --- stage 13: sales_basic — the formula is not a finding -------------------
+
+import subprocess  # noqa: E402
+import sys  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+import pytest  # noqa: E402
+
+from app.charts.rules import derived_column_warnings  # noqa: E402
+from app.datasets.loader import load_dataframe  # noqa: E402
+from app.llm.provider import DisabledProvider  # noqa: E402
+from app.llm.service import RecommendationService  # noqa: E402
+
+DATASET_DIR = Path(__file__).resolve().parents[2] / "dataset"
+
+
+def _real_dataset(name: str) -> pl.DataFrame:
+    path = DATASET_DIR / name
+    if not path.exists():
+        # generated files are gitignored; regenerate with the synthetic generator
+        generator = DATASET_DIR / "syn" / f"{path.stem}.py"
+        for python in (sys.executable, "python3"):
+            result = subprocess.run([python, str(generator)], capture_output=True, text=True)
+            if result.returncode == 0 and path.exists():
+                break
+        else:
+            pytest.skip(f"{name} missing and its generator needs pandas: {result.stderr[-200:]}")
+    return load_dataframe(path.read_bytes(), name)
+
+
+def test_sales_basic_formula_charts_never_top() -> None:
+    profile = profile_dataset(_real_dataset("sales_basic.csv"), "0" * 32, BIG)
+    derived = profile.evidence.derived_columns
+    assert [(d.target, d.formula, d.kind) for d in derived] == [
+        ("sales", "unit_price × quantity × (1 − discount)", "product_discount")
+    ]
+    assert derived[0].match_ratio == 1.0
+
+    recs = recommend_charts(profile)
+    # the only strong relationships in this dataset are the formula: no top tier
+    assert all(rec.tier != "top" for rec in recs)
+    definitional = {frozenset(("sales", c)) for c in derived[0].components}
+    for rec in recs:
+        if rec.spec.x and rec.spec.y and frozenset((rec.spec.x, rec.spec.y)) in definitional:
+            assert rec.tier == "exploratory", rec.spec
+            assert "definitional" in rec.spec.reason
+    # the neutral overview charts remain worth a look
+    assert _find(recs, "heatmap").tier == "secondary"
+    assert _find(recs, "line", x="order_date", y="sales").tier == "secondary"
+
+    # disclosed at dataset level on the rules-only path
+    payload = RecommendationService(DisabledProvider()).get(profile, use_llm=False)
+    assert [(w["code"], w["meta"]["target"]) for w in payload["warnings"]] == [("derived_column", "sales")]
+    assert payload["warnings"][0]["message"].startswith(
+        "sales appears to be computed as unit_price × quantity × (1 − discount)"
+    )
+    assert [w.model_dump() for w in derived_column_warnings(profile)] == payload["warnings"]
+
+
+@pytest.mark.parametrize("name", ["air_quality.csv", "outliers.csv", "products.csv"])
+def test_datasets_without_identities_are_untouched(name: str) -> None:
+    # regression guard for the snapshot comparison done at implementation
+    # time: no derived column, no demotion, no disclosure on these files
+    profile = profile_dataset(_real_dataset(name), "0" * 32, BIG)
+    assert profile.evidence.derived_columns == []
+    recs = recommend_charts(profile)
+    assert all(w.code != "derived_relationship" for rec in recs for w in rec.warnings)
+    assert all("definitional" not in rec.spec.reason for rec in recs)
+    payload = RecommendationService(DisabledProvider()).get(profile, use_llm=False)
+    assert all(w["code"] not in ("derived_column", "near_copy_column") for w in payload["warnings"])

@@ -289,3 +289,106 @@ def test_histogram_skew_bonus_not_earned_by_sentinels() -> None:
     assert hist_rev.score / hist_rev.confidence.overall == pytest.approx(0.55)  # genuine skew keeps it
     assert evaluate_llm_spec(ChartSpec(title="h", type="histogram", x="t"), profile)[0] == 0.5
     assert evaluate_llm_spec(ChartSpec(title="h", type="histogram", x="rev"), profile)[0] == 0.55
+
+
+# --- derived columns: definitional pairs sink (stage 13) --------------------
+
+from app.charts.rules import (  # noqa: E402
+    DERIVED_SCORE_FACTOR,
+    Recommendation,
+    derived_column_warnings,
+    evaluate_llm_spec,
+)
+from app.charts.spec import ChartSpec  # noqa: E402
+
+
+def _derived_df(n: int = 400) -> pl.DataFrame:
+    import random
+
+    rng = random.Random(21)
+    price = [round(rng.uniform(50, 5000), 2) for _ in range(n)]
+    qty = [rng.randrange(1, 11) for _ in range(n)]
+    u = [rng.uniform(0, 10) for _ in range(n)]
+    return pl.DataFrame(
+        {
+            "region": [["N", "S", "E"][i % 3] for i in range(n)],
+            "unit_price": price,
+            "quantity": qty,
+            "sales": [round(p * q, 2) for p, q in zip(price, qty)],
+            "u": u,
+            "v": [x + rng.gauss(0, 2) for x in u],  # r ~ 0.8: a real relationship
+        }
+    )
+
+
+@pytest.fixture(scope="module")
+def derived_recs():
+    profile = _profile(_derived_df())
+    return profile, recommend_charts(profile)
+
+
+def test_derived_pairs_are_capped_exploratory_and_explained(derived_recs) -> None:
+    profile, recs = derived_recs
+    assert [d.formula for d in profile.evidence.derived_columns] == ["unit_price × quantity"]
+    definitional = [
+        r for r in recs if r.spec.x and r.spec.y and {r.spec.x, r.spec.y} in ({"unit_price", "sales"}, {"quantity", "sales"})
+    ]
+    assert definitional, "the price/quantity vs sales charts must still be listed, just demoted"
+    for rec in definitional:
+        assert rec.tier == "exploratory"
+        assert rec.spec.reason.startswith("sales is computed as unit_price × quantity; this relationship is definitional")
+        assert [w.code for w in rec.warnings] == ["derived_relationship"]
+        assert rec.warnings[0].severity == "info" and rec.warnings[0].meta["target"] == "sales"
+    for rec in recs:
+        if rec not in definitional:
+            assert "definitional" not in rec.spec.reason
+            assert all(w.code != "derived_relationship" for w in rec.warnings)
+
+
+def test_derived_scatter_ranks_after_real_relationships(derived_recs) -> None:
+    _, recs = derived_recs
+    scatters = [r for r in recs if r.spec.type == "scatter"]
+    assert {scatters[0].spec.x, scatters[0].spec.y} == {"u", "v"}
+    derived = next(r for r in scatters if {r.spec.x, r.spec.y} == {"unit_price", "sales"})
+    # score = (0.5 + 0.4 * strength) x confidence x DERIVED_SCORE_FACTOR
+    base = derived.score / derived.confidence.overall / DERIVED_SCORE_FACTOR
+    assert base == pytest.approx(0.5 + 0.4 * max(abs(v) for v in [
+        _pearson(derived_recs[0], "unit_price", "sales"),
+        derived_recs[0].evidence.num_num_spearman.matrix[
+            derived_recs[0].evidence.num_num_spearman.columns.index("unit_price")
+        ][derived_recs[0].evidence.num_num_spearman.columns.index("sales")],
+    ]))
+
+
+def _pearson(profile, a, b):
+    corr = profile.correlations
+    return corr.matrix[corr.columns.index(a)][corr.columns.index(b)]
+
+
+def test_llm_hypothesis_on_derived_pair_is_unverified(derived_recs) -> None:
+    profile, _ = derived_recs
+    spec = ChartSpec(title="t", type="scatter", x="unit_price", y="sales")
+    assert evaluate_llm_spec(spec, profile) == (0.5, "unverified")
+    spec = ChartSpec(title="t", type="bar", x="quantity", y="sales", aggregation="mean")
+    assert evaluate_llm_spec(spec, profile) == (0.5, "unverified")
+    # a real pair keeps its evidence grade
+    assert evaluate_llm_spec(ChartSpec(title="t", type="scatter", x="u", y="v"), profile)[1] == "strong"
+
+
+def test_derived_dataset_warning(derived_recs) -> None:
+    profile, _ = derived_recs
+    warnings = derived_column_warnings(profile)
+    assert [(w.code, w.severity, w.meta["target"], w.meta["components"]) for w in warnings] == [
+        ("derived_column", "info", "sales", ["unit_price", "quantity"])
+    ]
+    assert "computed as unit_price × quantity" in warnings[0].message
+
+
+def test_near_copy_is_disclosed_but_not_demoted(mixed_recs) -> None:
+    # value2 = 2 * value ranks identically: the pair keeps its evidence
+    # score and tier (the transform is unknown), it just says so
+    _, recs = mixed_recs
+    scatter = next(r for r in recs if r.spec.type == "scatter" and {r.spec.x, r.spec.y} == {"value", "value2"})
+    assert scatter.tier == "top"
+    assert scatter.spec.reason.startswith("value2 is nearly a transformed copy of value")
+    assert [(w.code, w.meta["kind"]) for w in scatter.warnings] == [("derived_relationship", "near_copy")]

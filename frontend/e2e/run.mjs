@@ -287,6 +287,30 @@ try {
     step("tiny.warnings", { recCards: await page.locator("[id^=rec-card-]").count(), warningChips: chips, topEmptyNotice: topEmptyNotice > 0 });
     await shot("30-tiny-warnings");
   }
+
+  // ---- sales_basic: derived-column demotion (stage 13) -------------------
+  // sales = unit_price × quantity × (1 − discount): the formula charts must
+  // not be "top" and the response must disclose the identity
+  await upload("sales_basic.csv");
+  {
+    const topEmptyNotice = (await page.getByText(/沒有圖表在資料中展現足夠強的證據/).count()) > 0;
+    const topCards = await page
+      .locator("xpath=//h3[normalize-space()='推薦重點']/..//*[starts-with(@id,'rec-card-')]")
+      .count();
+    const derivedDisclosed = (await page.getByText(/sales appears to be computed as/).count()) > 0;
+    const definitionalCards = await page.getByText(/this relationship is definitional/).count();
+    step("sales_basic.derived", {
+      recCards: await page.locator("[id^=rec-card-]").count(),
+      topEmptyNotice,
+      topCards,
+      derivedDisclosed,
+      definitionalCards,
+    });
+    await shot("31-sales-basic-derived");
+    if (!topEmptyNotice || topCards !== 0 || !derivedDisclosed) {
+      throw new Error(`sales_basic derived check failed: notice=${topEmptyNotice} topCards=${topCards} disclosed=${derivedDisclosed}`);
+    }
+  }
 } catch (e) {
   summary.fatal = String(e && e.stack ? e.stack : e);
   await shot("99-fatal").catch(() => {});

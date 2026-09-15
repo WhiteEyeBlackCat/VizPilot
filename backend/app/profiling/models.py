@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 # Bump whenever the profile schema or inference rules change: cached
 # {id}.profile.json files with a different version are recomputed.
-PROFILE_VERSION = 7  # v7: robust stats, suspected sentinels, extreme values (stage 9, stage 5)
+PROFILE_VERSION = 8  # v8: derived-column evidence (stage 13); v7: robust stats, sentinels, extremes (stage 9)
 
 SemanticType = Literal["numeric", "categorical", "datetime", "boolean", "text", "id", "unknown"]
 Frequency = Literal["daily", "weekly", "monthly", "irregular", "unknown"]
@@ -172,6 +172,29 @@ class SlopeHet(BaseModel):
     n_min: int  # rows in the smallest contributing group (for dynamic thresholds)
 
 
+DerivedKind = Literal["product", "product_discount", "sum", "difference", "ratio", "near_copy"]
+
+
+class DerivedColumn(BaseModel):
+    """A column that is (almost) a deterministic function of other columns
+    (stage 13). A chart of `target` against one of its `components` draws the
+    definition, not a finding, so the rule engine demotes such charts and the
+    LLM is told never to present them as insights.
+
+    kind != near_copy: `target ≈ formula(components)` row-wise within a
+    rounding tolerance on >= 99% of the rows where every column is finite.
+    kind == near_copy: |Spearman| >= 0.995 with the single component — a
+    transformed duplicate; disclosed but not demoted (the transform is not
+    known, and two genuinely co-moving measurements look the same)."""
+
+    target: str
+    components: list[str]
+    formula: str  # human-readable, e.g. "unit_price × quantity × (1 − discount)"
+    kind: DerivedKind
+    match_ratio: float  # matched / valid rows (kind near_copy: |rho|)
+    n: int  # valid rows the check ran on (profiled-sample level, capped)
+
+
 class Evidence(BaseModel):
     cat_num: list[CatNumEffect] = []
     time_effects: list[TimeEffect] = []
@@ -179,6 +202,7 @@ class Evidence(BaseModel):
     num_num_spearman: Correlations | None = None
     interactions: list[InteractionEffect] = []
     slope_heterogeneity: list[SlopeHet] = []
+    derived_columns: list[DerivedColumn] = []  # stage 13, additive
 
 
 class DatasetProfile(BaseModel):

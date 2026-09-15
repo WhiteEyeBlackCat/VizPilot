@@ -246,7 +246,7 @@ export function Recommendations({ recs, aiPending, onGenerate }: Props) {
               <div key={tier} className="mt-4 first:mt-0">
                 <h3 className="mb-2 text-sm font-medium text-muted-foreground">{title}</h3>
                 <p className="text-sm text-muted-foreground/80">
-                  沒有圖表在資料中展現足夠強的證據——以下為次要與探索性建議。
+                  沒有圖表在資料中展現足夠強的證據（定義性關係不算發現）——以下為次要與探索性建議。
                 </p>
               </div>
             );

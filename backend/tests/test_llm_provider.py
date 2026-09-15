@@ -253,3 +253,24 @@ def test_prompt_notes_suspected_sentinels_and_extremes() -> None:
     assert "suspected sentinel values: -999, 9999" in t_line and "4 extreme values" in t_line
     clean_line = next(line for line in lines if line.startswith("- clean"))
     assert "sentinel" not in clean_line and "extreme" not in clean_line
+
+
+def test_prompt_lists_derived_columns_as_definitional() -> None:
+    import random
+
+    rng = random.Random(8)
+    n = 60
+    a = [rng.uniform(1, 100) for _ in range(n)]
+    b = [rng.uniform(1, 100) for _ in range(n)]
+    profile = profile_dataset(
+        pl.DataFrame({"a": a, "b": b, "total": [x + y for x, y in zip(a, b)], "twice": [2 * x for x in a]}),
+        "0" * 32,
+        BIG,
+    )
+    system, user = build_messages(profile, recommend_charts(profile))
+    assert "derived are computed from other columns" in system["content"]
+    content = user["content"]
+    assert "Derived columns (definitional" in content
+    assert "- total = a + b" in content
+    assert "Near-duplicate columns" in content
+    assert "- twice ≈ monotone transform of a" in content

@@ -472,3 +472,196 @@ def test_profile_cat_num_group_counts_and_json_roundtrip() -> None:
         assert min(effect.group_counts.values()) == effect.n_min
     reloaded = DatasetProfile.model_validate_json(profile.model_dump_json())
     assert reloaded.evidence == profile.evidence
+
+
+# --- derived columns (stage 13) ---------------------------------------------
+
+from app.profiling.evidence import (  # noqa: E402
+    DERIVED_MAX_COLUMNS,
+    derived_candidates,
+    derived_columns,
+)
+
+
+def _derived(df: pl.DataFrame):
+    return _profile(df).evidence.derived_columns
+
+
+def _by_target(found):
+    return {d.target: d for d in found}
+
+
+def _sales_like(n: int = 400, seed: int = 13) -> tuple[random.Random, dict]:
+    rng = random.Random(seed)
+    price = [round(rng.uniform(50, 5000), 2) for _ in range(n)]
+    qty = [rng.randrange(1, 11) for _ in range(n)]  # 10 codes -> numeric-backed categorical
+    disc = [rng.choice([0.0, 0.05, 0.1, 0.2]) for _ in range(n)]
+    return rng, {"unit_price": price, "quantity": qty, "discount": disc}
+
+
+def test_derived_product_discount_identity_with_categorical_quantity() -> None:
+    rng, cols = _sales_like()
+    sales = [round(p * q * (1 - d), 2) for p, q, d in zip(cols["unit_price"], cols["quantity"], cols["discount"])]
+    df = pl.DataFrame({**cols, "sales": sales, "noise": [rng.gauss(0, 1) for _ in range(400)]})
+    profile = _profile(df)
+    assert next(c for c in profile.columns if c.name == "quantity").semantic_type == "categorical"
+    found = profile.evidence.derived_columns
+    assert [(d.target, d.formula, d.kind) for d in found] == [
+        ("sales", "unit_price × quantity × (1 − discount)", "product_discount")
+    ]
+    assert found[0].components == ["unit_price", "quantity", "discount"]
+    assert found[0].match_ratio == 1.0 and found[0].n == 400
+
+
+def test_derived_plain_product_preferred_over_zero_discount_form() -> None:
+    # z is all zeros (inside [0, 1]) so a × b × (1 − z) matches too; the
+    # fewer-components form wins the tie
+    rng, cols = _sales_like()
+    total = [p * q for p, q in zip(cols["unit_price"], cols["quantity"])]
+    df = pl.DataFrame({"a": cols["unit_price"], "b": [float(q) for q in cols["quantity"]], "z": [0.0] * 400, "t": total})
+    found = _by_target(_derived(df))
+    assert found["t"].formula == "a × b" and found["t"].kind == "product"
+
+
+def test_derived_sum_difference_ratio_forms_and_rearrangement_dedup() -> None:
+    rng = random.Random(5)
+    a = [rng.uniform(1, 100) for _ in range(300)]
+    b = [rng.uniform(1, 100) for _ in range(300)]
+    df = pl.DataFrame(
+        {
+            "a": a,
+            "b": b,
+            "total": [x + y for x, y in zip(a, b)],
+            "gap": [x - y for x, y in zip(a, b)],
+            "share": [x / y for x, y in zip(a, b)],
+        }
+    )
+    found = _derived(df)
+    by_target = _by_target(found)
+    assert by_target["total"].formula == "a + b" and by_target["total"].kind == "sum"
+    assert by_target["gap"].formula == "a − b" and by_target["gap"].kind == "difference"
+    assert by_target["share"].formula == "a / b" and by_target["share"].kind == "ratio"
+    # each identity is reported once: a = total − b, b = total − a etc. collapse
+    # onto the last-in-column-order target (total / gap / share, not a or b)
+    assert {d.target for d in found} == {"total", "gap", "share"}
+    assert len(found) == 3
+
+
+def test_derived_requires_99_percent_and_rejects_noisy_relationships() -> None:
+    rng, cols = _sales_like()
+    exact = [round(p * q * (1 - d), 2) for p, q, d in zip(cols["unit_price"], cols["quantity"], cols["discount"])]
+    # 5% of rows perturbed -> 95% match, below the 99% floor
+    perturbed = [v * 1.5 if i % 20 == 0 else v for i, v in enumerate(exact)]
+    df = pl.DataFrame({**cols, "sales": perturbed})
+    assert _derived(df) == []
+    # a genuinely strong but noisy relationship (r ~ 0.7) is a finding, not a formula
+    x = [rng.uniform(0, 10) for _ in range(400)]
+    y = [v + rng.gauss(0, 3) for v in x]
+    assert _derived(pl.DataFrame({"x": x, "y": y})) == []
+
+
+def test_derived_tolerates_rounding_nulls_and_non_finite_rows() -> None:
+    rng, cols = _sales_like(n=300)
+    sales = [round(p * q, 2) for p, q in zip(cols["unit_price"], cols["quantity"])]
+    price = list(cols["unit_price"])
+    price[0], price[1], price[2] = None, float("nan"), float("inf")  # skipped, not failures
+    sales[3] = None
+    df = pl.DataFrame({"unit_price": price, "quantity": cols["quantity"], "sales": sales})
+    found = _by_target(_derived(df))
+    assert found["sales"].formula == "unit_price × quantity"
+    assert found["sales"].match_ratio == 1.0
+    assert found["sales"].n == 300 - 4  # only fully finite rows count
+
+
+def test_derived_integer_identity_and_candidate_filtering() -> None:
+    rng = random.Random(9)
+    n = 300
+    a = [rng.randrange(1, 1000) for _ in range(n)]
+    b = [rng.randrange(1, 1000) for _ in range(n)]
+    df = pl.DataFrame(
+        {
+            "order_id": list(range(1, n + 1)),  # identifier: never a candidate
+            "a": a,
+            "b": b,
+            "total": [x + y for x, y in zip(a, b)],
+            "flag": [i % 2 == 0 for i in range(n)],  # boolean: never a candidate
+            "constant": [7.0] * n,  # constant: never a candidate
+            "label": [f"L{i}" for i in range(n)],
+        }
+    )
+    profile = _profile(df)
+    assert derived_candidates(profile.columns) == ["a", "b", "total"]
+    found = _by_target(profile.evidence.derived_columns)
+    assert found["total"].formula == "a + b" and found["total"].match_ratio == 1.0
+
+
+def test_near_copy_flagged_only_for_transformed_duplicates() -> None:
+    rng = random.Random(3)
+    x = [rng.uniform(0, 10) for _ in range(400)]
+    df = pl.DataFrame({"x": x, "double": [2 * v for v in x], "noisy": [2 * v + rng.gauss(0, 1) for v in x]})
+    found = _derived(df)
+    copies = [(d.target, d.components, d.kind) for d in found if d.kind == "near_copy"]
+    # double ranks identically to x (rho = 1); noisy (r ~ 0.985) does not qualify
+    assert copies == [("double", ["x"], "near_copy")]
+    assert all("noisy" not in (d.target, *d.components) for d in found)
+
+
+def test_near_copy_not_repeated_for_an_explained_identity() -> None:
+    rng = random.Random(4)
+    a = [rng.uniform(100, 200) for _ in range(300)]
+    b = [rng.uniform(0, 1) for _ in range(300)]  # tiny next to a: total ~ a (rho ~ 1)
+    df = pl.DataFrame({"a": a, "b": b, "total": [x + y for x, y in zip(a, b)]})
+    found = _derived(df)
+    assert [(d.target, d.kind) for d in found] == [("total", "sum")]
+
+
+def _wide_with_formula(n_noise: int, n: int = 2000, seed: int = 11) -> pl.DataFrame:
+    """sales = unit_price × quantity × (1 − discount) planted among n_noise
+    Gaussian sensors; quantity is an integer 1..10 (numeric-backed
+    categorical, outside the profiler's correlation table)."""
+    rng = random.Random(seed)
+    cols: dict[str, list] = {}
+    cols["unit_price"] = [round(rng.uniform(50, 5000), 2) for _ in range(n)]
+    cols["quantity"] = [rng.randrange(1, 11) for _ in range(n)]
+    cols["discount"] = [rng.choice([0.0, 0.05, 0.1, 0.2]) for _ in range(n)]
+    cols["sales"] = [
+        round(p * q * (1 - d), 2) for p, q, d in zip(cols["unit_price"], cols["quantity"], cols["discount"])
+    ]
+    for k in range(n_noise):
+        cols[f"s{k:02d}"] = [rng.gauss(0, 1) for _ in range(n)]
+    return pl.DataFrame(cols)
+
+
+def _timed_derived(df: pl.DataFrame):
+    import time
+
+    from app.profiling.types import apply_casts
+
+    profile = _profile(df)
+    casted = apply_casts(df, {c.name: c.cast_params for c in profile.columns if c.cast_params})
+    started = time.perf_counter()
+    found = derived_columns(casted, profile.columns, profile.correlations, profile.evidence.num_num_spearman)
+    return profile, found, time.perf_counter() - started
+
+
+def test_derived_search_is_bounded_on_wide_tables() -> None:
+    # 63 columns: capped at DERIVED_MAX_COLUMNS candidates, the planted
+    # identity (inside the cap, with an integer quantity factor) still found,
+    # and the whole search inside the 1 s budget from the stage brief
+    profile, found, elapsed = _timed_derived(_wide_with_formula(n_noise=59))
+    assert len(derived_candidates(profile.columns)) == DERIVED_MAX_COLUMNS
+    assert [(d.target, d.formula) for d in found] == [("sales", "unit_price × quantity × (1 − discount)")]
+    assert found[0].match_ratio == 1.0
+    assert elapsed < 1.0, f"derived search took {elapsed:.2f}s"
+
+
+def test_derived_found_on_40_column_table_with_categorical_factor() -> None:
+    # verifier finding: above DERIVED_FULL_POOL_COLUMNS the peer pool is
+    # ranked by correlation, and quantity (numeric-backed categorical) is
+    # not in the profile's correlation table — it must still make the pool
+    profile, found, _ = _timed_derived(_wide_with_formula(n_noise=36, seed=12))
+    assert next(c for c in profile.columns if c.name == "quantity").semantic_type == "categorical"
+    assert len(derived_candidates(profile.columns)) == DERIVED_MAX_COLUMNS  # 40 > cap, formula inside it
+    assert [(d.target, d.formula, d.match_ratio) for d in found] == [
+        ("sales", "unit_price × quantity × (1 − discount)", 1.0)
+    ]

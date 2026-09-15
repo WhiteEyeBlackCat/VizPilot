@@ -46,6 +46,8 @@ Rules:
 - Every insight MUST include a supporting "chart" (same shape as a chart suggestion).
 - Base insights on the evidence section. If the evidence shows a column's effect is close to \
 zero, do NOT draw conclusions about that column.
+- Columns listed as derived are computed from other columns by a formula. Never present that \
+formula, or a chart of the derived column against its inputs, as an insight — it is a definition.
 - Use only the listed columns, with exact column names (case-sensitive).
 - Allowed chart types: line, bar, scatter, histogram, box, heatmap. Never suggest pie charts.
 - Allowed aggregations: mean, sum, count, median, min, max.
@@ -151,6 +153,16 @@ def _evidence_section(profile: DatasetProfile) -> list[str]:
     if slopes:
         lines.append("Slope heterogeneity hits (relationship differs across groups):")
         lines += [f"- {s.x} vs {s.y} by {s.group}: spread={s.spread:.2f}" for s in slopes]
+
+    derived = getattr(evidence, "derived_columns", [])
+    identities = [d for d in derived if d.kind != "near_copy"]
+    copies = [d for d in derived if d.kind == "near_copy"]
+    if identities:
+        lines.append("Derived columns (definitional — never present these as insights):")
+        lines += [f"- {d.target} = {d.formula}" for d in identities]
+    if copies:
+        lines.append("Near-duplicate columns (a chart of the pair mostly shows the duplication):")
+        lines += [f"- {d.target} {d.formula}" for d in copies]
 
     return lines if len(lines) > 2 else []
 

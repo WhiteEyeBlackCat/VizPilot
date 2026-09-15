@@ -6,6 +6,7 @@ whole table stays in the millisecond-to-sub-second range.
 """
 
 import math
+import re
 from datetime import timedelta
 from itertools import combinations
 from typing import NamedTuple
@@ -16,6 +17,8 @@ from .models import (
     CatNumEffect,
     ColumnProfile,
     Correlations,
+    DerivedColumn,
+    DerivedKind,
     Evidence,
     InteractionEffect,
     SlopeHet,
@@ -36,6 +39,28 @@ TOP_PAIRS_FOR_SLOPES = 5
 TOP_CATS_FOR_SLOPES = 3
 MIN_ABS_CORR = 0.3
 
+# --- derived columns (stage 13) ---
+DERIVED_MAX_ROWS = 5000  # identity checks run on a seeded subsample of this size
+DERIVED_SAMPLE_SEED = 13
+DERIVED_MAX_COLUMNS = 30  # candidate columns considered (matches MAX_CORRELATION_COLUMNS)
+DERIVED_FULL_POOL_COLUMNS = 12  # up to this many candidates every pair/triple is tested
+DERIVED_POOL = 8  # above that, each target is tested against its 8 most correlated peers
+DERIVED_MIN_ROWS = 30
+DERIVED_MATCH_RATIO = 0.99
+DERIVED_MIN_TARGET_UNIQUE = 10  # near-constant targets match anything within tolerance
+# a target is only searched when some peer correlates with it at least this
+# much (Pearson or Spearman): every identity form co-moves with at least one
+# of its components (a − b: 0.71 for independent equal-variance inputs), and
+# the guard keeps wide uncorrelated tables (63 sensors) out of the search
+DERIVED_MIN_PEER_CORR = 0.3
+DERIVED_MAX_DECIMALS = 6
+# a transformed duplicate (unit conversion, scaling) ranks identically:
+# |rho| = 1.000 up to rounding. 0.995 leaves genuinely noisy relationships
+# alone: y = 2x + N(0, 1) with x ~ U(0, 10) measures r = 0.985 and is a
+# finding, not a copy (calibration point: test_confidence healthy dataset)
+NEAR_COPY_MIN_RHO = 0.995
+_NUMERIC_DTYPE_RE = re.compile(r"^(U?Int|Float)\d+$")
+
 _BUCKET_TRUNC: dict[TimeBucket, str] = {"day": "1d", "month": "1mo", "year": "1y"}
 _COARSER: dict[TimeBucket, TimeBucket | None] = {"day": "month", "month": "year", "year": None}
 
@@ -49,12 +74,14 @@ def compute_evidence(
 
     cat_num = _cat_num_effects(df, cats, nums)
     best_eta = _best_eta_by_column(cat_num)
+    spearman = _spearman_matrix(df, correlations)
     return Evidence(
         cat_num=cat_num,
         time_effects=_time_effects(df, dts, nums),
-        num_num_spearman=_spearman_matrix(df, correlations),
+        num_num_spearman=spearman,
         interactions=_interactions(df, cats, nums, dts, correlations, best_eta),
         slope_heterogeneity=_slope_heterogeneity(df, correlations, cats, best_eta),
+        derived_columns=derived_columns(df, columns, correlations, spearman),
     )
 
 
@@ -430,3 +457,289 @@ def _finite(value: float | None) -> float | None:
         return None
     value = float(value)
     return value if math.isfinite(value) else None
+
+
+# --- derived columns (stage 13) ---------------------------------------------
+
+
+class _Form(NamedTuple):
+    kind: DerivedKind
+    components: tuple[str, ...]
+    formula: str
+    expr: pl.Expr
+
+
+def derived_candidates(columns: list[ColumnProfile]) -> list[str]:
+    """Columns a definitional identity can involve: numeric measurements and
+    numeric-backed categoricals that are quantities (quantity=1..10 is a
+    categorical to the profiler but a factor in sales = price × quantity).
+    Nominal codes, ids, booleans and constants are out; capped in column order."""
+    names = []
+    for c in columns:
+        if c.semantic_type == "numeric":
+            if c.std is None or c.std <= 0:
+                continue
+        elif c.semantic_type == "categorical":
+            if c.nominal or not _NUMERIC_DTYPE_RE.match(c.original_dtype):
+                continue
+            if (c.n_categories or 0) < 2:
+                continue
+        else:
+            continue
+        names.append(c.name)
+    return names[:DERIVED_MAX_COLUMNS]
+
+
+def derived_columns(
+    df: pl.DataFrame,
+    columns: list[ColumnProfile],
+    correlations: Correlations | None,
+    spearman: Correlations | None,
+) -> list[DerivedColumn]:
+    """Row-wise identity search plus near-copy disclosure.
+
+    Identities tested for every target t and distinct peers a, b, c:
+    a×b, a+b, a−b, b−a, a/b, b/a, a×(1−c), a×b×c, a×b×(1−c) (the (1−c) forms
+    only when c lies in [0, 1]). A row matches when |t − f| is within
+    max(1e-6·|t|, half a unit of t's last observed decimal); a form holds
+    when >= 99% of the >= 30 finite rows match. One result per target: the
+    best match ratio, then the fewest components (a×b beats a×b×(1−c) when c
+    is all zero), then formula text — all deterministic. No constant fitting,
+    no more than three components: those are out of scope.
+
+    Cost is bounded: a seeded subsample of DERIVED_MAX_ROWS rows, every
+    form of one target evaluated in ONE polars select, and above
+    DERIVED_FULL_POOL_COLUMNS candidates each target only meets its
+    DERIVED_POOL most Pearson-correlated peers (a wide sensor table is not
+    scanned combinatorially; a weakly correlated factor such as a discount
+    can then be missed — documented limitation)."""
+    names = derived_candidates(columns)
+    if len(names) < 2:
+        return _near_copies(spearman, [], names)
+    data = df.select(
+        pl.when(pl.col(n).cast(pl.Float64).is_finite())
+        .then(pl.col(n).cast(pl.Float64))
+        .otherwise(None)
+        .alias(n)
+        for n in names
+    )
+    if data.height > DERIVED_MAX_ROWS:
+        data = data.sample(DERIVED_MAX_ROWS, seed=DERIVED_SAMPLE_SEED)
+    if data.height < DERIVED_MIN_ROWS:
+        return _near_copies(spearman, [], names)
+
+    stats = _column_stats(data, names)
+    unit_interval = {
+        n for n in names if stats[n]["min"] is not None and stats[n]["min"] >= 0 and stats[n]["max"] <= 1
+    }
+    results: list[DerivedColumn] = []
+    for target in names:
+        if stats[target]["n_unique"] < DERIVED_MIN_TARGET_UNIQUE:
+            continue
+        if not _has_correlated_peer(target, correlations, spearman):
+            continue
+        pool = _peer_pool(target, names, correlations, data)
+        forms = _forms(target, pool, unit_interval)
+        if not forms:
+            continue
+        found = _best_form(data, target, stats[target]["decimals"], forms)
+        if found is not None:
+            results.append(found)
+    results = _dedup_rearrangements(results, names)
+    return results + _near_copies(spearman, results, names)
+
+
+def _dedup_rearrangements(results: list[DerivedColumn], names: list[str]) -> list[DerivedColumn]:
+    """c = a + b also matches as a = c − b and b = c − a: one identity, three
+    targets. Keep one entry per variable set — the best match, then the
+    target that comes LAST in column order (a computed column is usually
+    appended after its inputs: sales after price, quantity, discount)."""
+    best: dict[frozenset[str], DerivedColumn] = {}
+    for d in results:
+        key = frozenset([d.target, *d.components])
+        current = best.get(key)
+        if current is None or (d.match_ratio, names.index(d.target)) > (
+            current.match_ratio,
+            names.index(current.target),
+        ):
+            best[key] = d
+    kept = set(map(id, best.values()))
+    return [d for d in results if id(d) in kept]
+
+
+def _column_stats(data: pl.DataFrame, names: list[str]) -> dict[str, dict]:
+    exprs = []
+    for n in names:
+        col = pl.col(n)
+        exprs += [col.n_unique().alias(f"u:{n}"), col.min().alias(f"lo:{n}"), col.max().alias(f"hi:{n}")]
+        for k in range(DERIVED_MAX_DECIMALS + 1):
+            scaled = col * (10.0**k)
+            exprs.append((scaled - scaled.round(0)).abs().max().alias(f"d{k}:{n}"))
+    row = data.select(exprs).row(0, named=True)
+    stats = {}
+    for n in names:
+        decimals = DERIVED_MAX_DECIMALS
+        for k in range(DERIVED_MAX_DECIMALS + 1):
+            gap = row[f"d{k}:{n}"]
+            if gap is not None and gap < 1e-6:
+                decimals = k
+                break
+        # nulls count as a distinct value in n_unique; they never match
+        stats[n] = {"n_unique": int(row[f"u:{n}"]), "min": row[f"lo:{n}"], "max": row[f"hi:{n}"], "decimals": decimals}
+    return stats
+
+
+def _has_correlated_peer(
+    target: str, correlations: Correlations | None, spearman: Correlations | None
+) -> bool:
+    """False only when the target IS in the correlation scan and nothing
+    there co-moves with it; a target outside the scan (a numeric-backed
+    categorical such as quantity) is always searched."""
+    seen = False
+    for table in (correlations, spearman):
+        if table is None or target not in table.columns:
+            continue
+        seen = True
+        row = table.matrix[table.columns.index(target)]
+        for j, value in enumerate(row):
+            if j != table.columns.index(target) and value is not None and abs(value) >= DERIVED_MIN_PEER_CORR:
+                return True
+    return not seen
+
+
+def _peer_pool(
+    target: str, names: list[str], correlations: Correlations | None, data: pl.DataFrame
+) -> list[str]:
+    """Every other candidate when the table is small; above
+    DERIVED_FULL_POOL_COLUMNS the DERIVED_POOL peers with the strongest
+    |Pearson| to the target. Strengths come from the profile's correlation
+    table; candidates outside it (numeric-backed categoricals such as
+    quantity, which the profiler never correlates) get theirs computed on
+    the subsample in one select, so a factor is never ranked as 0 merely
+    for being categorical (verifier finding, stage 13)."""
+    peers = [n for n in names if n != target]
+    if len(names) <= DERIVED_FULL_POOL_COLUMNS:
+        return peers
+
+    strength: dict[str, float] = {}
+    if correlations is not None and target in correlations.columns:
+        row = correlations.matrix[correlations.columns.index(target)]
+        for peer in peers:
+            if peer in correlations.columns:
+                value = row[correlations.columns.index(peer)]
+                strength[peer] = abs(value) if value is not None else 0.0
+    missing = [p for p in peers if p not in strength]
+    if missing:
+        computed = data.select(pl.corr(pl.col(target), pl.col(p)).alias(p) for p in missing).row(0, named=True)
+        for peer in missing:
+            value = computed[peer]
+            strength[peer] = abs(value) if value is not None and math.isfinite(value) else 0.0
+
+    ranked = sorted(peers, key=lambda p: (-strength[p], names.index(p)))[:DERIVED_POOL]
+    return [p for p in peers if p in ranked]  # keep column order for determinism
+
+
+def _forms(target: str, pool: list[str], unit_interval: set[str]) -> list[_Form]:
+    forms: list[_Form] = []
+    col = pl.col
+    for a, b in combinations(pool, 2):
+        forms.append(_Form("product", (a, b), f"{a} × {b}", col(a) * col(b)))
+        forms.append(_Form("sum", (a, b), f"{a} + {b}", col(a) + col(b)))
+        forms.append(_Form("difference", (a, b), f"{a} − {b}", col(a) - col(b)))
+        forms.append(_Form("difference", (b, a), f"{b} − {a}", col(b) - col(a)))
+        forms.append(_Form("ratio", (a, b), f"{a} / {b}", col(a) / col(b)))
+        forms.append(_Form("ratio", (b, a), f"{b} / {a}", col(b) / col(a)))
+        if b in unit_interval:
+            forms.append(_Form("product_discount", (a, b), f"{a} × (1 − {b})", col(a) * (1 - col(b))))
+        if a in unit_interval:
+            forms.append(_Form("product_discount", (b, a), f"{b} × (1 − {a})", col(b) * (1 - col(a))))
+    if len(pool) + 1 <= DERIVED_FULL_POOL_COLUMNS or len(pool) <= DERIVED_POOL:
+        for a, b, c in combinations(pool, 3):
+            forms.append(_Form("product", (a, b, c), f"{a} × {b} × {c}", col(a) * col(b) * col(c)))
+            for x, y, d in ((a, b, c), (a, c, b), (b, c, a)):
+                if d in unit_interval:
+                    forms.append(
+                        _Form("product_discount", (x, y, d), f"{x} × {y} × (1 − {d})", col(x) * col(y) * (1 - col(d)))
+                    )
+    return forms
+
+
+def _best_form(data: pl.DataFrame, target: str, decimals: int, forms: list[_Form]) -> DerivedColumn | None:
+    """Two passes because polars cost here is per expression, not per row
+    (~0.1 ms each): pass 1 counts matching rows for every form; only forms
+    with at least DERIVED_MIN_ROWS matches (a handful on real data) get the
+    exact valid-row count in pass 2."""
+    t = pl.col(target)
+    # half a unit of the last observed decimal (rounding) plus a relative
+    # floating-point allowance — summed, so a value rounded exactly at the
+    # half-unit boundary still matches
+    tol = t.abs() * 1e-6 + 0.5 * 10.0 ** (-decimals)
+    # a null anywhere (missing / non-finite input, division by zero) is
+    # neither a match nor a valid row: the comparison is null and sum skips it
+    matches = data.select(
+        ((t - form.expr).abs() <= tol).sum().alias(f"m{i}") for i, form in enumerate(forms)
+    ).row(0)
+    survivors = [
+        (i, int(m or 0)) for i, m in enumerate(matches) if int(m or 0) >= DERIVED_MIN_ROWS * DERIVED_MATCH_RATIO
+    ]
+    if not survivors:
+        return None
+    valids = data.select(
+        (t - forms[i].expr).is_finite().sum().alias(f"v{i}") for i, _ in survivors
+    ).row(0)
+    best: tuple[tuple, DerivedColumn] | None = None
+    for (i, matched), valid in zip(survivors, valids):
+        valid = int(valid or 0)
+        if valid < DERIVED_MIN_ROWS:
+            continue
+        ratio = min(matched / valid, 1.0)
+        if ratio < DERIVED_MATCH_RATIO:
+            continue
+        form = forms[i]
+        key = (-ratio, len(form.components), form.formula)
+        if best is None or key < best[0]:
+            best = (
+                key,
+                DerivedColumn(
+                    target=target,
+                    components=list(form.components),
+                    formula=form.formula,
+                    kind=form.kind,
+                    match_ratio=ratio,
+                    n=valid,
+                ),
+            )
+    return None if best is None else best[1]
+
+
+def _near_copies(
+    spearman: Correlations | None, found: list[DerivedColumn], names: list[str]
+) -> list[DerivedColumn]:
+    """|rho| >= 0.98 pairs among the numeric columns, one entry per pair
+    (target = the later column), skipping pairs an identity already explains."""
+    if spearman is None:
+        return []
+    explained = {frozenset((d.target, c)) for d in found for c in d.components}
+    counts = spearman.pair_counts
+    out = []
+    cols = spearman.columns
+    for i, a in enumerate(cols):
+        for j in range(i + 1, len(cols)):
+            b = cols[j]
+            rho = spearman.matrix[i][j]
+            n = counts[i][j] if counts is not None else DERIVED_MIN_ROWS
+            if rho is None or abs(rho) < NEAR_COPY_MIN_RHO or n < DERIVED_MIN_ROWS:
+                continue
+            if frozenset((a, b)) in explained:
+                continue
+            out.append(
+                DerivedColumn(
+                    target=b,
+                    components=[a],
+                    formula=f"≈ monotone transform of {a} (rank correlation {rho:.3f})",
+                    kind="near_copy",
+                    match_ratio=abs(rho),
+                    n=n,
+                )
+            )
+    return out

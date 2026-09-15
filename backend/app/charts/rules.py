@@ -13,7 +13,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from ..profiling.models import ColumnProfile, Correlations, DatasetProfile, Evidence
+from ..profiling.models import ColumnProfile, Correlations, DatasetProfile, DerivedColumn, Evidence
 from .confidence import (
     MAX_MISSING_RATIO,
     Confidence,
@@ -43,6 +43,10 @@ Tier = Literal["top", "secondary", "exploratory"]
 VerificationLevel = Literal["strong", "weak", "unverified", "neutral"]
 TOP_SCORE_FLOOR = 0.68
 UNVERIFIED_SCORE = 0.5  # combinations outside the evidence scan
+# stage 13: a chart of a derived column against one of its components draws
+# the definition (sales = price × quantity × (1 − discount)), not a finding —
+# the score is discounted and the tier capped at exploratory
+DERIVED_SCORE_FACTOR = 0.6
 
 
 class Recommendation(BaseModel):
@@ -81,6 +85,107 @@ def apply_confidence(recs: list[Recommendation], profile: DatasetProfile) -> Non
         rec.warnings = warnings
         rec.tier_cap = stricter_cap(rec.tier_cap, cap)
         rec.spec.reason = with_caution(rec.spec.reason, warnings)
+
+
+def apply_derived_caps(recs: list[Recommendation], profile: DatasetProfile) -> None:
+    """Stage 13: charts whose x/y pair is a derived column against one of its
+    components are definitional. Score x DERIVED_SCORE_FACTOR, tier capped at
+    exploratory, an info warning attached and the reason rewritten so the
+    card says why. Runs after apply_confidence (the caution suffix is part
+    of the reason it prefixes) for rules and LLM candidates alike. Near-copy
+    pairs only get the warning and a note — no cap, no discount."""
+    index = _EvidenceIndex(profile.evidence)
+    for rec in recs:
+        derived = index.derived_for(rec.spec)
+        if derived is not None:
+            rec.score = rec.score * DERIVED_SCORE_FACTOR
+            rec.tier_cap = stricter_cap(rec.tier_cap, "exploratory")
+            rec.warnings = rec.warnings + [derived_relationship_warning(derived)]
+            rec.spec.reason = _definitional_reason(derived, rec.spec.reason)
+            continue
+        near = index.near_copy_for(rec.spec)
+        if near is not None:
+            rec.warnings = rec.warnings + [derived_relationship_warning(near)]
+            rec.spec.reason = _definitional_reason(near, rec.spec.reason)
+
+
+def definitional_reason(spec: ChartSpec, profile: DatasetProfile, reason: str | None) -> str | None:
+    """The note apply_derived_caps prefixes, recomputed for a replacement
+    reason (the LLM merge adopts the LLM's wording for a rules chart and must
+    not lose the disclosure). None when the pair is not definitional."""
+    index = _EvidenceIndex(profile.evidence)
+    derived = index.derived_for(spec) or index.near_copy_for(spec)
+    return None if derived is None else _definitional_reason(derived, reason)
+
+
+def _definitional_reason(derived: DerivedColumn, reason: str | None) -> str:
+    if derived.kind == "near_copy":
+        note = (
+            f"{derived.target} is nearly a transformed copy of {derived.components[0]} "
+            f"(rank correlation {derived.match_ratio:.2f}); the relationship is likely definitional."
+        )
+    else:
+        note = (
+            f"{derived.target} is computed as {derived.formula}; "
+            "this relationship is definitional, not a finding."
+        )
+    return f"{note} {reason}".strip() if reason else note
+
+
+def derived_relationship_warning(derived: DerivedColumn) -> Warning:
+    """Per-chart info warning (severity info: never part of the caution text)."""
+    return Warning(
+        code="derived_relationship",
+        severity="info",
+        message=(
+            f"{derived.target} is nearly a transformed copy of {derived.components[0]}."
+            if derived.kind == "near_copy"
+            else f"{derived.target} is computed as {derived.formula}."
+        ),
+        meta={
+            "target": derived.target,
+            "components": list(derived.components),
+            "formula": derived.formula,
+            "kind": derived.kind,
+            "match_ratio": derived.match_ratio,
+        },
+    )
+
+
+def derived_column_warnings(profile: DatasetProfile) -> list[Warning]:
+    """Dataset-level: one `derived_column` per detected identity (and one
+    `near_copy_column` per near-duplicate pair) so the response discloses
+    what the ranking demoted."""
+    out = []
+    for d in getattr(profile.evidence, "derived_columns", []):
+        if d.kind == "near_copy":
+            message = (
+                f"{d.target} is nearly a transformed copy of {d.components[0]} "
+                f"(rank correlation {d.match_ratio:.2f}); charts of the pair mostly show that."
+            )
+            code = "near_copy_column"
+        else:
+            components = ", ".join(d.components)
+            message = (
+                f"{d.target} appears to be computed as {d.formula}; charts of {d.target} "
+                f"against {components} show the formula, not a finding."
+            )
+            code = "derived_column"
+        out.append(
+            Warning(
+                code=code,
+                severity="info",
+                message=message,
+                meta={
+                    "target": d.target,
+                    "components": list(d.components),
+                    "formula": d.formula,
+                    "kind": d.kind,
+                    "match_ratio": d.match_ratio,
+                },
+            )
+        )
+    return out
 
 
 def choose_time_granularity(unique_count: int, span_days: float) -> TimeGranularity:
@@ -135,6 +240,26 @@ class _EvidenceIndex:
         for s in evidence.slope_heterogeneity:
             for key in ((s.x, s.y, s.group), (s.y, s.x, s.group)):
                 self.slope[key] = (s.spread, s.n_min)
+        # stage 13: {target, component} pairs that only draw a definition.
+        # near_copy entries are disclosure-only (see DerivedColumn) and are
+        # kept apart so they never cap or discount a chart.
+        self.derived_pairs: dict[frozenset[str], DerivedColumn] = {}
+        self.near_copy_pairs: dict[frozenset[str], DerivedColumn] = {}
+        for d in getattr(evidence, "derived_columns", []):
+            table = self.near_copy_pairs if d.kind == "near_copy" else self.derived_pairs
+            for component in d.components:
+                table.setdefault(frozenset((d.target, component)), d)
+
+    def derived_for(self, spec: ChartSpec) -> DerivedColumn | None:
+        """The identity a chart's x/y pair merely restates, if any."""
+        if not spec.x or not spec.y:
+            return None
+        return self.derived_pairs.get(frozenset((spec.x, spec.y)))
+
+    def near_copy_for(self, spec: ChartSpec) -> DerivedColumn | None:
+        if not spec.x or not spec.y:
+            return None
+        return self.near_copy_pairs.get(frozenset((spec.x, spec.y)))
 
     def eta(self, cat: str, num: str) -> float:
         return math.sqrt(self.eta2.get((cat, num), 0.0))
@@ -167,6 +292,7 @@ def recommend_charts(profile: DatasetProfile) -> list[Recommendation]:
 
     valid = _dedup(r for r in candidates if not validate_spec(r.spec, profile))
     apply_confidence(valid, profile)  # before the caps: slots go to confident charts
+    apply_derived_caps(valid, profile)  # stage 13: definitional pairs sink before the slot cut
     ranked = apply_diversity_caps(valid)
     for i, rec in enumerate(ranked):
         rec.spec.priority = i + 1
@@ -347,7 +473,9 @@ def _scatter_charts(
             )
             if strength >= SCATTER_MIN_CORR:
                 pairs.append((strength, a, b, pearson, spearman))
-    pairs.sort(key=lambda p: (-p[0], p[1], p[2]))
+    # stage 13: definitional pairs go last so they only take a slot when
+    # nothing else clears the threshold (they are capped downstream anyway)
+    pairs.sort(key=lambda p: (frozenset((p[1], p[2])) in index.derived_pairs, -p[0], p[1], p[2]))
 
     recs = []
     for strength, a, b, pearson, spearman in pairs[:SCATTER_MAX_PAIRS]:
@@ -461,6 +589,10 @@ def evaluate_llm_spec(spec: ChartSpec, profile: DatasetProfile) -> tuple[float, 
         return 0.5 + (0.05 if skewed else 0.0), "neutral"
     if spec.type in ("bar", "box") and spec.y is None:
         return 0.6, "neutral"  # count bar: no group-effect hypothesis
+    if index.derived_for(spec) is not None:
+        # stage 13: a hypothesis about a definitional pair is not a finding
+        # the data can verify — capped at exploratory, insight unverified
+        return UNVERIFIED_SCORE, "unverified"
 
     if spec.type in ("bar", "box"):
         eta2 = index.eta2.get((spec.x or "", spec.y or ""))

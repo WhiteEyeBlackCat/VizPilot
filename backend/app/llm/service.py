@@ -19,8 +19,11 @@ from ..charts.rules import (
     Tier,
     VerificationLevel,
     apply_confidence,
+    apply_derived_caps,
     apply_diversity_caps,
     assign_tiers,
+    definitional_reason,
+    derived_column_warnings,
     evaluate_llm_spec,
     recommend_charts,
     stricter_cap,
@@ -84,9 +87,9 @@ class RecommendationService:
 
     def _build(self, profile: DatasetProfile, use_llm: bool) -> dict[str, Any]:
         rules = recommend_charts(profile)
-        # dataset-level notes (columns the rule engine left out for missingness)
-        # ride along on every path, LLM or not
-        dataset_warnings = excluded_column_warnings(profile)
+        # dataset-level notes (columns the rule engine left out for
+        # missingness, derived columns it demoted) ride along on every path
+        dataset_warnings = excluded_column_warnings(profile) + derived_column_warnings(profile)
         if not use_llm:
             return _shape(rules, [], None, dataset_warnings)
 
@@ -201,7 +204,9 @@ class _Merger:
             # confidence caution the rules chart already carries
             target = self.by_key[key]
             if suggestion.reason:
-                target.spec.reason = with_caution(suggestion.reason, target.warnings)
+                # stage 13: the definitional note survives the wording swap
+                reason = definitional_reason(spec, self.profile, suggestion.reason) or suggestion.reason
+                target.spec.reason = with_caution(reason, target.warnings)
         else:
             if key not in self.added:
                 if level == "unverified":
@@ -209,6 +214,7 @@ class _Merger:
                     spec.reason = (spec.reason + note) if spec.reason else UNVERIFIED_NOTE
                 rec = Recommendation(spec=spec, score=score, source="llm", tier_cap=_TIER_CAP[level])
                 apply_confidence([rec], self.profile)  # same chain as the rules charts
+                apply_derived_caps([rec], self.profile)
                 self.added[key] = rec
             target = self.added[key]
         # a hypothesis is only "strong" if it still clears the top floor after

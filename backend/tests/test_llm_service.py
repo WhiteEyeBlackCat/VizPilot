@@ -4,7 +4,7 @@ import polars as pl
 import pytest
 from fastapi.testclient import TestClient
 
-from app.charts.rules import TOP_SCORE_FLOOR, recommend_charts
+from app.charts.rules import TOP_SCORE_FLOOR, derived_column_warnings, recommend_charts
 from app.config import Settings
 from app.llm.provider import LLMError
 from app.llm.schemas import LLMResponse
@@ -71,7 +71,13 @@ def test_rules_only_path_identical_to_stage3(profile) -> None:
     service, provider = _service(LLMResponse(insights=["ignored"], charts=[NEW_CHART]))
     result = service.get(profile, use_llm=False)
     expected = [rec.model_dump() for rec in recommend_charts(profile)]
-    assert result == {"charts": expected, "insights": [], "message": None, "warnings": []}
+    # stage 13: value2 = 2 * value is a near copy, disclosed at dataset level
+    # on every path (exactly that one warning, nothing else)
+    warnings = [w.model_dump() for w in derived_column_warnings(profile)]
+    assert [(w["code"], w["meta"]["target"], w["meta"]["components"]) for w in warnings] == [
+        ("near_copy_column", "value2", ["value"])
+    ]
+    assert result == {"charts": expected, "insights": [], "message": None, "warnings": warnings}
     assert provider.calls == 0
 
 
@@ -408,3 +414,70 @@ def test_endpoint_llm_disabled_ignores_llm_param(client: TestClient) -> None:
     forced = client.get(f"/api/datasets/{dataset_id}/recommendations", params={"llm": "true"}).json()
     assert default == forced
     assert default["insights"] == []
+
+
+# --- stage 13: derived pairs ------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def derived_profile():
+    import random
+
+    rng = random.Random(31)
+    n = 90
+    price = [round(rng.uniform(50, 5000), 2) for _ in range(n)]
+    qty = [float(rng.randrange(1, 11)) for _ in range(n)]
+    return profile_dataset(
+        pl.DataFrame(
+            {
+                "ts": [datetime(2024, 1, 1) + timedelta(days=i) for i in range(n)],
+                "price": price,
+                "qty": qty,
+                "total": [round(p * q, 2) for p, q in zip(price, qty)],
+                "other": [rng.gauss(0, 1) for _ in range(n)],
+            }
+        ),
+        "1" * 32,
+        BIG,
+    )
+
+
+def test_insight_restating_a_formula_is_unverified_and_chart_exploratory(derived_profile) -> None:
+    assert [d.formula for d in derived_profile.evidence.derived_columns] == ["price × qty"]
+    chart = {
+        "title": "total vs price",
+        "type": "scatter",
+        "x": "price",
+        "y": "total",
+        "reason": "totals rise with price",
+        "priority": 1,
+    }
+    service, _ = _service(LLMResponse(insights=[{"text": "Higher prices drive higher totals.", "chart": chart}]))
+    result = service.get(derived_profile, use_llm=True)
+    insight = result["insights"][0]
+    assert insight["supported"] == "unverified"
+    linked = result["charts"][insight["chart_priority"] - 1]
+    assert linked["spec"]["x"] == "price" and linked["spec"]["y"] == "total"
+    assert linked["tier"] == "exploratory"
+    assert "definitional" in linked["spec"]["reason"]
+    assert [w["code"] for w in result["warnings"]] == ["derived_column"]
+
+
+def test_new_llm_chart_on_derived_pair_is_capped(derived_profile) -> None:
+    # axes swapped relative to the rules candidate, so this is a NEW LLM
+    # chart: it goes through the same derived cap as rules charts
+    chart = {
+        "title": "qty by total",
+        "type": "scatter",
+        "x": "total",
+        "y": "qty",
+        "reason": "?",
+        "priority": 1,
+    }
+    service, _ = _service(LLMResponse(charts=[chart]))
+    result = service.get(derived_profile, use_llm=True)
+    added = _chart_by(result, "scatter", x="total", y="qty")
+    assert added is not None and added["source"] == "llm"
+    assert added["tier"] == "exploratory"
+    assert "definitional" in added["spec"]["reason"]
+    assert any(w["code"] == "derived_relationship" for w in added["warnings"])
