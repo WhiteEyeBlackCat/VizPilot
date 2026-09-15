@@ -12,6 +12,7 @@
 
 import type {
   ChartSpec,
+  ChartType,
   DatasetMeta,
   DatasetProfile,
   Recommendation,
@@ -51,6 +52,21 @@ export interface SavedChart {
   insightText?: string;
 }
 
+/** Explore (ManualBuilder) form values, lifted so navigation and panel
+ *  changes never reset them. The builder's option / prefill logic is
+ *  unchanged; it reads and writes these through setter shims. */
+export interface ExploreForm {
+  type: ChartType;
+  x: string;
+  y: string;
+  group: string;
+  agg: string;
+}
+export type ExploreField = keyof ExploreForm;
+export type FieldUpdate<T> = T | ((prev: T) => T);
+
+export const initialExploreForm: ExploreForm = { type: "bar", x: "", y: "", group: "", agg: "" };
+
 export interface AppState {
   datasets: DatasetMeta[] | null; // null until the list request answered
   meta: DatasetMeta | null;
@@ -61,6 +77,8 @@ export interface AppState {
   preview: Preview | null;
   panelOpen: boolean;
   workspaceByDataset: Record<string, SavedChart[]>;
+  explore: ExploreForm;
+  insightsExploratoryOpen: boolean;
 }
 
 export const initialState: AppState = {
@@ -73,6 +91,8 @@ export const initialState: AppState = {
   preview: null,
   panelOpen: false,
   workspaceByDataset: {},
+  explore: initialExploreForm,
+  insightsExploratoryOpen: false,
 };
 
 export type Action =
@@ -86,7 +106,9 @@ export type Action =
   | { type: "CLOSE_PREVIEW" }
   | { type: "SET_PANEL_OPEN"; open: boolean }
   | { type: "SAVE_PREVIEW"; key: string; savedAt: string }
-  | { type: "REMOVE_SAVED"; datasetId: string; key: string };
+  | { type: "REMOVE_SAVED"; datasetId: string; key: string }
+  | { type: "EXPLORE_FIELD"; field: ExploreField; value: FieldUpdate<string> }
+  | { type: "SET_EXPLORATORY_OPEN"; open: boolean };
 
 /** The fields that make two specs the same chart (title / reason / priority
  *  are presentation). Used to keep the workspace free of duplicates. */
@@ -135,6 +157,8 @@ export function reducer(state: AppState, action: Action): AppState {
         recsFinal: false,
         aiPending: true,
         preview: null, // the workspace of the previous dataset is kept, keyed by id
+        explore: initialExploreForm,
+        insightsExploratoryOpen: false,
       };
 
     case "PROFILE_LOADED":
@@ -187,6 +211,16 @@ export function reducer(state: AppState, action: Action): AppState {
         },
       };
     }
+
+    case "EXPLORE_FIELD": {
+      const prev = state.explore[action.field];
+      const next = typeof action.value === "function" ? action.value(prev) : action.value;
+      if (next === prev) return state;
+      return { ...state, explore: { ...state.explore, [action.field]: next } };
+    }
+
+    case "SET_EXPLORATORY_OPEN":
+      return state.insightsExploratoryOpen === action.open ? state : { ...state, insightsExploratoryOpen: action.open };
 
     case "REMOVE_SAVED": {
       const list = workspaceOf(state, action.datasetId).filter((c) => c.key !== action.key);

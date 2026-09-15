@@ -1,4 +1,4 @@
-import { Trash2 } from "lucide-react";
+import { Eye, Trash2 } from "lucide-react";
 import { useEffect, useRef } from "react";
 
 import { PageHeader } from "../components/PageHeader";
@@ -54,8 +54,6 @@ export function WorkspacePage({ charts, currentKey, onPreview, onRemove }: Props
             return (
               <li key={c.key}>
                 <div
-                  role="button"
-                  tabIndex={0}
                   aria-current={active ? "true" : undefined}
                   data-workspace-card
                   className={cn(
@@ -63,12 +61,6 @@ export function WorkspacePage({ charts, currentKey, onPreview, onRemove }: Props
                     active && "border-primary/60 bg-primary/10",
                   )}
                   onClick={() => onPreview(c)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      onPreview(c);
-                    }
-                  }}
                 >
                   <div className="flex items-start justify-between gap-2">
                     <span className="text-sm font-medium">{c.result.spec.title}</span>
@@ -77,8 +69,23 @@ export function WorkspacePage({ charts, currentKey, onPreview, onRemove }: Props
                     </Badge>
                   </div>
                   <p className="text-xs text-muted-foreground">{variables(c.result.spec)}</p>
-                  <div className="mt-auto flex items-center justify-between pt-1 text-xs text-muted-foreground">
+                  <div className="mt-auto flex items-center justify-between gap-2 pt-1 text-xs text-muted-foreground">
                     <span className="tabular-nums">保存於 {time.format(new Date(c.savedAt))}</span>
+                    <span className="flex items-center gap-1">
+                    <Button
+                      variant={active ? "secondary" : "ghost"}
+                      size="sm"
+                      className="h-6 px-1.5 text-xs"
+                      aria-pressed={active}
+                      aria-label={`預覽 ${c.result.spec.title}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onPreview(c);
+                      }}
+                    >
+                      <Eye className="mr-1 h-3.5 w-3.5" />
+                      Preview
+                    </Button>
                     <Button
                       variant="ghost"
                       size="sm"
@@ -92,6 +99,7 @@ export function WorkspacePage({ charts, currentKey, onPreview, onRemove }: Props
                       <Trash2 className="mr-1 h-3.5 w-3.5" />
                       Remove
                     </Button>
+                    </span>
                   </div>
                 </div>
               </li>

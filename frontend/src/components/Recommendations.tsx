@@ -27,6 +27,9 @@ interface Props {
   selectedPriority: number | null;
   /** render the recommendation into the preview panel (never the workspace) */
   onPreview: (rec: Recommendation) => Promise<void>;
+  /** the 探索 tier toggle lives in the app store so it survives navigation */
+  exploratoryOpen: boolean;
+  onExploratoryOpenChange: (open: boolean) => void;
 }
 
 const SUPPORTED_BADGE: Record<Insight["supported"], { label: string; variant: BadgeVariant }> = {
@@ -88,10 +91,17 @@ function variables(spec: ChartSpec): string {
 const CARD_GRID = "grid gap-2 [grid-template-columns:repeat(auto-fill,minmax(250px,1fr))]";
 const TOP_GRID = "grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(320px,1fr))]";
 
-export function Recommendations({ recs, aiPending, selectedPriority, onPreview }: Props) {
+export function Recommendations({
+  recs,
+  aiPending,
+  selectedPriority,
+  onPreview,
+  exploratoryOpen,
+  onExploratoryOpenChange,
+}: Props) {
   const [busyPriority, setBusyPriority] = useState<number | null>(null);
   const [error, setError] = useState<string[]>([]);
-  const [exploratoryOpen, setExploratoryOpen] = useState(false);
+  const setExploratoryOpen = onExploratoryOpenChange;
   const [highlighted, setHighlighted] = useState<number | null>(null);
 
   const preview = async (rec: Recommendation) => {
@@ -126,25 +136,19 @@ export function Recommendations({ recs, aiPending, selectedPriority, onPreview }
     const selected = selectedPriority === priority;
     const top = tier === "top";
     return (
+      // the card body is a pointer convenience; the Preview button inside is
+      // the accessible control (no nested interactive elements)
       <div
         key={priority}
         id={`rec-card-${priority}`}
-        role="button"
-        tabIndex={0}
-        aria-pressed={selected}
         data-tier={tier}
+        data-selected={selected ? "true" : "false"}
         className={cn(
-          "group flex cursor-pointer flex-col rounded-md border border-subtle bg-surface text-left transition-colors hover:bg-accent/40 focus:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+          "group flex cursor-pointer flex-col rounded-md border border-subtle bg-surface text-left transition-colors hover:bg-accent/40",
           top ? "border-l-2 border-l-primary p-4" : "p-3",
           (selected || highlighted === priority) && "border-primary/60 bg-primary/10",
         )}
         onClick={() => void preview(rec)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            void preview(rec);
-          }
-        }}
       >
         <div className="mb-1 flex items-start justify-between gap-2">
           <span className={cn("font-medium", top ? "text-base" : "text-sm")}>{rec.spec.title}</span>
@@ -172,6 +176,7 @@ export function Recommendations({ recs, aiPending, selectedPriority, onPreview }
           variant={selected ? "secondary" : "outline"}
           size="sm"
           className="h-7 self-start px-3 text-xs"
+          aria-pressed={selected}
           disabled={busyPriority !== null}
           onClick={(e) => {
             e.stopPropagation();

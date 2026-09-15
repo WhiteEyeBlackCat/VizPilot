@@ -37,7 +37,7 @@ export function Sidebar({ datasets, currentId, page, workspaceCount, onNewDatase
             href={buildHash({ datasetId: currentId, page: p.page })}
             aria-current={page === p.page ? "page" : undefined}
             className={cn(
-              "flex items-center justify-between rounded-md px-2.5 py-1.5 text-sm transition-colors",
+              "flex items-center justify-between rounded-md px-2.5 py-1.5 text-sm transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-ring",
               page === p.page
                 ? "bg-accent text-foreground"
                 : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
@@ -84,7 +84,7 @@ export function Sidebar({ datasets, currentId, page, workspaceCount, onNewDatase
           </select>
           <button
             type="button"
-            className="flex h-8 items-center gap-1 rounded-md border border-border px-2 text-sm text-muted-foreground hover:bg-accent hover:text-foreground"
+            className="flex h-8 items-center gap-1 rounded-md border border-border px-2 text-sm text-muted-foreground hover:bg-accent hover:text-foreground focus:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             onClick={onNewDataset}
           >
             <Plus className="h-3.5 w-3.5" />
@@ -128,7 +128,7 @@ export function Sidebar({ datasets, currentId, page, workspaceCount, onNewDatase
                 aria-current={active ? "true" : undefined}
                 title={d.filename}
                 className={cn(
-                  "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
+                  "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-ring",
                   active
                     ? "bg-accent text-foreground"
                     : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
@@ -147,7 +147,7 @@ export function Sidebar({ datasets, currentId, page, workspaceCount, onNewDatase
       <div className="px-2 pb-2 pt-1">
         <button
           type="button"
-          className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
+          className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground focus:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           onClick={onNewDataset}
         >
           <Plus className="h-3.5 w-3.5" />

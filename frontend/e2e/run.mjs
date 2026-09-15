@@ -365,6 +365,46 @@ try {
     if (!/heatmap/.test(type ?? "")) fail("explore form reset by navigation");
   }
 
+  // ---- B-1 regressions: panel open / close must not reset page state -----
+  {
+    await gotoPage("Explore");
+    await pick("圖表類型", "box");
+    await pick("X 軸", "station");
+    await pick("Y 軸", "pm25");
+    const formValues = async () => ({
+      type: (await page.getByLabel("圖表類型").first().textContent())?.trim(),
+      x: (await page.getByLabel("X 軸").first().textContent())?.trim(),
+      y: (await page.getByLabel("Y 軸").first().textContent())?.trim(),
+    });
+    const before = await formValues();
+    const seq = await panelSeq();
+    await page.getByRole("button", { name: "生成圖表" }).click();
+    await waitPreview(seq);
+    const afterGenerate = await formValues();
+    await page.getByRole("button", { name: "關閉預覽" }).click();
+    await page.waitForTimeout(400);
+    const afterClose = await formValues();
+    const same = (a, b) => a.type === b.type && a.x === b.x && a.y === b.y;
+    step("explore.form-survives-panel", { before, afterGenerate, afterClose, panelClosed: !(await panelState()).present });
+    if (!same(before, afterGenerate) || !same(before, afterClose)) fail("explore form reset by a preview-panel change");
+
+    await gotoPage("Insights");
+    const toggle = page.getByRole("button", { name: /^探索/ });
+    await toggle.click();
+    await page.waitForTimeout(300);
+    const cardsOpen = await page.locator("[id^=rec-card-]").count();
+    const seq2 = await panelSeq();
+    await page.locator("[id^=rec-card-][data-tier=top]").first().click();
+    await waitPreview(seq2);
+    const expanded = (await toggle.getAttribute("aria-expanded")) === "true";
+    const cardsAfter = await page.locator("[id^=rec-card-]").count();
+    step("insights.exploratory-survives-preview", { cardsOpen, cardsAfter, expanded });
+    if (!expanded || cardsAfter !== cardsOpen) fail("exploratory section collapsed by a preview");
+    await toggle.click(); // leave it collapsed for the later card counts
+    await page.waitForTimeout(200);
+    await shot("04-explore-form-kept");
+  }
+
   // ---- Workspace: only the two saved charts -----------------------------
   await gotoPage("Workspace");
   {
@@ -389,7 +429,8 @@ try {
     await shot("13-enlarged-dialog");
     await page.keyboard.press("Escape");
     await dialog.waitFor({ state: "detached", timeout: 10000 });
-    step("workspace.enlarge.closed", { charts: await page.locator(CHART_SEL).count() });
+    step("workspace.enlarge.closed", { charts: await page.locator(CHART_SEL).count(), panelStillOpen: (await panelState()).present });
+    if (!(await panelState()).present) fail("Escape that closed the dialog must not also close the panel");
 
     // export: a real download of a PNG data URL
     const dataUrl = await panel().locator(CHART_SEL).first().evaluate((el) =>
@@ -411,6 +452,18 @@ try {
     await page.waitForTimeout(300);
     step("workspace.remove", { cards: await page.locator("[data-workspace-card]").count(), panel: (await panelState()).present, count: await workspaceCount() });
     if ((await workspaceCount()) !== 1) fail("remove did not leave exactly one chart");
+  }
+
+  // Escape with no dialog open closes the preview panel
+  {
+    await gotoPage("Workspace");
+    const before = await panelSeq();
+    await page.locator("[data-workspace-card]").first().click();
+    await waitPreview(before);
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(300);
+    step("panel.escape-closes", { panelPresent: (await panelState()).present });
+    if ((await panelState()).present) fail("Escape did not close the panel");
   }
 
   // ---- 422 path: box without y (backend rejects: y required) ------------
