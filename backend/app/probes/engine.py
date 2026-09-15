@@ -19,6 +19,7 @@ Design rules:
   per (dataset, profile version, request) with a per-key lock.
 """
 
+import logging
 import math
 import threading
 from itertools import combinations
@@ -27,7 +28,7 @@ from typing import Any
 import polars as pl
 
 from ..charts.confidence import TOP_CONFIDENCE_FLOOR, assess
-from ..charts.rules import choose_time_granularity, slope_spread_threshold
+from ..charts.rules import slope_spread_threshold
 from ..charts.spec import ChartSpec, validate_spec
 from ..profiling.evidence import (
     MIN_SLOPE_GROUP_ROWS,
@@ -60,10 +61,12 @@ from ..profiling.models import PROFILE_VERSION, DatasetProfile, GroupStat, Nonli
 from ..profiling.types import SAMPLE_SEED, apply_semantic_casts
 from .schemas import ProbeOutcome, ProbeRejected, ProbeRequest, ProbeResult, validate_request
 
+logger = logging.getLogger(__name__)
+
 # --- caps and thresholds (the only numbers in this layer) --------------------
 
 MAX_PROBES = 5  # per run_probes call; the rest is rejected with reason "cap"
-MIN_ROWS = 30  # below this a probe cannot "pass" (same floor as layer 2)
+MIN_ROWS = 30  # below this a probe (or a group inside it) cannot "pass" (same floor as layer 2)
 
 # effect thresholds on the probe's effect_size: (pass, weak); the numbers
 # are the ones the rule engine / layer 2 already use for the same statistic
@@ -73,11 +76,14 @@ THRESHOLDS: dict[str, dict[str, float]] = {
     "nonlinear_relationship": {"pass": 0.15, "weak": 0.08},  # nonlinear_gap (NONLINEAR_CORR_GAP)
     "time_pattern": {"pass": 0.10, "weak": 0.03},  # time eta-squared, or a flagged change point
     "interaction": {"pass": 0.10, "weak": 0.03},  # interaction share of variance
-    # grouped_relationship / slope_difference: the pass threshold is dynamic
-    # (slope_spread_threshold(n_min)); weak is half of it — filled per result
+    # the relationship holds in EVERY group: minimum |r| over groups (SCATTER_MIN_CORR)
+    "grouped_relationship": {"pass": 0.30, "weak": 0.20},
+    # slope_difference: the pass threshold is dynamic (slope_spread_threshold(n_min));
+    # weak is half of it — filled per result
 }
-NONLINEAR_PASS_MIN_ETA = 0.15  # a gap only counts when the bins explain this much
 KS_MAX_GROUPS = 8  # pairwise KS over the largest groups only
+# the line granularity that draws the same buckets the evidence was computed on
+_BUCKET_GRANULARITY: dict[TimeBucket, str] = {"day": "day", "month": "month", "year": "month"}
 _BIN = "__probe_bin"
 
 
@@ -171,7 +177,16 @@ def run_probes(
                 frame = prepare_frame(df, profile)
             return _run_one(frame, profile, req)
 
-        result, hit = cache.get_or_compute(cache_key, compute)
+        # the validation gate never raises: a probe that fails inside the
+        # statistics is reported (and logged) as rejected, never propagated
+        try:
+            result, hit = cache.get_or_compute(cache_key, compute)
+        except Exception as exc:  # noqa: BLE001 - any estimator failure is a rejection
+            logger.exception("probe %s %s failed", req.type, req.columns)
+            outcomes[i] = ProbeRejected(
+                type=req.type, columns=req.columns, reason=f"probe error: {type(exc).__name__}: {exc}"
+            )
+            continue
         outcomes[i] = result.model_copy(update={"cached": hit})
     return [o for o in outcomes if o is not None]
 
@@ -223,7 +238,9 @@ def _finish(
         elif n < MIN_ROWS:
             verdict = "weak"
             notes = notes + [f"capped at weak: only {n} rows"]
-        elif n_min_group is not None and n_min_group < MIN_ROWS and assessment.tier_cap is not None:
+        elif n_min_group is not None and n_min_group < MIN_ROWS:
+            # a group estimated from a handful of rows cannot carry a "pass",
+            # however large its effect (a 10-row group 6 SD away is a lead, not a finding)
             verdict = "weak"
             notes = notes + [f"capped at weak: smallest group has {n_min_group} rows"]
     return ProbeResult(
@@ -256,6 +273,19 @@ def _title(req: ProbeRequest) -> str:
     }[req.type]
 
 
+def _group_label(value: Any) -> str:
+    """The one group key used everywhere in this module: Python str() of the
+    raw group value, the same labelling as layer 1 / layer 2 / render (a
+    boolean group is "True"/"False", never polars' cast "true"/"false")."""
+    return str(value)
+
+
+def _group_values(data: pl.DataFrame, group: str, num: str) -> dict[str, pl.Series]:
+    """str(group value) -> the finite values of num in that group."""
+    parts = data.partition_by(group, as_dict=True, maintain_order=True)
+    return {_group_label(key[0]): part[num] for key, part in parts.items()}
+
+
 def _group_table(frame: pl.DataFrame, group: str, num: str) -> list[GroupStat]:
     """Per-group n / mean / median / std / q25 / q75 (layer-2 GroupStat form)."""
     data = frame.filter(pl.col(group).is_not_null()).select(pl.col(group), _finite_expr(num))
@@ -268,10 +298,10 @@ def _group_table(frame: pl.DataFrame, group: str, num: str) -> list[GroupStat]:
         _q(num, 0.25, "q25"),
         _q(num, 0.75, "q75"),
     )
-    rows = sorted(table.iter_rows(named=True), key=lambda r: str(r[group]))
+    rows = sorted(table.iter_rows(named=True), key=lambda r: _group_label(r[group]))
     return [
         GroupStat(
-            group=str(r[group]),
+            group=_group_label(r[group]),
             n=int(r["n"]),
             mean=float(r["mean"]),
             median=float(r["median"]),
@@ -340,7 +370,7 @@ def _group_correlations(frame: pl.DataFrame, x: str, y: str, group: str) -> list
         (xm * ym).sum().alias("sxy"),
     )
     entries = []
-    for r in sorted(table.iter_rows(named=True), key=lambda r: str(r[group])):
+    for r in sorted(table.iter_rows(named=True), key=lambda r: _group_label(r[group])):
         n = int(r["n"])
         if n == 0:
             continue
@@ -352,17 +382,76 @@ def _group_correlations(frame: pl.DataFrame, x: str, y: str, group: str) -> list
             if cxx > 0 and cyy > 0:
                 corr = _finite(cxy / math.sqrt(cxx * cyy))
                 slope = _finite(cxy / cxx)
-        entries.append({"group": str(r[group]), "n": n, "corr": corr, "slope": slope})
+        entries.append({"group": _group_label(r[group]), "n": n, "corr": corr, "slope": slope})
     return entries
+
+
+def _overall_corr(frame: pl.DataFrame, x: str, y: str) -> float | None:
+    return _finite(frame.select(_finite_expr(x), _finite_expr(y)).drop_nulls().select(pl.corr(x, y)).item())
+
+
+def _grouped_relationship(frame: pl.DataFrame, profile: DatasetProfile, req: ProbeRequest) -> ProbeResult:
+    """Does the x-y relationship hold INSIDE every group? Effect = the
+    weakest per-group |r|; a group below the row floor makes the verdict at
+    most weak (its correlation is not estimated)."""
+    x, y, group = req.columns["x"], req.columns["y"], req.columns["group"]
+    entries = _group_correlations(frame, x, y, group)
+    valid = [e for e in entries if e["corr"] is not None]
+    chart = ChartSpec(title=_title(req), type="scatter", x=x, y=y, group_by=group)
+    label = "minimum |correlation| across groups"
+    thresholds = THRESHOLDS["grouped_relationship"]
+    n_total = sum(e["n"] for e in entries)
+    n_min = min((e["n"] for e in entries), default=None)
+    evidence: dict[str, Any] = {"groups": entries, "overall_corr": _overall_corr(frame, x, y)}
+    if len(valid) < 2:
+        return _finish(
+            profile,
+            req,
+            effect_size=0.0,
+            effect_label=label,
+            n=n_total,
+            n_min_group=n_min,
+            thresholds=thresholds,
+            evidence={**evidence, "min_abs_corr": None, "spread": None},
+            chart=chart,
+            notes=[f"fewer than two groups with at least {MIN_SLOPE_GROUP_ROWS} rows"],
+            effect_verdict="fail",
+        )
+    abs_corrs = [abs(e["corr"]) for e in valid]
+    corrs = [e["corr"] for e in valid]
+    notes: list[str] = []
+    if len(valid) < len(entries):
+        notes.append(f"{len(entries) - len(valid)} group(s) below {MIN_SLOPE_GROUP_ROWS} rows not estimated")
+    if len({c > 0 for c in corrs}) > 1:
+        notes.append("the sign of the relationship differs between groups")
+    evidence.update(
+        {
+            "min_abs_corr": round(min(abs_corrs), 6),
+            "max_abs_corr": round(max(abs_corrs), 6),
+            "spread": round(max(corrs) - min(corrs), 6),
+            "weakest_group": min(valid, key=lambda e: (abs(e["corr"]), e["group"]))["group"],
+            "strongest_group": max(valid, key=lambda e: (abs(e["corr"]), e["group"]))["group"],
+        }
+    )
+    return _finish(
+        profile,
+        req,
+        effect_size=min(abs_corrs),
+        effect_label=label,
+        n=n_total,
+        n_min_group=n_min,
+        thresholds=thresholds,
+        evidence=evidence,
+        chart=chart,
+        notes=notes,
+    )
 
 
 def _slope_difference(frame: pl.DataFrame, profile: DatasetProfile, req: ProbeRequest) -> ProbeResult:
     x, y, group = req.columns["x"], req.columns["y"], req.columns["group"]
     entries = _group_correlations(frame, x, y, group)
     valid = [e for e in entries if e["corr"] is not None]
-    overall = _finite(
-        frame.select(_finite_expr(x), _finite_expr(y)).drop_nulls().select(pl.corr(x, y)).item()
-    )
+    overall = _overall_corr(frame, x, y)
     chart = ChartSpec(title=_title(req), type="scatter", x=x, y=y, group_by=group)
     n_total = sum(e["n"] for e in entries)
     if len(valid) < 2:
@@ -468,16 +557,13 @@ def _nonlinear_relationship(frame: pl.DataFrame, profile: DatasetProfile, req: P
             notes=["binned effect undefined (constant y or too few bins)"],
             effect_verdict="fail",
         )
+    # gap = eta - r² <= eta, so a passing gap always comes with bins that
+    # explain at least the pass threshold of the variance
     gap = max(eta - (r2 or 0.0), 0.0)
     means = [b.y_mean for b in bins]
     monotone = _is_monotone(means)
     shape = _curve_shape(eta, gap, monotone, means)
     thresholds = THRESHOLDS["nonlinear_relationship"]
-    effect_verdict = None
-    notes: list[str] = []
-    if gap >= thresholds["pass"] and eta < NONLINEAR_PASS_MIN_ETA:
-        effect_verdict = "weak"
-        notes.append(f"bins explain only {eta:.2f} of the variance (< {NONLINEAR_PASS_MIN_ETA})")
     evidence = {
         "bins": [b.model_dump() for b in bins],
         "binned_eta2": round(eta, 6),
@@ -497,8 +583,7 @@ def _nonlinear_relationship(frame: pl.DataFrame, profile: DatasetProfile, req: P
         thresholds=thresholds,
         evidence=evidence,
         chart=chart,
-        notes=notes,
-        effect_verdict=effect_verdict,
+        notes=[],
     )
 
 
@@ -533,9 +618,8 @@ def _distribution_difference(frame: pl.DataFrame, profile: DatasetProfile, req: 
         (g for g in stats if g.n >= MIN_SLOPE_GROUP_ROWS), key=lambda g: (-g.n, g.group)
     )[:KS_MAX_GROUPS]
     n_total = sum(g.n for g in stats)
-    groups_out = [
-        {**g.model_dump(), "iqr": round(g.q75 - g.q25, 6)} for g in stats
-    ]
+    n_min = min((g.n for g in stats), default=None)  # over ALL groups, not only the KS ones
+    groups_out = [{**g.model_dump(), "iqr": round(g.q75 - g.q25, 6)} for g in stats]
     if len(eligible) < 2:
         return _finish(
             profile,
@@ -543,22 +627,24 @@ def _distribution_difference(frame: pl.DataFrame, profile: DatasetProfile, req: 
             effect_size=0.0,
             effect_label=label,
             n=n_total,
-            n_min_group=min((g.n for g in stats), default=None),
+            n_min_group=n_min,
             thresholds=thresholds,
-            evidence={"groups": groups_out, "pairs": [], "max_ks": None, "ks_pair": None},
+            evidence={"groups": groups_out, "pairs": [], "max_ks": None, "ks_pair": None, "ks_groups": []},
             chart=chart,
             notes=[f"fewer than two groups with at least {MIN_SLOPE_GROUP_ROWS} rows"],
             effect_verdict="fail",
         )
-    values = {
-        g.group: data.filter(pl.col(group).cast(pl.String) == g.group)[target] for g in eligible
-    }
+    # the group values keyed by the same str() label the stats use (a boolean
+    # group is "True"/"False" on both sides; a string cast would give "true")
+    values = _group_values(data, group, target)
+    ks_groups = [g.group for g in eligible]
     pairs = []
-    for a, b in combinations([g.group for g in eligible], 2):
+    for a, b in combinations(ks_groups, 2):
         pairs.append({"a": a, "b": b, "ks": round(_ks_statistic(values[a], values[b]), 6)})
     best = max(pairs, key=lambda p: (p["ks"], p["a"], p["b"]))
     evidence = {
         "groups": groups_out,
+        "ks_groups": ks_groups,
         "pairs": pairs,
         "max_ks": best["ks"],
         "ks_pair": [best["a"], best["b"]],
@@ -570,7 +656,7 @@ def _distribution_difference(frame: pl.DataFrame, profile: DatasetProfile, req: 
         effect_size=best["ks"],
         effect_label=label,
         n=n_total,
-        n_min_group=min(g.n for g in eligible),
+        n_min_group=n_min,
         thresholds=thresholds,
         evidence=evidence,
         chart=chart,
@@ -587,17 +673,21 @@ def _time_pattern(frame: pl.DataFrame, profile: DatasetProfile, req: ProbeReques
     span = _datetime_span_days(frame[time])
     thresholds = THRESHOLDS["time_pattern"]
     label = "adjusted eta-squared of target across time buckets"
-    unique = int(frame[time].n_unique())
-    granularity = choose_time_granularity(unique, span or 0.0)
-    chart = ChartSpec(
-        title=_title(req),
-        type="line",
-        x=time,
-        y=target,
-        group_by=group,
-        aggregation="mean",
-        time_granularity=granularity,
-    )
+
+    def chart_for(bucket: TimeBucket | None) -> ChartSpec:
+        # the line draws the same buckets the series / change point were
+        # computed on (year has no line granularity: month is the closest)
+        return ChartSpec(
+            title=_title(req),
+            type="line",
+            x=time,
+            y=target,
+            group_by=group,
+            aggregation="mean",
+            time_granularity=_BUCKET_GRANULARITY[bucket] if bucket else "month",  # type: ignore[arg-type]
+        )
+
+    chart = chart_for(None)
     if span is None:
         return _finish(
             profile,
@@ -640,6 +730,7 @@ def _time_pattern(frame: pl.DataFrame, profile: DatasetProfile, req: ProbeReques
     # bucket-mean series (thinned to MAX_TIME_POINTS) and the single change point
     change_bucket = _choose_change_bucket(frame[time], span_bucket(span))
     series_bucket = change_bucket or used
+    chart = chart_for(series_bucket)
     base = frame.filter(pl.col(time).is_not_null()).select(
         pl.col(time).dt.truncate(_BUCKET_TRUNC[series_bucket]).alias(_BIN),
         _finite_expr(target),
@@ -687,7 +778,7 @@ def _time_pattern(frame: pl.DataFrame, profile: DatasetProfile, req: ProbeReques
         for r in by_group.iter_rows(named=True):
             if r["mean"] is None:
                 continue
-            key = str(r[group])
+            key = _group_label(r[group])
             sizes[key] = sizes.get(key, 0) + int(r["n"])
             bucket_index = next((i for i, p in enumerate(points) if p[0] == r[_BIN]), None)
             if bucket_index in keep:
@@ -701,6 +792,7 @@ def _time_pattern(frame: pl.DataFrame, profile: DatasetProfile, req: ProbeReques
         "eta_squared": round(eta.eta_squared, 6),
         "n_buckets": eta.n_groups,
         "series_bucket": series_bucket,
+        "chart_granularity": chart.time_granularity,
         "series": series,
         "change_point": change,
         "group_series": group_series,
@@ -738,7 +830,12 @@ def _interaction(frame: pl.DataFrame, profile: DatasetProfile, req: ProbeRequest
         .sort(f1, f2)
     )
     cell_rows = [
-        {"factor1": str(r[f1]), "factor2": str(r[f2]), "n": int(r["n"]), "mean": round(float(r["mean"]), 6)}
+        {
+            "factor1": _group_label(r[f1]),
+            "factor2": _group_label(r[f2]),
+            "n": int(r["n"]),
+            "mean": round(float(r["mean"]), 6),
+        }
         for r in cells.iter_rows(named=True)
         if r["mean"] is not None
     ]
@@ -776,7 +873,7 @@ def _interaction(frame: pl.DataFrame, profile: DatasetProfile, req: ProbeRequest
 
 _RUNNERS = {
     "group_difference": _group_difference,
-    "grouped_relationship": _slope_difference,
+    "grouped_relationship": _grouped_relationship,
     "slope_difference": _slope_difference,
     "nonlinear_relationship": _nonlinear_relationship,
     "distribution_difference": _distribution_difference,

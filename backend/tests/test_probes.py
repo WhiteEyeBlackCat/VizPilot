@@ -114,11 +114,38 @@ def test_slope_difference_pass_and_fail(planted) -> None:
     assert hit.thresholds["pass"] == pytest.approx(engine.slope_spread_threshold(1000))
     assert hit.chart is not None and hit.chart.group_by == "g"
 
-    # grouped_relationship is the same estimator: identical y_lin slope in every group -> no spread
-    same = _one(df, profile, _req("grouped_relationship", x="x", y="y_lin", group="g"))
+    # the same y_lin has no slope difference: identical relationship in every group
+    same = _one(df, profile, _req("slope_difference", x="x", y="y_lin", group="g"))
     assert same.verdict == "fail"
     assert same.effect_size < 0.05
     assert all(e["corr"] > 0.99 for e in same.evidence["groups"])
+
+
+def test_grouped_relationship_holds_in_every_group_or_fails(planted) -> None:
+    df, profile = planted
+    # y_lin correlates > 0.99 with x inside every group -> the relationship holds everywhere
+    hit = _one(df, profile, _req("grouped_relationship", x="x", y="y_lin", group="g"))
+    assert hit.verdict == "pass"
+    assert hit.effect_label.startswith("minimum |correlation|")
+    assert hit.effect_size > 0.99
+    assert hit.evidence["min_abs_corr"] == pytest.approx(hit.effect_size)
+    assert hit.evidence["spread"] < 0.05
+    assert hit.thresholds == {"pass": 0.30, "weak": 0.20}
+    # `slope` is flat inside group c (|r| ~ 0): the weakest group decides -> fail,
+    # even though the slope_difference probe on the same columns passes
+    miss = _one(df, profile, _req("grouped_relationship", x="x", y="slope", group="g"))
+    assert miss.verdict == "fail"
+    assert miss.effect_size < 0.1
+    assert miss.evidence["weakest_group"] == "c"
+    assert any("sign" in note for note in miss.notes)
+    # a group below the row floor is not estimated and caps the verdict at weak
+    small = df.with_columns(
+        pl.when(pl.arange(0, df.height) < 20).then(pl.lit("tiny")).otherwise(pl.col("g")).alias("g")
+    )
+    capped = _one(small, _profile(small), _req("grouped_relationship", x="x", y="y_lin", group="g"))
+    assert capped.verdict == "weak"
+    assert capped.n_min_group < 30
+    assert any("not estimated" in note for note in capped.notes)
 
 
 def test_distribution_difference_pass_and_fail(planted) -> None:
@@ -127,7 +154,9 @@ def test_distribution_difference_pass_and_fail(planted) -> None:
     assert hit.verdict == "pass"
     assert hit.effect_size > 0.6
     assert "c" in hit.evidence["ks_pair"]
+    assert hit.evidence["ks_groups"] == ["a", "b", "c"]
     assert len(hit.evidence["pairs"]) == 3
+    assert hit.n_min_group == 1000
     assert hit.chart is not None and hit.chart.type == "box"
 
     miss = _one(df, profile, _req("distribution_difference", group="g", target="noise"))
@@ -144,6 +173,9 @@ def test_time_pattern_pass_on_step_fail_on_noise(planted) -> None:
     assert change["after_mean"] - change["before_mean"] > 0.8
     assert len(hit.evidence["series"]) <= 24
     assert hit.chart is not None and hit.chart.type == "line" and hit.chart.aggregation == "mean"
+    # the chart draws the buckets the series / change point were computed on
+    assert hit.chart.time_granularity == hit.evidence["chart_granularity"]
+    assert hit.chart.time_granularity == engine._BUCKET_GRANULARITY[hit.evidence["series_bucket"]]
 
     miss = _one(df, profile, _req("time_pattern", time="ts", target="noise", group="g"))
     assert miss.verdict == "fail"
@@ -161,6 +193,75 @@ def test_interaction_pass_and_fail(planted) -> None:
 
     miss = _one(df, profile, _req("interaction", factor1="g", factor2="h", target="noise"))
     assert miss.verdict == "fail"
+    assert miss.effect_size < 0.03
+    assert miss.evidence["strength"] == pytest.approx(miss.effect_size)
+
+
+def test_boolean_group_columns_work_in_every_role() -> None:
+    # a boolean group used to break distribution_difference (polars casts
+    # True to "true", Python str() gives "True"); every role that takes a
+    # group must accept a boolean column and label it "True"/"False"
+    rng = random.Random(23)
+    n = 2000
+    flag = [i % 2 == 0 for i in range(n)]
+    other = [["p", "q", "r"][i % 3] for i in range(n)]
+    x = [rng.uniform(0, 10) for _ in range(n)]
+    df = pl.DataFrame(
+        {
+            "flag": flag,
+            "other": other,
+            "x": x,
+            "v": [rng.gauss(0, 1) + (2.0 if f else 0.0) for f in flag],
+            "slope": [(v if f else -v) + rng.gauss(0, 1) for v, f in zip(x, flag)],
+            "y_lin": [2 * v + rng.gauss(0, 1) for v in x],
+            "inter": [(1.0 if f == (o == "p") else -1.0) + rng.gauss(0, 1) for f, o in zip(flag, other)],
+            "ts": [datetime(2024, 1, 1) + timedelta(hours=i * 6) for i in range(n)],
+        }
+    )
+    profile = _profile(df)
+    assert next(c for c in profile.columns if c.name == "flag").semantic_type == "boolean"
+    reqs = [
+        _req("group_difference", group="flag", target="v"),
+        _req("distribution_difference", group="flag", target="v"),
+        _req("slope_difference", x="x", y="slope", group="flag"),
+        _req("grouped_relationship", x="x", y="y_lin", group="flag"),
+        _req("time_pattern", time="ts", target="v", group="flag"),
+        _req("interaction", factor1="flag", factor2="other", target="inter"),
+        _req("interaction", factor1="other", factor2="flag", target="inter"),
+    ]
+    out = run_probes(df, profile, reqs[:5], cache=ProbeCache()) + run_probes(df, profile, reqs[5:], cache=ProbeCache())
+    assert all(isinstance(r, ProbeResult) for r in out), [getattr(r, "reason", None) for r in out]
+    by = {(r.type, tuple(sorted(r.columns.items()))): r for r in out}
+    dist = by[("distribution_difference", (("group", "flag"), ("target", "v")))]
+    assert dist.verdict == "pass" and dist.effect_size > 0.6
+    assert dist.evidence["ks_groups"] == ["False", "True"]
+    assert {g["group"] for g in dist.evidence["groups"]} == {"False", "True"}
+    assert by[("group_difference", (("group", "flag"), ("target", "v")))].verdict == "pass"
+    assert by[("slope_difference", (("group", "flag"), ("x", "x"), ("y", "slope")))].verdict == "pass"
+    assert by[("grouped_relationship", (("group", "flag"), ("x", "x"), ("y", "y_lin")))].verdict == "pass"
+    tp = by[("time_pattern", (("group", "flag"), ("target", "v"), ("time", "ts")))]
+    assert set(tp.evidence["group_series"]) == {"False", "True"}
+    inter = by[("interaction", (("factor1", "flag"), ("factor2", "other"), ("target", "inter")))]
+    assert inter.verdict == "pass"
+    assert {c["factor1"] for c in inter.evidence["cells"]} == {"False", "True"}
+
+
+def test_estimator_failure_becomes_a_rejection_not_an_exception(planted, monkeypatch) -> None:
+    df, profile = planted
+
+    def boom(frame, prof, req):
+        raise TypeError("float() argument must be a string or a real number, not 'NoneType'")
+
+    monkeypatch.setitem(engine._RUNNERS, "group_difference", boom)
+    out = run_probes(
+        df,
+        profile,
+        [_req("group_difference", group="g", target="grp_shift"), _req("nonlinear_relationship", x="x", y="y_u")],
+        cache=ProbeCache(),
+    )
+    assert isinstance(out[0], ProbeRejected)
+    assert out[0].reason.startswith("probe error: TypeError")
+    assert isinstance(out[1], ProbeResult)  # the other probes still run
 
 
 # --- request validation ---------------------------------------------------------------
@@ -194,6 +295,41 @@ def test_invalid_requests_are_rejected_without_running(planted, req, fragment) -
 def test_unknown_probe_type_is_rejected_by_the_schema() -> None:
     with pytest.raises(ValueError):
         ProbeRequest(type="run_python", columns={"code": "1+1"})
+
+
+def test_extra_request_keys_are_a_validation_error() -> None:
+    # an LLM smuggling code next to a valid probe is rejected loudly, not ignored
+    with pytest.raises(ValueError, match="code"):
+        ProbeRequest(type="group_difference", columns={"group": "g", "target": "v"}, code="df.mean()")
+    with pytest.raises(ValueError, match="sql"):
+        ProbeRequest.model_validate(
+            {"type": "group_difference", "columns": {"group": "g", "target": "v"}, "sql": "select 1"}
+        )
+
+
+def test_id_constant_and_over_cardinal_columns_are_rejected() -> None:
+    rng = random.Random(41)
+    n = 500
+    df = pl.DataFrame(
+        {
+            "user_id": list(range(1000, 1000 + n)),
+            "flat": [1.0] * n,
+            "code": [f"c{i}" for i in range(n)],  # 500 distinct labels
+            "g": [["a", "b", "c"][i % 3] for i in range(n)],
+            "v": [rng.gauss(0, 1) for _ in range(n)],
+            "w": [rng.gauss(0, 1) for _ in range(n)],
+        }
+    )
+    profile = _profile(df)
+    types = {c.name: c.semantic_type for c in profile.columns}
+    assert types["user_id"] == "id"
+    reason = validate_request(_req("nonlinear_relationship", x="user_id", y="v"), profile)
+    assert reason is not None and "cannot be analysed" in reason
+    reason = validate_request(_req("group_difference", group="g", target="flat"), profile)
+    assert reason is not None and ("constant" in reason or "numeric" in reason)
+    reason = validate_request(_req("group_difference", group="code", target="v"), profile)
+    assert reason is not None and ("categories" in reason or "categorical" in reason or "cannot" in reason)
+    assert validate_request(_req("group_difference", group="g", target="v"), profile) is None
 
 
 def test_derived_pair_is_rejected_as_definitional() -> None:

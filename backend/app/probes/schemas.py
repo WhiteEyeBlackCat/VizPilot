@@ -11,7 +11,7 @@ column the rule engine itself excludes is rejected, not executed.
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from ..charts.confidence import MAX_MISSING_RATIO, Confidence
 from ..charts.spec import ChartSpec, _is_numeric_y
@@ -47,6 +47,10 @@ BOX_GROUP_MAX = 50  # distribution_difference draws a box: validate_spec's box x
 
 
 class ProbeRequest(BaseModel):
+    # extra keys (an LLM smuggling "code", "sql", "expression") are a
+    # validation error that gets logged, never silently dropped
+    model_config = ConfigDict(extra="forbid")
+
     type: ProbeType
     columns: dict[str, str]
 
