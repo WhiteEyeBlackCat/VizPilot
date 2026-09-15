@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     llm_base_url: str = "http://localhost:11434/v1"
     llm_model: str = ""
     llm_api_key: str = ""  # local servers usually need none
-    llm_timeout_seconds: float = 30
+    llm_timeout_seconds: float = 60  # the hypothesis prompt is longer than the stage-5 one (stage 17.3)
     llm_include_sample_rows: bool = True
 
     @property

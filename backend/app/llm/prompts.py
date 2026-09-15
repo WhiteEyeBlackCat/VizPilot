@@ -38,6 +38,7 @@ MAX_SAMPLE_ROWS = 5
 L2_PER_CATEGORY = 3
 L2_GROUP_MIN_DIFF_SD = 0.3  # group summaries below this mean gap are not worth a line
 L2_MIN_SKEW = 1.0  # distributions: only clearly skewed or multimodal ones
+L2_MIN_GROUP_CORR = 0.30  # conditional relationships: some group must show a real correlation
 
 PROBE_TYPE_GUIDE = """Probe types (test_needed) and their column roles — the backend computes the statistic, you \
 only choose type and columns:
@@ -52,8 +53,10 @@ Role constraints (violations are rejected, not run): group / factor1 / factor2 =
 boolean with 2-20 categories (distribution_difference: up to 50); x / y / target = numeric (a \
 categorical column can never be x or y); time = datetime. Also rejected: identifiers, text, \
 constant columns, >50% missing, the same column in two roles, derived-formula pairs, \
-near-duplicate pairs. At most 5 probes per dataset: request one only when the evidence section \
-does not already answer the question; otherwise test_needed = null, evidence_available = true."""
+near-duplicate pairs. Use distribution_difference when group means look alike but the shapes may \
+differ, interaction when you suspect two factors act together. At most 5 probes per dataset: \
+request one only when the evidence section does not already answer the question; otherwise \
+test_needed = null, evidence_available = true."""
 
 HYPOTHESIS_SYSTEM_PROMPT = """You are the hypothesis generator of a data exploration assistant. You read a \
 dataset profile with measured evidence (effect sizes, correlations, distribution / group / \
@@ -104,11 +107,10 @@ chart shape, lower priority number = more important.
 """ + PROBE_TYPE_GUIDE + """
 
 Example: {"hypotheses": [{"statement": "Casual riders are far more numerous on weekends.", \
-"variables": ["weekday", "casual"], "evidence_available": true, "test_needed": null, \
-"columns": {"group": "weekday", "target": "casual"}, "chart": {"title": "Mean casual by weekday", \
-"type": "bar", "x": "weekday", "y": "casual", "group_by": null, "aggregation": "mean", \
-"reason": "Shows the weekend jump.", "priority": 1}, "reason": "Separates leisure from commuting \
-demand.", "importance": 4}], "charts": []}"""
+"variables": ["weekday", "casual"], "evidence_available": true, "test_needed": null, "columns": \
+{"group": "weekday", "target": "casual"}, "chart": {"title": "Mean casual by weekday", "type": "bar", \
+"x": "weekday", "y": "casual", "group_by": null, "aggregation": "mean", "reason": "weekend jump", \
+"priority": 1}, "reason": "leisure vs commuting demand", "importance": 4}], "charts": []}"""
 
 FINAL_SYSTEM_PROMPT = """You are the final analyst of a data exploration assistant. You receive \
 hypotheses the backend has already validated, each with its measured evidence (effect size, sample \
@@ -175,13 +177,7 @@ def _user_content(
         s = rec.spec
         lines.append(f"- {s.type}: x={s.x}, y={s.y}, group_by={s.group_by}, aggregation={s.aggregation}")
 
-    lines += [
-        "",
-        "Interpret the column semantics and propose 0-5 hypotheses worth verifying, each with its "
-        "supporting chart. Build on the evidence above — do not conclude anything about columns whose "
-        "measured effects are close to zero, and never restate a derived formula or a near-duplicate "
-        "pair. Set test_needed only when the evidence section does not already answer the question.",
-    ]
+    lines += ["", "Propose 0-5 hypotheses worth verifying, each with its supporting chart."]
     return "\n".join(lines)
 
 
@@ -278,7 +274,15 @@ def _layer2_section(profile: DatasetProfile) -> list[str]:
         lines += [_nonlinear_line(s) for s in nonlinear]
 
     conditional = sorted(
-        (c for c in l2.conditional_relationships if c.corr_spread >= slope_spread_threshold(c.n_min) / 2),
+        (
+            c
+            for c in l2.conditional_relationships
+            if c.corr_spread >= slope_spread_threshold(c.n_min) / 2
+            # a spread only matters when some group shows a real relationship
+            # (the same corroboration the workflow applies); this keeps the
+            # largest-of-many noise spreads out of the LLM's view
+            and max((abs(g.corr) for g in c.groups if g.corr is not None), default=0.0) >= L2_MIN_GROUP_CORR
+        ),
         key=lambda c: (-c.corr_spread, c.x, c.y, c.group),
     )[:L2_PER_CATEGORY]
     if conditional:
@@ -465,15 +469,25 @@ def _describe_column(col: ColumnProfile) -> str:
 
 
 def _top_correlations(profile: DatasetProfile) -> list[tuple[str, str, float]]:
+    """Strongest pairs, leaving out the ones that only restate a definition
+    (derived-formula pairs) or a duplication (near-duplicate pairs)."""
     corr = profile.correlations
     if corr is None:
         return []
+    evidence = profile.evidence
+    skip: set[frozenset[str]] = set()
+    for d in getattr(evidence, "derived_columns", []):
+        for component in d.components:
+            skip.add(frozenset((d.target, component)))
+    suppressed = {dup for g in getattr(evidence, "near_duplicate_groups", []) for dup in g.duplicates}
     pairs = []
     for i, a in enumerate(corr.columns):
         for j in range(i + 1, len(corr.columns)):
+            b = corr.columns[j]
             value = corr.matrix[i][j]
-            if value is not None:
-                pairs.append((a, corr.columns[j], value))
+            if value is None or frozenset((a, b)) in skip or a in suppressed or b in suppressed:
+                continue
+            pairs.append((a, b, value))
     pairs.sort(key=lambda p: -abs(p[2]))
     return pairs[:MAX_CORR_PAIRS]
 

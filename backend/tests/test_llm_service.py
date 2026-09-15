@@ -264,20 +264,32 @@ def test_cache_per_dataset_and_per_llm_flag(profile) -> None:
 # --- stage 8: insight -> chart contract, now through the coverage check ----
 
 
-def test_insight_chart_priority_points_to_final_chart(profile) -> None:
+def test_bare_correlation_claim_is_probed_and_dropped(profile, df) -> None:
+    # stage 17.3: "X and Y move together" carries no analytical value by
+    # itself; a plain scatter implies a non-linear-dependence probe, which
+    # finds nothing here (60 rows, |corr| ~ 0) -> no insight, no LLM chart
     service, provider = _service({"hypotheses": [_hyp("weak pair moves together", NEW_CHART)]})
+    result = service.get(profile, use_llm=True, df=df, include_debug=True)
+    assert result["insights"] == [] and result["message"] == NO_PATTERNS_MESSAGE
+    assert _chart_by(result, "scatter", x="value", y="value3") is None
+    (probe,) = result["debug"]["probes"]
+    assert probe["type"] == "nonlinear_relationship" and probe["verdict"] == "fail"
+    assert provider.final_calls == 0
+
+
+def test_insight_chart_priority_points_to_final_chart(profile) -> None:
+    mention = _strong_line_mention(profile)
+    service, provider = _service({"hypotheses": [_hyp("value climbs over time", mention)]})
     result = service.get(profile, use_llm=True)
     (insight,) = result["insights"]
-    chart = _chart_by(result, "scatter", x="value", y="value3")
-    assert chart is not None and chart["source"] == "llm"
+    chart = _chart_by(result, "line", x=mention["x"], y=mention["y"])
+    assert chart is not None
     assert insight["chart_priority"] == chart["spec"]["priority"]
-    assert insight["supported"] == "weak"  # |corr| ~ 0 -> evidence exists but weak
-    assert insight["validation"] == "existing_evidence"
-    assert insight["effect"]["label"].startswith("|correlation|") and insight["effect"]["n"] == 60
-    assert chart["tier"] != "top"
+    assert insight["supported"] == "strong" and insight["validation"] == "existing_evidence"
+    assert insight["effect"]["label"].startswith("adjusted eta-squared") and insight["effect"]["n"] == 60
     # a single finding the tables already answer: no LLM #2, template wording
     assert provider.final_calls == 0
-    assert insight["text"].startswith("weak pair moves together (")
+    assert insight["text"].startswith("value climbs over time (")
 
 
 def test_insight_chart_deduped_into_rules_chart(profile) -> None:
@@ -388,10 +400,11 @@ def test_weak_llm_charts_cannot_evict_strong_rules_from_top(profile) -> None:
     assert grouped is not None and grouped["score"] > 0.85 and grouped["tier"] == "secondary"
 
 
-def test_resuggested_capped_chart_stays_out_but_insight_survives(profile) -> None:
+def test_resuggested_capped_chart_stays_out_and_claim_fails_on_evidence(profile) -> None:
     # critique #4: the diversity caps cut bar(city, value3) from the rules
-    # list; the LLM re-suggesting it must not bypass the caps — the insight
-    # survives with chart_priority=null (blocking #1 path 3)
+    # list; the LLM re-suggesting it must not bypass the caps. Under stage
+    # 17.3 the claim itself is checked first: city has no effect on value3
+    # (eta-squared 0) -> dropped, and no chart is added either way
     rules_keys = {(r.spec.type, r.spec.x, r.spec.y) for r in recommend_charts(profile)}
     assert ("bar", "city", "value3") not in rules_keys
     chart = {
@@ -404,12 +417,11 @@ def test_resuggested_capped_chart_stays_out_but_insight_survives(profile) -> Non
         "priority": 1,
     }
     service, _ = _service({"hypotheses": [_hyp("v3 differs by city", chart)]})
-    result = service.get(profile, use_llm=True)
+    result = service.get(profile, use_llm=True, include_debug=True)
     assert _chart_by(result, "bar", x="city", y="value3") is None  # still capped out
-    (insight,) = result["insights"]
-    assert insight["chart_priority"] is None
-    assert insight["supported"] == "weak"  # evidence was checked regardless
-    assert insight["text"].startswith("v3 differs by city")
+    assert result["insights"] == []
+    (dropped,) = result["debug"]["dropped"]
+    assert "existing evidence fails" in dropped["reason"]
 
 
 def test_malformed_hypotheses_do_not_invalidate_response() -> None:
@@ -442,20 +454,21 @@ def _llm_client(tmp_path, hypotheses) -> TestClient:
 
 
 def test_endpoint_with_llm_and_llm_false_switch(tmp_path) -> None:
-    client = _llm_client(tmp_path, {"hypotheses": [_hyp("value2 doubles value.", dict(NEW_CHART))]})
+    line = {"title": "value over date", "type": "line", "x": "date", "y": "value", "aggregation": "mean", "priority": 1}
+    client = _llm_client(
+        tmp_path, {"hypotheses": [_hyp("value climbs over the month.", line)], "charts": [dict(NEW_CHART)]}
+    )
     dataset_id = client.post("/api/datasets", files={"file": ("d.csv", CSV.encode())}).json()["dataset_id"]
 
     body = client.get(f"/api/datasets/{dataset_id}/recommendations").json()
-    (insight,) = body["insights"]
-    assert insight["text"].startswith("value2 doubles value (")
-    assert insight["supported"] in ("strong", "weak")
-    assert isinstance(insight["chart_priority"], int)
-    assert insight["validation"] == "existing_evidence"
-    assert any(c["source"] == "llm" for c in body["charts"])
+    # 12 rows: a real trend, but below the MIN_ROWS floor no claim becomes an insight
+    assert body["insights"] == [] and body["message"] == NO_PATTERNS_MESSAGE
+    assert any(c["source"] == "llm" for c in body["charts"])  # bare chart suggestions still merge
     assert "debug" not in body
 
     debug = client.get(f"/api/datasets/{dataset_id}/recommendations", params={"debug": "1"}).json()["debug"]
-    assert debug["llm_calls"] == 1 and debug["validated"] == 1 and debug["probes"] == []
+    assert debug["llm_calls"] == 1 and debug["validated"] == 0 and debug["probes"] == []
+    assert "fewer than 30 rows" in debug["dropped"][0]["reason"]
 
     rules_only = client.get(f"/api/datasets/{dataset_id}/recommendations", params={"llm": "false"}).json()
     assert rules_only["insights"] == []
@@ -566,9 +579,7 @@ def test_llm_duplicate_chart_is_canonicalised_and_deduped(dup_profile) -> None:
         {"title": "atemp vs temp", "type": "scatter", "x": "temp", "y": "atemp", "reason": "dup", "priority": 2},
         {"title": "atemp over time", "type": "line", "x": "ts", "y": "atemp", "reason": "trend", "priority": 3},
     ]
-    service, _ = _service(
-        {"hypotheses": [_hyp("humidity falls as it warms", charts[0], variables=["atemp", "hum"])], "charts": charts[1:]}
-    )
+    service, _ = _service({"charts": charts})
     result = service.get(dup_profile, use_llm=True)
     specs = [(c["spec"]["type"], c["spec"]["x"], c["spec"]["y"]) for c in result["charts"]]
     assert "atemp" not in {x for _, x, _ in specs} | {y for _, _, y in specs}
@@ -576,9 +587,7 @@ def test_llm_duplicate_chart_is_canonicalised_and_deduped(dup_profile) -> None:
     kept = _chart_by(result, "scatter", x="temp", y="hum")
     assert kept is not None and kept["source"] == "rules" and kept["spec"]["reason"] == "llm says"
     assert specs.count(("scatter", "temp", "hum")) == 1
-    (insight,) = result["insights"]
-    assert insight["chart_priority"] == kept["spec"]["priority"]
-    assert insight["supported"] == "strong"
+    assert result["insights"] == []  # bare chart suggestions carry no claim
     assert kept["score"] == pytest.approx(rules_scatter.score)
     # the pair chart collapsed onto temp == temp and was dropped
     assert _chart_by(result, "scatter", x="temp", y="temp") is None
@@ -595,6 +604,17 @@ def test_hypothesis_on_the_duplicate_pair_is_dropped(dup_profile) -> None:
     assert result["insights"] == []
     (dropped,) = result["debug"]["dropped"]
     assert "near-duplicate" in dropped["reason"] or "verify" in dropped["reason"]
+
+
+def test_hypothesis_statement_maps_duplicate_names_to_the_representative(dup_profile) -> None:
+    # "atemp" in the claim text is the duplicate of temp: the workflow speaks
+    # of the representative, and the grouped claim goes through the probe path
+    chart = {"title": "atemp over time by city", "type": "line", "x": "ts", "y": "atemp", "group_by": "city", "aggregation": "mean", "priority": 1}
+    service, _ = _service({"hypotheses": [_hyp("atemp rises over time differently per city", chart, columns={"time": "ts", "target": "atemp", "group": "city"}, test_needed="time_pattern")]})
+    result = service.get(dup_profile, use_llm=True, include_debug=True)
+    (dropped,) = result["debug"]["dropped"]
+    assert dropped["statement"] == "temp rises over time differently per city"
+    assert "grouped time pattern" in dropped["reason"]
 
 
 def test_llm_new_chart_on_duplicate_carries_substitution_warning(dup_profile) -> None:

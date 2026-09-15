@@ -3,7 +3,10 @@ conditional LLM #2. Everything runs on a planted dataset with known
 structure so every verdict can be predicted."""
 
 import random
+import subprocess
+import sys
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import polars as pl
 import pytest
@@ -12,9 +15,11 @@ from app.charts.rules import recommend_charts
 from app.llm.schemas import FinalResponse, HypothesisResponse, LLMUsage
 from app.llm.service import NO_PATTERNS_MESSAGE, RecommendationService
 from app.probes import ProbeCache
+from app.datasets.loader import load_dataframe
 from app.profiling.profiler import profile_dataset
 
 BIG = 10**6
+DATASET_DIR = Path(__file__).resolve().parents[2] / "dataset"
 
 
 class TwoStageFake:
@@ -279,6 +284,13 @@ def test_single_probe_validated_finding_still_calls_llm2(profile, df) -> None:
     assert provider.final_calls == 1  # something new was measured
 
 
+def test_slope_difference_needs_a_real_relationship_somewhere(profile, df) -> None:
+    # z -> w flips sign by segment with |corr| ~ 0.9 inside each group: kept
+    result, _ = _run(profile, df, [_h("w's relation to z flips by segment.", "slope_difference", {"x": "z", "y": "w", "group": "segment"}, None, 4)])
+    (insight,) = result["insights"]
+    assert insight["supported"] == "strong"
+
+
 def test_insights_are_ordered_by_priority_and_capped(profile, df) -> None:
     hypotheses = _two_covered() + [
         _h("w's relation to z flips by segment.", "slope_difference", {"x": "z", "y": "w", "group": "segment"}, None, 3),
@@ -304,3 +316,168 @@ def test_rules_only_output_carries_no_workflow_fields(profile, df) -> None:
         "warnings": [],
     }
     assert provider.calls == 0
+
+
+# --- stage 17.3 round 2: the gates B asked for ------------------------------------------
+
+
+def _scatter(x: str, y: str, group: str | None = None) -> dict:
+    return {"title": f"{y} vs {x}", "type": "scatter", "x": x, "y": y, "group_by": group, "priority": 1}
+
+
+def test_chart_only_neutral_charts_are_not_testable(profile, df) -> None:
+    # a histogram / heatmap / count bar implies no probe: the claim is dropped
+    hypotheses = [
+        _h("n0 is strongly bimodal.", None, None, {"title": "n0", "type": "histogram", "x": "n0", "priority": 1}),
+        _h("everything correlates.", None, None, {"title": "hm", "type": "heatmap", "priority": 2}),
+        _h("segments are unbalanced.", None, None, {"title": "count", "type": "bar", "x": "segment", "aggregation": "count", "priority": 3}),
+    ]
+    result, _ = _run(profile, df, hypotheses)
+    assert result["insights"] == []
+    assert all("nothing to verify" in d["reason"] for d in result["debug"]["dropped"])
+    assert result["debug"]["probes"] == []
+
+
+def test_chart_only_and_probe_paths_share_thresholds(profile, df) -> None:
+    # the same claim through a plain scatter (chart-only) and through an
+    # explicit nonlinear probe request must end with the same verdict/effect
+    chart_only, _ = _run(profile, df, [_h("u depends on x in a curve.", None, None, _scatter("x", "u"))])
+    explicit, _ = _run(profile, df, [_h("u depends on x in a curve.", "nonlinear_relationship", {"x": "x", "y": "u"}, None)])
+    a, b = chart_only["insights"][0], explicit["insights"][0]
+    assert (a["supported"], a["validation"], a["effect"]) == (b["supported"], b["validation"], b["effect"])
+    # ...and a plain linear correlation is no finding on either path
+    linear_chart, _ = _run(profile, df, [_h("growth relates to ts index.", None, None, _scatter("n0", "n1"))])
+    assert linear_chart["insights"] == []
+
+
+def test_llm_numbers_are_stripped_from_the_statement(profile, df) -> None:
+    hyp = _h("Segment e sells far more (eta² = 0.99, n = 9999), about 80% more.", "group_difference", {"group": "segment", "target": "sales"}, None, 4)
+    result, _ = _run(profile, df, [hyp])
+    (insight,) = result["insights"]
+    assert "0.99" not in insight["text"] and "9999" not in insight["text"]
+    assert insight["text"].startswith("Segment e sells far more, about 80% more (adjusted eta-squared")
+    (record,) = result["debug"]["wording"]
+    assert record["statement"] == "Segment e sells far more, about 80% more." and record["source"] == "template"
+
+
+def test_statement_with_unknown_column_token_is_dropped(profile, df) -> None:
+    hyp = _h("Sales rise with customer_tier in segment e.", "group_difference", {"group": "segment", "target": "sales"}, None)
+    result, _ = _run(profile, df, [hyp])
+    assert result["insights"] == []
+    assert "unknown columns ['customer_tier']" in result["debug"]["dropped"][0]["reason"]
+
+
+@pytest.mark.parametrize(
+    "text, problem",
+    [
+        ("Segment e averages 9999 in sales.", "number 9999"),
+        ("Segment e sells more; growth explains it.", "names columns outside"),
+        ("Segment e sells more than segment_x.", "unknown tokens"),
+    ],
+    ids=["invented-number", "foreign-column", "foreign-token"],
+)
+def test_llm2_wording_gate_falls_back_to_template(profile, df, text, problem) -> None:
+    final = {
+        "insights": [
+            {"hypothesis_id": 1, "text": text, "why_it_matters": "?", "priority": 5},
+            {"hypothesis_id": 2, "text": "u follows a U shape in x.", "why_it_matters": "?", "priority": 3},
+        ]
+    }
+    result, _ = _run(profile, df, _two_covered(), final=final)
+    texts = {i["priority"]: i["text"] for i in result["insights"]}
+    assert texts[5].startswith("Segment e sells far more (adjusted eta-squared")  # template fallback
+    assert texts[3] == "u follows a U shape in x."  # clean wording accepted
+    assert any(problem in e for e in result["debug"]["errors"])
+    sources = {w["id"]: w["source"] for w in result["debug"]["wording"]}
+    assert sources == {1: "template", 2: "llm2"}
+
+
+def test_llm2_may_quote_backend_numbers(profile, df) -> None:
+    eta = next(e.eta_squared for e in profile.evidence.cat_num if e.cat == "segment" and e.num == "sales")
+    text = f"Segment e sells far more (eta-squared {eta:.2f}, n=600)."
+    final = {"insights": [{"hypothesis_id": 1, "text": text, "why_it_matters": "pricing", "priority": 5}]}
+    result, _ = _run(profile, df, _two_covered(), final=final)
+    assert any(i["text"] == text for i in result["insights"])
+
+
+def test_below_min_rows_nothing_is_a_finding() -> None:
+    rng = random.Random(3)
+    small = pl.DataFrame(
+        {
+            "g": ["a", "b"] * 10,
+            "v": [rng.gauss(0 if i % 2 == 0 else 5, 0.3) for i in range(20)],
+        }
+    )
+    profile = profile_dataset(small, "3" * 32, BIG)
+    assert any(e.cat == "g" and e.num == "v" and e.eta_squared > 0.9 for e in profile.evidence.cat_num)
+    result, provider = _run(profile, small, [_h("g splits v.", "group_difference", {"group": "g", "target": "v"}, None, 5)])
+    assert result["insights"] == [] and result["message"] == NO_PATTERNS_MESSAGE
+    assert "fewer than 30 rows" in result["debug"]["dropped"][0]["reason"]
+    assert provider.final_calls == 0
+
+
+def test_priority_is_clamped(profile, df) -> None:
+    final = {"insights": [{"hypothesis_id": 1, "text": "Segment e sells far more.", "why_it_matters": "?", "priority": 42}, {"hypothesis_id": 2, "text": "u follows a U shape in x.", "why_it_matters": "?", "priority": -3}]}
+    result, _ = _run(profile, df, _two_covered(), final=final)
+    assert sorted(i["priority"] for i in result["insights"]) == [1, 5]
+    hyp = [_h("Segment e sells far more.", "group_difference", {"group": "segment", "target": "sales"}, None, importance=99)]
+    result, _ = _run(profile, df, hyp)
+    assert result["insights"][0]["priority"] == 5
+
+
+def test_grouped_time_pattern_is_not_verified_by_ungrouped_eta(profile, df) -> None:
+    hyp = [_h("growth trends up differently per segment.", "time_pattern", {"time": "ts", "target": "growth", "group": "segment"}, None)]
+    result, _ = _run(profile, df, hyp)
+    assert result["insights"] == []
+    (dropped,) = result["debug"]["dropped"]
+    # either the layer-1 time x group interaction answers it (and says no) or
+    # nothing can test it; the ungrouped time eta-squared is never used
+    assert "time x group interaction" in dropped["reason"] or "grouped time pattern" in dropped["reason"]
+    assert result["debug"]["probes"] == []
+
+
+# --- noise benchmark: zero insights ---------------------------------------------------------
+
+
+def _noise_frame() -> pl.DataFrame:
+    path = DATASET_DIR / "noise.csv"
+    if not path.exists():
+        subprocess.run([sys.executable, str(DATASET_DIR / "syn" / "noise.py")], check=True, capture_output=True)
+    return load_dataframe(path.read_bytes(), "noise.csv")
+
+
+def test_noise_dataset_yields_zero_insights() -> None:
+    df = _noise_frame()
+    profile = profile_dataset(df, "4" * 32, BIG)
+    hypotheses = [
+        _h("n0 differs by segment.", "group_difference", {"group": "segment", "target": "n0"}, None, 5),
+        _h("n1's distribution differs by segment.", "distribution_difference", {"group": "segment", "target": "n1"}, None, 5),
+        _h("n2 and n3 relate differently per segment.", "slope_difference", {"x": "n2", "y": "n3", "group": "segment"}, None, 4),
+        _h("n4 depends on n5 in a curve.", "nonlinear_relationship", {"x": "n4", "y": "n5"}, None, 4),
+        _h("n6 changes over time.", "time_pattern", {"time": "ts", "target": "n6"}, None, 3),
+    ]
+    result, provider = _run(profile, df, hypotheses)
+    assert result["insights"] == [] and result["message"] == NO_PATTERNS_MESSAGE
+    assert provider.final_calls == 0
+    more = [
+        _h("segment and region interact on n7.", "interaction", {"factor1": "segment", "factor2": "region", "target": "n7"}, None, 3),
+        _h("u0 and u1 move together in every flag group.", "grouped_relationship", {"x": "u0", "y": "u1", "group": "flag"}, None, 3),
+        _h("u1's distribution differs by region.", "distribution_difference", {"group": "region", "target": "u1"}, None, 3),
+        _h("n0 vs n1 differs by flag.", "slope_difference", {"x": "n0", "y": "n1", "group": "flag"}, None, 2),
+    ]
+    result, provider = _run(profile, df, more)
+    assert result["insights"] == []
+    reasons = " | ".join(d["reason"] for d in result["debug"]["dropped"])
+    assert "fail" in reasons or "without" in reasons
+    # the selection effect: layer 2 lists the largest correlation spreads
+    # over many triples; proposing exactly those must still yield nothing
+    picks = profile.evidence.layer2.conditional_relationships
+    assert picks, "the noise table has conditional entries to tempt the LLM with"
+    for i in range(0, len(picks), 5):
+        batch = [
+            _h(f"{c.x} vs {c.y} differs by {c.group}", "slope_difference", {"x": c.x, "y": c.y, "group": c.group}, None, 5)
+            for c in picks[i : i + 5]
+        ]
+        result, _ = _run(profile, df, batch)
+        assert result["insights"] == [], [d["reason"] for d in result["debug"]["dropped"]]
+        assert all("without a real relationship" in d["reason"] or "fail" in d["reason"] for d in result["debug"]["dropped"])

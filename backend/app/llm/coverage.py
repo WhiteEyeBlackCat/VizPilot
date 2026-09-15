@@ -213,6 +213,32 @@ def check_coverage(test_type: str, columns: dict[str, str], profile: DatasetProf
 
     if test_type == "time_pattern":
         time, target = columns["time"], columns["target"]
+        group = columns.get("group")
+        if group:
+            # "the time pattern differs by group" is an interaction claim: the
+            # ungrouped time eta-squared says nothing about it. Layer 1 keeps
+            # time-bucket x group interactions as `time@bucket`; absent -> not
+            # covered (and no probe can test it either: see the service)
+            hit = next(
+                (
+                    e
+                    for e in evidence.interactions
+                    if e.num == target
+                    and {c.split("@", 1)[0] for c in (e.cat1, e.cat2)} == {time, group}
+                    and any("@" in c for c in (e.cat1, e.cat2))
+                ),
+                None,
+            )
+            if hit is None:
+                return None
+            return CoverageHit(
+                verdict=_verdict(hit.strength, THRESHOLDS["interaction"]),
+                effect_label="time x group interaction share of variance",
+                effect_value=hit.strength,
+                n=hit.n_total,
+                evidence_lines=[f"time-bucket x {group} interaction share of variance {hit.strength:.3f} (n={hit.n_total})"],
+                evidence={"strength": hit.strength},
+            )
         effect = next((t for t in evidence.time_effects if t.datetime_col == time and t.num == target), None)
         if effect is None:
             return None
@@ -238,7 +264,9 @@ def check_coverage(test_type: str, columns: dict[str, str], profile: DatasetProf
             n=effect.n_total,
             evidence_lines=lines,
             evidence=ev,
-            n_min_group=effect.n_min or None,
+            # time buckets are not groups: a daily bucket of one row is normal
+            # (the probe engine's time_pattern passes no n_min_group either)
+            n_min_group=None,
         )
 
     if test_type == "interaction":
@@ -269,13 +297,15 @@ def _conditional_lines(cond) -> list[str]:
 
 
 def apply_confidence_cap(hit: CoverageHit, chart: ChartSpec | None, profile: DatasetProfile) -> CoverageHit:
-    """The probe engine's sample-size rule for evidence-table hits: a pass on
-    a tiny sample, on a low-confidence chart, or on tiny groups is at most weak."""
-    if hit.verdict != "pass":
-        return hit
+    """The probe engine's sample-size rule for evidence-table hits, plus the
+    workflow floor: below MIN_ROWS nothing is a finding (a chance pattern on
+    a handful of rows must not become even a weak insight); a pass on tiny
+    groups or a low-confidence chart is at most weak."""
     if hit.n < MIN_ROWS:
-        hit.verdict = "weak"
-        hit.evidence_lines.append(f"capped at weak: only {hit.n} rows")
+        hit.verdict = "fail"
+        hit.evidence_lines.append(f"fewer than {MIN_ROWS} rows ({hit.n})")
+        return hit
+    if hit.verdict != "pass":
         return hit
     if hit.n_min_group is not None and hit.n_min_group < MIN_ROWS:
         hit.verdict = "weak"
@@ -287,6 +317,60 @@ def apply_confidence_cap(hit: CoverageHit, chart: ChartSpec | None, profile: Dat
             hit.verdict = "weak"
             hit.evidence_lines.append(f"capped at weak: confidence {confidence.overall:.2f}")
     return hit
+
+
+# --- corroboration of weak verdicts ---------------------------------------------------
+
+# A "weak" verdict from a statistic that takes the MAXIMUM over many pairs
+# (the two-sample KS over group pairs, the spread of per-group correlations)
+# is inflated by multiple comparison: five groups of pure noise routinely
+# reach KS 0.16-0.19 and a spread of 0.18. Such a weak finding needs a
+# second, independent signal before it becomes an insight; "pass" verdicts
+# and single-statistic tests (eta-squared, nonlinear gap, interaction) are
+# not affected.
+CORROBORATE_MIN_ETA2 = THRESHOLDS["group_difference"]["weak"]  # KS weak -> the means differ too
+CORROBORATE_MIN_GROUP_CORR = 0.30  # spread weak -> at least one group shows a real relationship (SCATTER_MIN_CORR)
+
+
+def corroborated(test_type: str, columns: dict[str, str], hit: CoverageHit, profile: DatasetProfile) -> str | None:
+    """None when the finding stands; otherwise why it is dropped.
+
+    slope_difference is checked at every verdict: the layer-2 table lists
+    the LARGEST correlation spreads over many (x, y, group) triples, so the
+    LLM naturally proposes the extreme ones and pure noise (five groups of
+    ~120 rows) reaches a spread of 0.36-0.42, above the dynamic threshold.
+    "The relationship differs between groups" only means something when
+    some group actually shows a relationship."""
+    evidence = profile.evidence
+    if test_type == "slope_difference":
+        groups = hit.evidence.get("groups")
+        corrs: list[float] = []
+        if isinstance(groups, dict):
+            corrs = [v for v in groups.values() if isinstance(v, (int, float))]
+        elif isinstance(groups, list):
+            corrs = [g.get("corr") for g in groups if isinstance(g, dict) and isinstance(g.get("corr"), (int, float))]
+        strongest = max((abs(c) for c in corrs), default=0.0)
+        if strongest < CORROBORATE_MIN_GROUP_CORR:
+            return (
+                f"correlation spread without a real relationship in any group "
+                f"(strongest |corr| {strongest:.2f} < {CORROBORATE_MIN_GROUP_CORR})"
+            )
+        hit.evidence_lines.append(f"corroborated: strongest group |corr| {strongest:.2f}")
+        return None
+    if hit.verdict != "weak":
+        return None
+    if test_type == "distribution_difference":
+        group, target = columns["group"], columns["target"]
+        effect = next((e for e in evidence.cat_num if e.cat == group and e.num == target), None)
+        eta2 = effect.eta_squared if effect is not None else float(hit.evidence.get("eta_squared") or 0.0)
+        if eta2 < CORROBORATE_MIN_ETA2:
+            return (
+                f"weak distribution difference (max KS over group pairs) without a mean difference "
+                f"(adjusted eta-squared {eta2:.3f} < {CORROBORATE_MIN_ETA2})"
+            )
+        hit.evidence_lines.append(f"corroborated by adjusted eta-squared {eta2:.3f}")
+        return None
+    return None
 
 
 # --- probe inference from a chart (legacy / chart-only hypotheses) ----------------
@@ -365,30 +449,6 @@ def definitional_conflict(names: list[str], profile: DatasetProfile) -> str | No
             if index.suppressed.get(a) == b or index.suppressed.get(b) == a:
                 return f"near-duplicate pair: {a} / {b}"
     return None
-
-
-def effect_from_chart(spec: ChartSpec, profile: DatasetProfile, score: float) -> tuple[str, float, int]:
-    """Effect summary for a chart-only hypothesis verified by
-    evaluate_llm_spec: the statistic the score was derived from."""
-    index = _EvidenceIndex(profile.evidence)
-    n = profile.profiled_rows or profile.n_rows
-    if spec.type in ("bar", "box") and spec.x and spec.y:
-        eta2 = index.eta2.get((spec.x, spec.y))
-        if eta2 is not None:
-            return "adjusted eta-squared of y across x groups", eta2, n
-    if spec.type == "scatter" and spec.x and spec.y:
-        corr = profile.correlations
-        value = None
-        if corr is not None and spec.x in corr.columns and spec.y in corr.columns:
-            value = corr.matrix[corr.columns.index(spec.x)][corr.columns.index(spec.y)]
-        spearman = index.spearman.get((spec.x, spec.y))
-        strength = max(abs(value or 0.0), abs(spearman or 0.0))
-        return "|correlation| (max of Pearson, Spearman)", strength, n
-    if spec.type == "line" and spec.x and spec.y:
-        eta2 = index.time_eta2.get((spec.x, spec.y))
-        if eta2 is not None:
-            return "adjusted eta-squared of y across time buckets", eta2, n
-    return "evidence score", score, n
 
 
 def is_finite_number(value: Any) -> bool:

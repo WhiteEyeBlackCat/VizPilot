@@ -45,13 +45,14 @@ from ..charts.spec import ChartSpec, validate_spec
 from ..probes import MAX_PROBES, ProbeCache, ProbeRejected, ProbeRequest, ProbeResult, run_probes
 from ..probes.schemas import PROBE_ROLES
 from ..profiling.models import DatasetProfile
+from ..probes.engine import MIN_ROWS
 from .coverage import (
     CoverageHit,
     ValidatedHypothesis,
     apply_confidence_cap,
     check_coverage,
+    corroborated,
     definitional_conflict,
-    effect_from_chart,
     infer_probe,
     required_roles,
     suggest_chart,
@@ -68,6 +69,16 @@ UNVERIFIED_NOTE = "hypothesis not verified against the data"
 FALLBACK_MESSAGE = "AI suggestions unavailable ({reason}); showing rule-based recommendations."
 NO_PATTERNS_MESSAGE = "No strong non-definitional and analytically useful patterns were found."
 _SNAKE_TOKEN = re.compile(r"\b[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+\b")
+# numbers the LLM writes are never evidence: "(eta² = 0.99)", "r=0.8", "n = 12", "(0.45)"
+_STAT_NUMBER = re.compile(
+    r"\b(?:adjusted\s+)?(?:eta[²2]?|eta-squared|r[²2]?|rho|corr(?:elation)?|n|p|z|d|ks|spread|effect(?:\s+size)?)"
+    r"\s*[=:≈]\s*-?\d+(?:\.\d+)?%?",
+    re.IGNORECASE,
+)
+_PAREN_NUMBER = re.compile(r"\s*\([^()]*\d[^()]*\)")
+_EMPTY_PAREN = re.compile(r"\s*\(\s*[,;:\s]*\)")
+_NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
+_WORD = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
 
 SpecKey = tuple[str | None, ...]
 Supported = Literal["strong", "weak", "unverified"]
@@ -189,6 +200,7 @@ class _Trace:
     validated: int = 0
     insights: int = 0
     final_call: bool = False
+    wording: list[dict[str, Any]] = field(default_factory=list)  # per validated hypothesis: LLM #1 statement -> final text
     errors: list[str] = field(default_factory=list)
 
     def record_call(self, name: str, usage: LLMUsage) -> None:
@@ -209,6 +221,7 @@ class _Trace:
             "insights": self.insights,
             "covered_by_existing_evidence": self.covered,
             "probes": self.probes,
+            "wording": self.wording,
             "dropped": self.dropped,
             "errors": self.errors,
         }
@@ -432,32 +445,47 @@ class _Workflow:
             candidate = self._gate(i + 1, h)
             if candidate is not None:
                 candidates.append(candidate)
+        rows = self.profile.profiled_rows or self.profile.n_rows
+        if rows < MIN_ROWS:
+            # a handful of rows cannot support any finding: nothing to
+            # verify, nothing to probe, no second LLM call
+            for c in candidates:
+                self._drop(c.id, c.hypothesis, f"fewer than {MIN_ROWS} rows ({rows})")
+            return []
 
         validated: list[ValidatedHypothesis] = []
         probe_queue: list[_Candidate] = []
         for c in candidates:
             if c.test_type is None:
-                hit = self._chart_only_coverage(c)
-                if hit is None:
-                    probe = infer_probe(c.chart, self.profile) if c.chart is not None else None
-                    if probe is None:
-                        self._drop(c.id, c.hypothesis, "no testable claim: chart carries nothing to verify")
-                        continue
-                    c.test_type, c.columns = probe
-                    conflict = definitional_conflict(list(c.columns.values()), self.profile)
-                    if conflict:
-                        self._drop(c.id, c.hypothesis, conflict)
-                        continue
-                    hit = check_coverage(c.test_type, c.columns, self.profile)
-            else:
-                hit = check_coverage(c.test_type, c.columns, self.profile)
+                # a chart-only claim is verified through the probe the chart
+                # implies (bar -> group difference, scatter -> non-linear
+                # dependence, ...) with exactly the thresholds a test_needed
+                # hypothesis gets; heatmaps, histograms and count bars imply
+                # nothing testable and are dropped
+                probe = infer_probe(c.chart, self.profile) if c.chart is not None else None
+                if probe is None:
+                    self._drop(c.id, c.hypothesis, "no testable claim: chart carries nothing to verify")
+                    continue
+                c.test_type, c.columns = probe
+                conflict = definitional_conflict(list(c.columns.values()), self.profile)
+                if conflict:
+                    self._drop(c.id, c.hypothesis, conflict)
+                    continue
+            hit = check_coverage(c.test_type, c.columns, self.profile)
 
             if hit is None:
                 probe_queue.append(c)
                 continue
             hit = apply_confidence_cap(hit, c.chart or suggest_chart(c.test_type or "", c.columns, self.profile), self.profile)
+            if hit.n < MIN_ROWS:
+                self._drop(c.id, c.hypothesis, f"fewer than {MIN_ROWS} rows ({hit.n})")
+                continue
             if hit.verdict == "fail":
                 self._drop(c.id, c.hypothesis, f"existing evidence fails: {hit.effect_label} = {hit.effect_value:.3f}")
+                continue
+            reason = corroborated(c.test_type or "", c.columns, hit, self.profile)
+            if reason:
+                self._drop(c.id, c.hypothesis, reason)
                 continue
             self.trace.covered.append(
                 {"id": c.id, "test": c.test_type, "columns": c.columns, "verdict": hit.verdict, "effect": hit.effect_value}
@@ -477,6 +505,15 @@ class _Workflow:
         except ValueError as exc:
             self._drop(hid, h, str(exc))
             return None
+        # the claim text: LLM-written numbers are stripped (they are never
+        # evidence), near-duplicate names are mapped to the representative,
+        # and a column-like token outside the dataset is a hallucination
+        statement = self._clean_statement(h.statement)
+        foreign = [t for t in _SNAKE_TOKEN.findall(statement) if t not in self.columns]
+        if foreign:
+            self._drop(hid, h, f"statement names unknown columns {foreign}")
+            return None
+        h.statement = statement
         if h.test_needed is not None and h.test_needed not in PROBE_ROLES:
             self._drop(hid, h, f"unknown probe type '{h.test_needed}'")
             return None
@@ -543,6 +580,16 @@ class _Workflow:
             raise ValueError("the same column fills two roles (after near-duplicate mapping)")
         return out
 
+    def _clean_statement(self, text: str) -> str:
+        text = _STAT_NUMBER.sub("", text)
+        text = _PAREN_NUMBER.sub("", text)
+        text = _EMPTY_PAREN.sub("", text)
+        for g in self.profile.evidence.near_duplicate_groups:
+            for dup in g.duplicates:
+                text = re.sub(rf"\b{re.escape(dup)}\b", g.representative, text)
+        text = re.sub(r"\s{2,}", " ", text).strip()
+        return re.sub(r"\s+([.,;:])", r"\1", text)
+
     def _canonical(self, name: str) -> str | None:
         if name not in self.columns:
             return None
@@ -577,27 +624,6 @@ class _Workflow:
 
     # -- stage 2: coverage -----------------------------------------------------------
 
-    def _chart_only_coverage(self, c: _Candidate) -> CoverageHit | None:
-        """A chart-only claim is verified the stage-8 way (evaluate_llm_spec
-        on the chart). strong/weak -> covered; neutral (heatmap, histogram,
-        count bar) -> a descriptive claim, kept as weak; unverified -> None,
-        the caller infers the probe the chart implies."""
-        if c.chart is None:
-            return None
-        score, level = evaluate_llm_spec(c.chart, self.profile)
-        if level == "unverified":
-            return None
-        label, value, n = effect_from_chart(c.chart, self.profile, score)
-        verdict: Literal["pass", "weak", "fail"] = "pass" if level == "strong" else "weak"
-        return CoverageHit(
-            verdict=verdict,
-            effect_label=label,
-            effect_value=value,
-            n=n,
-            evidence_lines=[f"{label} = {value:.3f} (n={n}); evidence score {score:.2f}"],
-            evidence={"score": score, "level": level},
-        )
-
     def _validated(
         self, c: _Candidate, hit: CoverageHit, validation: str, probe_chart: ChartSpec | None
     ) -> ValidatedHypothesis:
@@ -629,11 +655,17 @@ class _Workflow:
     def _run_probes(self, queue: list[_Candidate]) -> list[ValidatedHypothesis]:
         if not queue:
             return []
+        runnable: list[_Candidate] = []
+        for c in queue:
+            if c.test_type == "time_pattern" and c.columns.get("group"):
+                self._drop(c.id, c.hypothesis, "a grouped time pattern is an interaction claim the tables do not cover and no probe can test")
+                continue
+            runnable.append(c)
         if self.df is None:
-            for c in queue:
+            for c in runnable:
                 self._drop(c.id, c.hypothesis, "needs a probe but no data frame is available")
             return []
-        queue = sorted(queue, key=lambda c: (-int(c.hypothesis.importance or 0), c.id))
+        queue = sorted(runnable, key=lambda c: (-int(c.hypothesis.importance or 0), c.id))
         requests: list[tuple[_Candidate, ProbeRequest]] = []
         for c in queue:
             try:
@@ -663,6 +695,9 @@ class _Workflow:
                     "cached": result.cached,
                 }
             )
+            if result.n < MIN_ROWS:
+                self._drop(c.id, c.hypothesis, f"fewer than {MIN_ROWS} rows ({result.n})")
+                continue
             if result.verdict == "fail":
                 self._drop(c.id, c.hypothesis, f"probe failed: {result.effect_label} = {result.effect_size:.3f}")
                 continue
@@ -675,6 +710,10 @@ class _Workflow:
                 evidence=dict(result.evidence),
                 n_min_group=result.n_min_group,
             )
+            reason = corroborated(c.test_type or "", c.columns, hit, self.profile)
+            if reason:
+                self._drop(c.id, c.hypothesis, reason)
+                continue
             validated.append(self._validated(c, hit, "probe", probe_chart=result.chart))
         return validated
 
@@ -706,7 +745,10 @@ class _Workflow:
             words = wording.get(v.id)
             text = words["text"] if words else _template(v)
             why = words["why_it_matters"] if words and words["why_it_matters"] else v.reason
-            priority = words["priority"] if words else v.importance
+            priority = max(1, min(5, int(words["priority"] if words else v.importance)))
+            self.trace.wording.append(
+                {"id": v.id, "statement": v.statement, "final_text": text, "source": "llm2" if words else "template"}
+            )
             rows.append(
                 {
                     "text": text[:MAX_INSIGHT_CHARS],
@@ -775,10 +817,11 @@ class _Workflow:
                 continue
             if item.chart_id is not None and str(item.chart_id) not in chart_ids:
                 logger.warning("LLM #2 insight %d names unknown chart %r — chart id ignored", hid, item.chart_id)
-            foreign = [t for t in _SNAKE_TOKEN.findall(item.text + " " + item.why_it_matters) if t not in names]
-            if foreign:
-                logger.warning("LLM #2 insight %d mentions unknown columns %s — dropped", hid, foreign)
-                self.trace.errors.append(f"llm2 insight {hid}: unknown tokens {foreign}")
+            v = by_id[hid]
+            problem = _wording_problem(item.text + " " + item.why_it_matters, v, names)
+            if problem:
+                logger.warning("LLM #2 insight %d rejected: %s — template used", hid, problem)
+                self.trace.errors.append(f"llm2 insight {hid}: {problem}")
                 continue
             out[hid] = {
                 "text": item.text.strip(),
@@ -808,6 +851,61 @@ class _Workflow:
         assign_tiers(merged)
         final_priority = {_key(rec.spec): rec.spec.priority for rec in merged}
         return merged, {key: final_priority.get(redirect.get(key, key)) for key in set(llm_priority) | set(final_priority)}
+
+
+def _wording_problem(text: str, v: ValidatedHypothesis, names: set[str]) -> str | None:
+    """LLM #2 may only restate: every number must be one the backend measured
+    for this hypothesis (rounded to the digits written), every column name
+    must be one the hypothesis is about, and no column-like token may come
+    from outside the dataset."""
+    foreign = [t for t in _SNAKE_TOKEN.findall(text) if t not in names]
+    if foreign:
+        return f"unknown tokens {foreign}"
+    allowed = set(v.columns.values())
+    mentioned = {w for w in _WORD.findall(text) if w in names and w not in allowed}
+    if mentioned:
+        return f"names columns outside the hypothesis {sorted(mentioned)}"
+    evidence_numbers = _numbers_in(v.evidence) | {float(v.effect_value), float(v.n)}
+    for token in _NUMBER.findall(text):
+        if not _number_supported(token, evidence_numbers):
+            return f"number {token} is not in the validated evidence"
+    return None
+
+
+def _numbers_in(value: Any) -> set[float]:
+    out: set[float] = set()
+    if isinstance(value, bool):
+        return out
+    if isinstance(value, (int, float)):
+        if value == value and abs(value) != float("inf"):
+            out.add(float(value))
+    elif isinstance(value, dict):
+        for item in value.values():
+            out |= _numbers_in(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            out |= _numbers_in(item)
+    elif isinstance(value, str):
+        # ISO dates in change points: their year / month / day are quotable
+        for part in _NUMBER.findall(value):
+            try:
+                out.add(float(part))
+            except ValueError:
+                pass
+    return out
+
+
+def _number_supported(token: str, evidence: set[float]) -> bool:
+    try:
+        written = float(token)
+    except ValueError:
+        return True
+    decimals = len(token.split(".")[1]) if "." in token else 0
+    for value in evidence:
+        for candidate in (value, value * 100.0):  # a ratio may be quoted as a percentage
+            if abs(round(candidate, decimals) - written) < 10 ** (-decimals) / 2 + 1e-9:
+                return True
+    return False
 
 
 def _as_int(value: Any) -> int | None:

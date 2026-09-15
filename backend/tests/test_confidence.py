@@ -335,11 +335,12 @@ def test_llm_chart_on_tiny_data_is_weak_and_keeps_caution() -> None:
     }
     new = {"title": "age vs score", "type": "scatter", "x": "age", "y": "score", "reason": "guess", "priority": 2}
     service = RecommendationService(
-        _FakeProvider(HypothesisResponse(hypotheses=[{"statement": "dept matters", "chart": dedup}], charts=[new]))
+        _FakeProvider(HypothesisResponse(hypotheses=[{"statement": "dept matters", "chart": dedup}], charts=[dedup, new]))
     )
-    result = service.get(profile, use_llm=True)
-    (insight,) = result["insights"]
-    assert insight["supported"] == "weak"  # strong evidence, no confidence -> weak
+    result = service.get(profile, use_llm=True, include_debug=True)
+    # stage 17.3: on 4 rows no claim becomes an insight, not even a weak one
+    assert result["insights"] == []
+    assert "fewer than 30 rows" in result["debug"]["dropped"][0]["reason"]
     merged = next(c for c in result["charts"] if c["spec"]["x"] == "dept" and c["spec"]["type"] == "bar")
     assert merged["source"] == "rules"
     assert merged["spec"]["reason"].startswith("the LLM's reason Caution: Only 4 rows")
