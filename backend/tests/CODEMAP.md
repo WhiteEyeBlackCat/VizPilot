@@ -3,7 +3,7 @@ mode: learning
 generated_at: 2026-09-15
 ---
 
-> pytest suite (591 tests on main): one module per backend concern plus HTTP tests via TestClient; `data/` holds small loader fixtures (run `data/make_fixtures.py` to regenerate).
+> pytest suite (594 tests on main): one module per backend concern plus HTTP tests via TestClient; `data/` holds small loader fixtures (run `data/make_fixtures.py` to regenerate).
 
 ## Task Guide
 
@@ -25,7 +25,7 @@ generated_at: 2026-09-15
 | `test_evidence.py` (43), `test_layer2.py` (31), `test_probes.py` (25) | Tests | Evidence L1/L2, probe engine. |
 | `test_rules.py` (29), `test_confidence.py` (25), `test_spec.py` (34), `test_recommendation_quality.py` (17) | Tests | Recommendation engine. |
 | `test_render.py` (35), `test_upload.py` (22), `test_loader.py` (12) | Tests | Render + API + loader. |
-| `test_llm_service.py` (26), `test_llm_provider.py` (20), `test_llm_workflow.py` (32), `test_insight_benchmark.py` (8) | Tests | LLM layer: merge, prompts/provider, two-stage workflow, insight benchmark. |
+| `test_llm_service.py` (26), `test_llm_provider.py` (20), `test_llm_workflow.py` (35), `test_insight_benchmark.py` (8) | Tests | LLM layer: merge, prompts/provider, two-stage workflow, insight benchmark. |
 | `data/` | Tests | csv/xlsx/parquet fixtures incl. corrupt/empty/latin1/nan_inf. |
 
 Targeted run: `cd backend && .venv/bin/pytest tests/test_rules.py -q`. Full: `.venv/bin/pytest tests -q` (~1–2 min).
