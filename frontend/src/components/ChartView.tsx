@@ -2,6 +2,7 @@ import { useMemo } from "react";
 
 import { EChartsView } from "../charts/echarts/EChartsView";
 import { buildOption, isEmpty } from "../charts/echarts/option";
+import { displayOrderNote } from "../charts/echarts/order";
 import type { VizOption } from "../charts/echarts/echarts";
 import type { BarChartData, RenderResult } from "../types";
 
@@ -48,11 +49,14 @@ export function ChartView({ result, height = CHART_HEIGHT, showTitle = true }: P
   const truncated = result.spec.type === "bar" && (result.chart_data as BarChartData).truncated;
   const range = result.display_range ?? null;
   const excluded = range ? range.excluded_below + range.excluded_above : 0;
+  // stage 18: say which order the category axis is in (ranked vs natural)
+  const orderNote = displayOrderNote(result);
 
   return (
     <div data-chart-title={showTitle ? "shown" : "hidden"}>
       <EChartsView option={option} height={height} />
-      <div className="flex gap-3 px-1 text-xs text-muted-foreground">
+      <div className="flex flex-wrap gap-x-3 gap-y-0.5 px-1 text-xs text-muted-foreground">
+        {orderNote && <span data-order-note>{orderNote}</span>}
         {result.sampled && <span>已抽樣（顯示 {result.n_points} 點）</span>}
         {truncated && <span>類別過多，僅顯示前 {result.spec.top_n ?? 20} 名</span>}
         {range && (

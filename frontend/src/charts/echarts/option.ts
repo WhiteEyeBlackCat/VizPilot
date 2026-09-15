@@ -1,8 +1,11 @@
 // Pure RenderResult -> ECharts option conversion. No React, no DOM, no
 // echarts runtime import (types only) so it is unit-testable and the only
-// place ECharts-specific structure lives. Nothing is re-aggregated,
-// re-sorted or re-binned here — the backend RenderResult is the single
-// source of truth. Semantics are documented per chart type below.
+// place ECharts-specific structure lives. Nothing is re-aggregated or
+// re-binned here — the backend RenderResult is the single source of truth.
+// The one presentation-side liberty (stage 18) is the reading order of a
+// category axis with a natural sequence (hour, month, weekday, date), a pure
+// permutation from ./order.ts that keeps every (category, value) pair
+// intact. Semantics are documented per chart type below.
 
 import type {
   BarSeriesOption,
@@ -25,6 +28,7 @@ import type {
   TimeGranularity,
 } from "../../types";
 import type { VizOption } from "./echarts";
+import { barOrder, boxOrder } from "./order";
 import {
   axisBase,
   COLORS,
@@ -120,7 +124,8 @@ function baseOption(result: RenderResult, zoomable: boolean, legendShown: boolea
     grid: legendShown ? gridWithLegend : grid,
     legend: legendShown ? legend : { show: false },
     toolbox: toolbox(result.spec.title, zoomable),
-    animationDuration: 300,
+    animationDuration: 250,
+    animationEasing: "cubicOut",
   };
 }
 
@@ -137,6 +142,7 @@ function lineOption(result: RenderResult): VizOption {
     showSymbol: !many,
     symbolSize: 5,
     lineStyle: { width: 1.5 },
+    emphasis: { focus: d.series.length > 1 ? "series" : "none", lineStyle: { width: 2.5 } },
     connectNulls: false,
   }));
   return {
@@ -168,7 +174,8 @@ function scatterOption(result: RenderResult): VizOption {
     name: s.name,
     data: pairs(s.x, s.y),
     symbolSize: 6,
-    itemStyle: { opacity: 0.75 },
+    itemStyle: { opacity: 0.7 },
+    emphasis: { scale: 1.6, itemStyle: { opacity: 1 } },
     large: s.x.length > LARGE_SCATTER_THRESHOLD,
     largeThreshold: LARGE_SCATTER_THRESHOLD,
   }));
@@ -198,14 +205,19 @@ function barOption(result: RenderResult): VizOption {
   const d = result.chart_data as BarChartData;
   // category axis with explicit data preserves the backend ranking even for
   // numeric or boolean category values (stage6 blocking #3); null values
-  // stay null so a missing (category, group) cell is a gap, not a zero
-  const categories = d.categories.map(String);
+  // stay null so a missing (category, group) cell is a gap, not a zero.
+  // Categories with a natural sequence are displayed in it (order.ts);
+  // every series is permuted with the same index so pairs never split.
+  const order = barOrder(d);
+  const categories = order.map((i) => String(d.categories[i]));
   const series: BarSeriesOption[] = d.series.map((s) => ({
     type: "bar",
     name: s.name,
-    data: s.values.map((v) => v ?? null),
-    barMaxWidth: 48,
-    itemStyle: { borderRadius: [2, 2, 0, 0] },
+    data: order.map((i) => s.values[i] ?? null),
+    barMaxWidth: 36,
+    barCategoryGap: "38%",
+    itemStyle: { borderRadius: [3, 3, 0, 0], opacity: 0.92 },
+    emphasis: { focus: d.series.length > 1 ? "series" : "none", itemStyle: { opacity: 1 } },
   }));
   return {
     ...baseOption(result, false, d.series.length > 1),
@@ -308,10 +320,13 @@ const stat = (v: number | null): number => (v === null ? NaN : v);
 
 function boxOption(result: RenderResult): VizOption {
   const d = result.chart_data as BoxChartData;
-  const names = d.groups.map((g) => g.name);
+  // groups with a natural sequence are displayed in it (order.ts); the
+  // statistics of each group travel with its name
+  const groups = boxOrder(d).map((i) => d.groups[i]);
+  const names = groups.map((g) => g.name);
   // ECharts boxplot order: [min, Q1, median, Q3, max]; the backend's fences
   // play the min/max role (whisker ends), exactly as the backend computed them
-  const stats: BoxStats[] = d.groups.map((g) => [
+  const stats: BoxStats[] = groups.map((g) => [
     stat(g.lower_fence),
     stat(g.q1),
     stat(g.median),
@@ -326,7 +341,7 @@ function boxOption(result: RenderResult): VizOption {
     tooltip: {
       formatter: (p) => {
         const item = Array.isArray(p) ? p[0] : p;
-        const g = d.groups[item.dataIndex];
+        const g = groups[item.dataIndex];
         return (
           `${g.name}<br/>` +
           `upper fence: ${fmt(g.upper_fence)}<br/>Q3: ${fmt(g.q3)}<br/>median: ${fmt(g.median)}<br/>` +
@@ -337,7 +352,7 @@ function boxOption(result: RenderResult): VizOption {
     },
   };
   const outliers: [string, number][] = [];
-  for (const g of d.groups) for (const v of g.outliers) outliers.push([g.name, v]);
+  for (const g of groups) for (const v of g.outliers) outliers.push([g.name, v]);
   const series: (BoxplotSeriesOption | ScatterSeriesOption)[] = [box];
   if (outliers.length > 0) {
     series.push({
@@ -355,7 +370,7 @@ function boxOption(result: RenderResult): VizOption {
       },
     });
   }
-  const means = d.groups.filter((g) => g.mean !== null).map((g) => [g.name, g.mean as number] as [string, number]);
+  const means = groups.filter((g) => g.mean !== null).map((g) => [g.name, g.mean as number] as [string, number]);
   if (means.length > 0) {
     series.push({
       type: "scatter",

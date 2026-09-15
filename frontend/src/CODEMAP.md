@@ -40,9 +40,9 @@ generated_at: 2026-09-15
 
 | File | Domain | Deps | Function |
 |---|---|---|---|
-| `App.tsx` | Shell | `← components/*, pages/*, lib/* \| → main.tsx` | Loads datasets; on select fetches profile + recs(llm=false) + recs(llm=true) in parallel; routes pages; keeps panel group mounted. |
-| `store.ts` | State | `→ 8 files (foundational); rg "from \"../store\"\|@/store" frontend/src -l` | `AppState`/`Action`/`reducer`; per-dataset workspace; explore form. |
+| `App.tsx` | Shell | `← components/*, pages/*, lib/* \| → main.tsx` | Loads datasets; on select fetches profile + recs(llm=false) + recs(llm=true) in parallel; routes pages; keeps panel group mounted; `previewRecommendation(rec, insight?)` / `previewInsight` link a chart to its finding. |
+| `store.ts` | State | `→ 8 files (foundational); rg "from \"../store\"\|@/store" frontend/src -l` | `AppState`/`Action`/`reducer`; per-dataset workspace; explore form. `Preview.insight` / `SavedChart.insight` carry the finding a chart supports (stage 18). |
 | `api.ts` | API Client | `→ App.tsx, components/UploadPanel.tsx, ManualBuilder.tsx, Recommendations.tsx` | fetch wrappers for `/api/*`; `ApiError` carries 422 errors. |
-| `types.ts` | Types | `→ many` | Contract mirrors (keep in sync with backend models). |
+| `types.ts` | Types | `→ many` | Contract mirrors (keep in sync with backend models). `Insight` optional fields: `headline`, `why_it_matters`, `validation`, `priority`, `effect{label,value,n}`. |
 | `main.tsx` | Shell | — | React root. |
 | `index.css` | Theme | — | Tailwind layers + light/dark CSS variable tokens (16.1). |

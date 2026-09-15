@@ -66,6 +66,7 @@ logger = logging.getLogger(__name__)
 MAX_INSIGHTS = 5
 MAX_HYPOTHESES = 5  # LLM #1 items considered, by importance
 MAX_INSIGHT_CHARS = 300
+MAX_HEADLINE_CHARS = 120  # stage 18: headline shown collapsed; longer ones are dropped, not cut
 UNVERIFIED_NOTE = "hypothesis not verified against the data"
 FALLBACK_MESSAGE = "AI suggestions unavailable ({reason}); showing rule-based recommendations."
 NO_PATTERNS_MESSAGE = "No strong non-definitional and analytically useful patterns were found."
@@ -761,10 +762,12 @@ class _Workflow:
             else:
                 text, source = self._fallback_text(v, names)
             why = words["why_it_matters"] if words and words["why_it_matters"] else self._gated_reason(v, names)
+            headline = words["headline"] if words and words["headline"] else None
             priority = max(1, min(5, int(words["priority"] if words else v.importance)))
             self.trace.wording.append({"id": v.id, "statement": v.statement, "final_text": text, "source": source})
             rows.append(
                 {
+                    "headline": headline,
                     "text": text[:MAX_INSIGHT_CHARS],
                     "supported": "strong" if v.verdict == "pass" else "weak",
                     "key": chart_key,
@@ -785,6 +788,7 @@ class _Workflow:
         rows.sort(key=lambda r: (-r["priority"], r["id"]))
         insights = [
             {
+                "headline": r["headline"],
                 "text": r["text"],
                 "supported": r["supported"],
                 # None when the chart fell to the caps/MAX_CHARTS cut — the
@@ -871,7 +875,19 @@ class _Workflow:
                 logger.warning("LLM #2 insight %d rejected: %s — template used", hid, problem)
                 self.trace.errors.append(f"llm2 insight {hid}: {problem}")
                 continue
+            # the headline is gated on its own: a bad headline costs the
+            # headline (the UI falls back to the text), never the insight
+            headline: str | None = (item.headline or "").strip()
+            if headline:
+                headline_problem = _wording_problem(headline, v, names)
+                if headline_problem is None and len(headline) > MAX_HEADLINE_CHARS:
+                    headline_problem = f"headline longer than {MAX_HEADLINE_CHARS} characters"
+                if headline_problem:
+                    logger.warning("LLM #2 insight %d headline rejected: %s", hid, headline_problem)
+                    self.trace.errors.append(f"llm2 headline {hid}: {headline_problem}")
+                    headline = None
             out[hid] = {
+                "headline": headline or None,
                 "text": item.text.strip(),
                 "why_it_matters": item.why_it_matters.strip(),
                 "priority": max(1, min(5, int(item.priority or by_id[hid].importance))),

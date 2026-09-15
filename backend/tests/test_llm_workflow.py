@@ -626,3 +626,31 @@ def test_new_llm_chart_caption_is_the_gated_reason(profile, df, monkeypatch) -> 
     llm_charts = [c for c in result["charts"] if c["source"] == "llm"]
     assert llm_charts and all("1,284" not in c["spec"]["reason"] and "37%" not in c["spec"]["reason"] for c in llm_charts)
     assert insight["why_it_matters"] is None
+
+
+# --- stage 18: presentation-only headline ------------------------------------------------
+
+
+def test_headline_is_optional_gated_and_never_costs_the_insight(profile, df) -> None:
+    hyp = [_h("The sales distribution differs by segment.", "distribution_difference", {"group": "segment", "target": "sales"}, None, 4)]
+    base = {"hypothesis_id": 1, "text": "Sales in segment e are distributed far above the rest.", "why_it_matters": "?", "priority": 5}
+
+    # a clean headline passes through verbatim
+    ok, _ = _run(profile, df, hyp, final={"insights": [{**base, "headline": "Segment e sells far more"}]})
+    (insight,) = ok["insights"]
+    assert insight["headline"] == "Segment e sells far more" and insight["text"] == base["text"]
+
+    # a headline with an unverifiable number loses only the headline
+    bad, _ = _run(profile, df, hyp, final={"insights": [{**base, "headline": "Segment e sells 87% more"}]})
+    (insight,) = bad["insights"]
+    assert insight["headline"] is None and insight["text"] == base["text"]
+    assert any("llm2 headline 1" in e for e in bad["debug"]["errors"])
+
+    # an over-long headline is dropped, not truncated; a missing one is null
+    long, _ = _run(profile, df, hyp, final={"insights": [{**base, "headline": "x" * 121}]})
+    assert long["insights"][0]["headline"] is None
+    none, _ = _run(profile, df, hyp, final={"insights": [base]})
+    assert none["insights"][0]["headline"] is None
+    # an explicit null keeps the LLM wording (verifier NB-1)
+    null, _ = _run(profile, df, hyp, final={"insights": [{**base, "headline": None}]})
+    assert null["insights"][0]["headline"] is None and null["insights"][0]["text"] == base["text"]

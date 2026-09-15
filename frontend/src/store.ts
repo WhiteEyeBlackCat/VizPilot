@@ -15,6 +15,7 @@ import type {
   ChartType,
   DatasetMeta,
   DatasetProfile,
+  Insight,
   Recommendation,
   RecommendationsResponse,
   RenderResult,
@@ -38,6 +39,9 @@ export interface Preview {
   rec?: Recommendation;
   /** LLM insight text that this chart supports (plain text) */
   insightText?: string;
+  /** the whole insight (headline, why it matters, effect) when the chart
+   *  was opened from Key Findings or supports a finding (stage 18) */
+  insight?: Insight;
   /** the workspace entry being viewed when source === "workspace" */
   savedKey?: string;
   /** monotonically increasing; lets the UI / e2e see a replaced preview */
@@ -50,6 +54,7 @@ export interface SavedChart {
   savedAt: string;
   rec?: Recommendation;
   insightText?: string;
+  insight?: Insight;
 }
 
 /** Explore (ManualBuilder) form values, lifted so navigation and panel
@@ -230,6 +235,7 @@ export function reducer(state: AppState, action: Action): AppState {
         savedAt: action.savedAt,
         rec: preview.rec,
         insightText: preview.insightText,
+        insight: preview.insight,
       };
       return {
         ...state,

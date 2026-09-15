@@ -63,6 +63,9 @@ class FinalInsight(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     hypothesis_id: Any = None
+    # stage 18: a short, number-free claim shown before the full text is
+    # expanded; presentation only, gated like the text (missing → null)
+    headline: str | None = ""  # null is a common "nothing to add" answer: never a parse failure
     text: str = ""
     why_it_matters: str = ""
     priority: int = 3

@@ -9,8 +9,9 @@ generated_at: 2026-09-15
 
 | Task | Domain | Target | Also Check |
 |---|---|---|---|
-| Understand the shared right-hand preview panel (chart, warnings, save, enlarge dialog) | Preview | `PreviewPanel.tsx` | `../store.ts` (`Preview`, `SavedChart`), `ChartView.tsx` |
-| Understand tier sections, supported badges, insight list | Insights | `Recommendations.tsx` | `../pages/InsightsPage.tsx`, `../types.ts` |
+| Understand the analysis detail panel (title/context, chart ≈64% height, why it matters, evidence, chart spec details, Save/Export/Enlarge/Close) | Preview | `PreviewPanel.tsx` | `../store.ts` (`Preview`, `SavedChart`), `ChartView.tsx`, `InsightList.tsx` (`evidenceRows`) |
+| Understand Key Findings: headline-first insight rows, expand/collapse, evidence list, View chart | Insights | `InsightList.tsx` | `../types.ts` (`Insight`), `Recommendations.tsx` |
+| Understand the More charts section: tier sub-sections, simplified cards (title, purpose, type · aggregation, spec tooltip, Preview) | Insights | `Recommendations.tsx` | `../pages/InsightsPage.tsx`, `../types.ts` |
 | Understand manual chart building rules (field filtering, nominal never y) | Explore | `ManualBuilder.tsx`, `FieldSelect.tsx` | backend `charts/spec.py` (`validate_spec` mirror) |
 | Understand column table, type badges, quality flags | Overview | `DatasetOverview.tsx` | `../pages/OverviewPage.tsx` |
 | Understand upload flow / drop zone / new dataset dialog | Upload | `UploadPanel.tsx`, `NewDatasetDialog.tsx` | `../api.ts` |
@@ -27,8 +28,9 @@ generated_at: 2026-09-15
 
 | Symbol | Source | Line |
 |---|---|---|
-| `PreviewPanel` | `PreviewPanel.tsx` | L:69 |
-| `Recommendations` | `Recommendations.tsx` | L:94 |
+| `PreviewPanel` | `PreviewPanel.tsx` | L:77 |
+| `Recommendations`, `specRows`, `chartMeta` | `Recommendations.tsx` | L:115, L:89, L:103 |
+| `InsightList`, `headlineOf`, `evidenceRows`, `insightWeight`, `SUPPORTED_BADGE` | `InsightList.tsx` | L:63, L:33, L:36, L:48, L:18 |
 | `ManualBuilder` | `ManualBuilder.tsx` | L:25 |
 | `DatasetOverview`, `qualityFlags`, `hasQualityFlags`, `TYPE_VARIANT` | `DatasetOverview.tsx` | L:102, L:61, L:92, L:13 |
 | `Sidebar` | `Sidebar.tsx` | L:37 |
@@ -40,8 +42,9 @@ generated_at: 2026-09-15
 
 | File | Domain | Deps | Function |
 |---|---|---|---|
-| `PreviewPanel.tsx` | Preview | `← ../store.ts, ../types.ts, ../charts/echarts/* \| → ../App.tsx` | Shows current `Preview`; save/unsave; enlarge Dialog re-rendering same RenderResult at 70vh; warning chips. |
-| `Recommendations.tsx` | Insights | `← ../api.ts \| → ../pages/InsightsPage.tsx` | Top/secondary/exploratory sections, LLM pending skeleton, confidence labels, empty-top honesty text. |
+| `PreviewPanel.tsx` | Preview | `← ../store.ts, ../types.ts, ../charts/echarts/*, InsightList.tsx, Recommendations.tsx \| → ../App.tsx` | Analysis detail panel (stage 18): header + context line, chart sized to ~64% of the panel, "Why this matters" (insight text / why_it_matters), "Supporting evidence" (effect, n, confidence, warnings), collapsible chart spec, actions row (Save/Remove, Export, Enlarge, Close); enlarge Dialog re-renders the same RenderResult at 70vh. |
+| `InsightList.tsx` | Insights | `← ../types.ts \| → Recommendations.tsx, PreviewPanel.tsx` | Key Findings rows: badge + headline (`headline ?? text`, never truncated) as one `aria-expanded` button; expanded detail = full text, why it matters, evidence `dl`, View chart. Weight lead/secondary/compact by `supported`. |
+| `Recommendations.tsx` | Insights | `← ../api.ts, InsightList.tsx \| → ../pages/InsightsPage.tsx, ../pages/WorkspacePage.tsx` | Key Findings section first, then "More charts" (h2) with tier h3s; cards show title, purpose, `type · aggregation`, confidence tooltip, spec tooltip (Info button), Preview; `data-x`/`data-y` for e2e; empty-top honesty text. |
 | `ManualBuilder.tsx` | Explore | `← ../store.ts, ../types.ts, ../api.ts \| → ../pages/ExplorePage.tsx` | Spec form with type-dependent field filters; 422 errors listed. |
 | `DatasetOverview.tsx` | Overview | `← ../types.ts \| → ../pages/OverviewPage.tsx` | Column table with semantic-type badges and quality flags. |
 | `Sidebar.tsx` | Shell | `← ../store.ts, ../lib/router.ts \| → ../App.tsx` | Page nav + dataset list; hash links. |

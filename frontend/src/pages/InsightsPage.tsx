@@ -2,14 +2,16 @@ import { Sparkles } from "lucide-react";
 
 import { PageHeader } from "../components/PageHeader";
 import { Recommendations } from "../components/Recommendations";
-import type { Recommendation, RecommendationsResponse } from "../types";
+import type { Insight, Recommendation, RecommendationsResponse } from "../types";
 import { Badge } from "@/components/ui/badge";
 
 interface Props {
   recs: RecommendationsResponse | null;
   aiPending: boolean;
   selectedPriority: number | null;
+  selectedInsightText: string | null;
   onPreview: (rec: Recommendation) => Promise<void>;
+  onPreviewInsight: (insight: Insight) => Promise<void>;
   exploratoryOpen: boolean;
   onExploratoryOpenChange: (open: boolean) => void;
 }
@@ -18,7 +20,9 @@ export function InsightsPage({
   recs,
   aiPending,
   selectedPriority,
+  selectedInsightText,
   onPreview,
+  onPreviewInsight,
   exploratoryOpen,
   onExploratoryOpenChange,
 }: Props) {
@@ -26,7 +30,7 @@ export function InsightsPage({
     <div data-page="insights">
       <PageHeader
         title="Insights"
-        subtitle="系統依統計證據推薦的圖表；點選卡片在預覽面板檢視，按 Save 加入 Workspace。"
+        subtitle="經後端統計驗證的發現排在前面，規則引擎的候選圖在後；點 View chart 或卡片在右側面板檢視，按 Save 加入 Workspace。"
         aside={
           aiPending && (
             <Badge variant="accent" className="animate-pulse font-normal">
@@ -40,7 +44,9 @@ export function InsightsPage({
         recs={recs}
         aiPending={aiPending}
         selectedPriority={selectedPriority}
+        selectedInsightText={selectedInsightText}
         onPreview={onPreview}
+        onPreviewInsight={onPreviewInsight}
         exploratoryOpen={exploratoryOpen}
         onExploratoryOpenChange={onExploratoryOpenChange}
       />

@@ -17,7 +17,7 @@ generated_at: 2026-09-15
 
 | File | Domain | Function |
 |---|---|---|
-| `run.mjs` | E2E | Upload → overview → insights → explore → workspace steps; screenshots per tag; stdout JSON summary `ok: true|false`. |
+| `run.mjs` | E2E | Upload → overview → insights (Key Findings expand / keyboard / View chart via `checkKeyFindings`) → explore → workspace → month-order bar steps; screenshots per tag; stdout JSON summary `ok: true|false`. |
 | `capture-fixtures.mjs` | E2E | Calls `/api/charts/render` for each fixture spec and writes JSON. |
 | `README.md` | E2E | Requirements and coverage list. |
 | `data/sparse_groups.csv` | E2E | Committed input for null-gap fixtures. |

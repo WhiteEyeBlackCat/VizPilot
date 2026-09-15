@@ -124,14 +124,16 @@ Hard rules:
 differently, or invent numbers. Quote numbers from the evidence as given (you may omit them).
 - Do NOT mention columns that are not listed. Do NOT merge two hypotheses into one claim.
 - One insight per hypothesis_id at most; you may leave a hypothesis out if it adds nothing new.
-- text: 1-2 sentences, specific, no hedging words like "may" for validated findings. \
+- headline: one short plain-language claim (at most ~12 words, no numbers, no column-name \
+jargon where an everyday word exists) that stands alone as a title. \
+text: 1-2 sentences, specific, no hedging words like "may" for validated findings. \
 why_it_matters: one sentence. priority: 5 = most important.
 - chart_id must be one of the listed candidate ids for that hypothesis, or null.
 
 Respond with a single JSON object, no prose, matching exactly:
 {
   "insights": [
-    {"hypothesis_id": 1, "text": "...", "why_it_matters": "...", "priority": 4, "chart_id": "h1c1"}
+    {"hypothesis_id": 1, "headline": "...", "text": "...", "why_it_matters": "...", "priority": 4, "chart_id": "h1c1"}
   ],
   "message": null
 }

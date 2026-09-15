@@ -61,7 +61,7 @@ export function title(text: string): TitleComponentOption {
     text,
     left: 8,
     top: 6,
-    textStyle: { fontSize: 14, fontWeight: 600, color: COLORS.text, fontFamily: FONT_FAMILY },
+    textStyle: { fontSize: 13, fontWeight: 600, color: COLORS.text, fontFamily: FONT_FAMILY },
   };
 }
 
@@ -70,10 +70,10 @@ export function title(text: string): TitleComponentOption {
 // outerBoundsContain "all") keeps axis labels AND axis names inside the
 // canvas; the deprecated containLabel is deliberately not used.
 export const grid: GridComponentOption = {
-  left: 16,
-  right: 24,
-  top: 56, // title row (top 6, 14px) + a clear gap above the y-axis name
-  bottom: 40,
+  left: 20,
+  right: 28,
+  top: 56, // title row (top 6, 13px) + a clear gap above the y-axis name
+  bottom: 44,
 };
 
 /** A bottom legend needs one more row under the x-axis name. */
@@ -82,15 +82,17 @@ export const gridWithLegend: GridComponentOption = { ...grid, bottom: 64 };
 /** Extra right margin when a visualMap bar sits beside the plot. */
 export const gridWithVisualMap: GridComponentOption = { ...grid, right: 72 };
 
-const axisLabel = { color: COLORS.muted, fontSize: 12, fontFamily: FONT_FAMILY };
-const axisName = { color: COLORS.muted, fontSize: 12, fontFamily: FONT_FAMILY };
+const axisLabel = { color: COLORS.muted, fontSize: 11.5, fontFamily: FONT_FAMILY, margin: 10 };
+const axisName = { color: COLORS.muted, fontSize: 11.5, fontFamily: FONT_FAMILY };
 
+// Observable-like restraint: a thin axis line, no tick marks, a low-contrast
+// solid grid one step above the surface
 export const axisBase = {
-  axisLine: { lineStyle: { color: COLORS.axisLine } },
-  axisTick: { lineStyle: { color: COLORS.axisLine } },
+  axisLine: { lineStyle: { color: COLORS.axisLine, width: 1 } },
+  axisTick: { show: false },
   axisLabel,
   nameTextStyle: axisName,
-  splitLine: { lineStyle: { color: COLORS.splitLine } },
+  splitLine: { lineStyle: { color: COLORS.splitLine, width: 1 } },
 };
 
 /** y-axis name rendered at the top-left, x-axis name centred below. */
@@ -110,21 +112,22 @@ export const tooltipBase: TooltipComponentOption = {
   backgroundColor: COLORS.elevated,
   borderColor: COLORS.tooltipBorder,
   borderWidth: 1,
-  padding: [6, 10],
-  textStyle: { color: COLORS.text, fontSize: 12, fontFamily: FONT_FAMILY },
-  extraCssText: "box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45); border-radius: 6px;",
+  padding: [8, 12],
+  textStyle: { color: COLORS.text, fontSize: 12, fontFamily: FONT_FAMILY, lineHeight: 18 },
+  extraCssText: "box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45); border-radius: 8px;",
   confine: true,
 };
 
 // below the plot, centred: never collides with the title or the toolbox
 export const legend: LegendComponentOption = {
   type: "scroll",
-  bottom: 4,
+  bottom: 6,
   left: "center",
   icon: "roundRect",
-  itemWidth: 12,
-  itemHeight: 8,
-  textStyle: { color: COLORS.muted, fontSize: 12, fontFamily: FONT_FAMILY },
+  itemWidth: 10,
+  itemHeight: 10,
+  itemGap: 16,
+  textStyle: { color: COLORS.muted, fontSize: 11.5, fontFamily: FONT_FAMILY, padding: [0, 0, 0, 2] },
   pageTextStyle: { color: COLORS.muted },
   pageIconColor: COLORS.muted,
   pageIconInactiveColor: COLORS.splitLine,

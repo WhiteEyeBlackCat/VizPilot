@@ -126,10 +126,27 @@ export interface Recommendation {
   warnings?: Warning[];
 }
 
+/** Backend measurement behind an insight (stage 17.3; additive). The label
+ *  and numbers are the backend's own — the UI formats, never computes. */
+export interface InsightEffect {
+  label: string;
+  value: number | null;
+  n: number | null;
+}
+
 export interface Insight {
   text: string;
   supported: Supported;
   chart_priority: number | null;
+  /** stage 18: short number-free claim shown collapsed; null → the UI shows
+   *  `text` as the headline (never a truncated string) */
+  headline?: string | null;
+  /** stage 17.3 (additive; older backends omit them) */
+  why_it_matters?: string | null;
+  /** "existing_evidence" (evidence tables) or "probe" (targeted test) */
+  validation?: string | null;
+  priority?: number | null;
+  effect?: InsightEffect | null;
 }
 
 export interface RecommendationsResponse {

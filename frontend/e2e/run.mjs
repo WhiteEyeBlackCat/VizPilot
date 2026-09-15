@@ -251,6 +251,97 @@ async function layoutProbe() {
   }));
 }
 
+/** Stage 18 Key Findings: rows show only the evidence badge + headline
+ *  until the whole row (a button) is activated; the detail carries the full
+ *  text / why-it-matters / evidence and a View chart button that drives the
+ *  analysis panel. The LLM is optional: with no insights the section is
+ *  absent and the step records that instead of failing. */
+async function checkKeyFindings(tag, shotName) {
+  await page
+    .waitForFunction(() => document.querySelector("[data-recommendations]")?.dataset.aiPending === "false", null, { timeout: 180000 })
+    .catch(() => {});
+  const rows = page.locator("[data-insight]");
+  const count = await rows.count();
+  if (count === 0) {
+    step(`${tag}.key-findings`, { insights: 0, moreChartsHeading: await page.getByRole("heading", { level: 2, name: /^Charts/ }).count() });
+    return;
+  }
+  const collapsedDetails = await page.locator("[data-insight-detail]").count();
+  const collapsedText = await rows.first().locator("[data-insight-headline]").textContent();
+  const fullText = await rows.first().evaluate((el) => el.textContent);
+  const weights = await rows.evaluateAll((els) => els.map((e) => e.dataset.weight));
+  // 1) click the row (not an arrow) expands it
+  await rows.first().locator("[data-insight-toggle]").click();
+  await page.waitForTimeout(150);
+  const expanded = await rows.first().evaluate((el) => ({
+    ariaExpanded: el.querySelector("[data-insight-toggle]")?.getAttribute("aria-expanded"),
+    detail: Boolean(el.querySelector("[data-insight-detail]")),
+    evidenceRows: el.querySelectorAll("[data-insight-evidence] dt").length,
+    why: Boolean(el.querySelector("[data-insight-why]")),
+    viewChart: el.querySelectorAll("[data-insight-view-chart]").length,
+  }));
+  // 2) keyboard: Enter on the focused row collapses it again, Space re-opens
+  await rows.first().locator("[data-insight-toggle]").focus();
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(100);
+  const afterEnter = await rows.first().getAttribute("data-expanded");
+  await page.keyboard.press("Space");
+  await page.waitForTimeout(100);
+  const afterSpace = await rows.first().getAttribute("data-expanded");
+  // 3) View chart → the panel shows that chart with the insight as context.
+  // Not every finding has a chart (chart_priority null): expand rows until
+  // one offers the button.
+  let panelAfter = null;
+  let orderNote = null;
+  for (let i = 1; i < count && (await page.locator("[data-insight-view-chart]").count()) === 0; i++) {
+    await rows.nth(i).locator("[data-insight-toggle]").click();
+    await page.waitForTimeout(100);
+  }
+  const viewButtons = page.locator("[data-insight-view-chart]");
+  if ((await viewButtons.count()) > 0) {
+    const before = await panelSeq();
+    await viewButtons.first().click();
+    await waitPreview(before);
+    const st = await panelState();
+    panelAfter = {
+      ...st,
+      insightSection: (await panel().locator("[data-preview-insight]").count()) > 0,
+      why: (await panel().locator("[data-preview-why]").count()) > 0,
+      evidence: await panel().locator("[data-preview-evidence] dt").count(),
+      actions: await panel().locator("[data-preview-actions] button").allTextContents(),
+      chartShare: await panel().evaluate((el) => {
+        const chart = el.querySelector("[data-preview-chart]");
+        return chart ? Number((chart.getBoundingClientRect().height / el.getBoundingClientRect().height).toFixed(2)) : null;
+      }),
+      selectedRow: await page.locator("[data-insight][data-selected=true]").count(),
+    };
+    orderNote = await panel().locator("[data-order-note]").textContent().catch(() => null);
+  }
+  step(`${tag}.key-findings`, {
+    insights: count,
+    weights,
+    collapsedDetails,
+    headlineOnly: (collapsedText ?? "").length > 0 && (fullText ?? "").trim().length <= (collapsedText ?? "").length + 12,
+    expanded,
+    afterEnter,
+    afterSpace,
+    panelAfter,
+    orderNote,
+    keyFindingsFirst: await page.evaluate(() => {
+      const kf = document.querySelector("[data-key-findings]");
+      const more = document.querySelector("[data-more-charts]");
+      return Boolean(kf && more && kf.compareDocumentPosition(more) & Node.DOCUMENT_POSITION_FOLLOWING);
+    }),
+  });
+  await shot(shotName);
+  if (collapsedDetails !== 0) fail("insight detail rendered while collapsed");
+  if (expanded.ariaExpanded !== "true" || !expanded.detail || expanded.evidenceRows === 0) fail(`insight did not expand: ${JSON.stringify(expanded)}`);
+  if (afterEnter !== "false" || afterSpace !== "true") fail(`keyboard toggle broken: enter=${afterEnter} space=${afterSpace}`);
+  if (panelAfter && (!panelAfter.insightSection || panelAfter.source !== "insight" || panelAfter.selectedRow !== 1)) fail(`insight → chart flow broken: ${JSON.stringify(panelAfter)}`);
+  if (panelAfter && (panelAfter.chartShare === null || panelAfter.chartShare > 0.75 || panelAfter.chartShare < 0.45)) fail(`panel chart share out of range: ${panelAfter.chartShare}`);
+  if (panelAfter && !["Save", "Export", "Enlarge", "Close"].every((a) => panelAfter.actions.some((t) => t.includes(a)))) fail(`panel actions missing: ${panelAfter.actions}`);
+}
+
 try {
   await page.goto(base, { waitUntil: "networkidle" });
   await page.waitForTimeout(300);
@@ -339,7 +430,7 @@ try {
   await gotoPage("Insights");
   const tiers = {};
   for (const t of ["推薦重點", "次要", "探索"]) {
-    tiers[t] = (await page.getByRole("heading", { level: 2, name: new RegExp(`^${t}`) }).count()) > 0;
+    tiers[t] = (await page.getByRole("heading", { level: 3, name: new RegExp(`^${t}`) }).count()) > 0;
   }
   const recCards = await page.locator("[id^=rec-card-]").count();
   const topCards = await page.locator("[id^=rec-card-][data-tier=top]").count();
@@ -381,6 +472,9 @@ try {
     if (!titleHidden) fail("the panel chart still draws its own title");
     await shot("03-insight-preview");
   }
+
+  // ---- Key Findings (stage 18): headline-first rows, expand, View chart --
+  await checkKeyFindings("air_quality", "04-key-findings");
 
   // collapse / expand the side panel keeps the preview
   {
@@ -765,18 +859,45 @@ try {
   {
     const cards = page.locator("[id^=rec-card-]");
     const recCards = await cards.count();
-    const variableLines = await cards.locator("text=/x=|y=/").allTextContents();
-    const atempCards = variableLines.filter((t) => /(^|[^a-z_])atemp([^a-z_]|$)/.test(t)).length;
-    const pairCards = variableLines.filter((t) => /x=temp · y=atemp|x=atemp · y=temp/.test(t)).length;
+    // stage 18: the column roles are no longer printed on the card face;
+    // the card carries them as data attributes (and in the spec tooltip)
+    const roles = await cards.evaluateAll((els) => els.map((e) => ({ x: e.dataset.x, y: e.dataset.y })));
+    const atempCards = roles.filter((r) => r.x === "atemp" || r.y === "atemp").length;
+    const pairCards = roles.filter((r) => (r.x === "temp" && r.y === "atemp") || (r.x === "atemp" && r.y === "temp")).length;
+    const cardFaceHasRoles = (await cards.locator("text=/x=|y=|agg=/").count()) > 0;
     const topTitles = await page.locator("[id^=rec-card-][data-tier=top]").allTextContents();
     const topIsPair = topTitles.some((t) => /atemp vs temp|temp vs atemp/.test(t));
     const nearDupDisclosed = (await page.getByText(/atemp is a near-duplicate of temp/).count()) > 0;
     const derivedDisclosed = (await page.getByText(/cnt appears to be computed as casual \+ registered/).count()) > 0;
-    step("hour_like.near_duplicate", { recCards, atempCards, pairCards, topIsPair, nearDupDisclosed, derivedDisclosed });
+    step("hour_like.near_duplicate", { recCards, atempCards, pairCards, topIsPair, nearDupDisclosed, derivedDisclosed, cardFaceHasRoles });
+    if (cardFaceHasRoles) fail("recommendation cards still print x=/y=/agg= on their face");
     await shot("32-hour-like-near-duplicate");
     if (recCards === 0 || atempCards !== 0 || pairCards !== 0 || topIsPair || !nearDupDisclosed) {
       fail(`hour_like near-duplicate check failed: cards=${recCards} atemp=${atempCards} pair=${pairCards} topIsPair=${topIsPair} disclosed=${nearDupDisclosed}`);
     }
+    await checkKeyFindings("hour_like", "35-hour-like-key-findings");
+
+    // stage 18: a bar over a month column is read in month order, not by
+    // value; the note says so, and the (category, value) pairs are intact
+    {
+      const { chart } = await generateManual({ type: "bar", x: "mnth", y: "temp" });
+      const axis = await chart.evaluate((el) => {
+        const o = el.__echarts?.getOption();
+        const xs = o?.xAxis?.[0]?.data ?? [];
+        return { categories: xs, values: o?.series?.[0]?.data ?? [] };
+      });
+      const note = await panel().locator("[data-order-note]").textContent().catch(() => null);
+      const spec = summary.renderPayloads[summary.renderPayloads.length - 1];
+      const ascending = axis.categories.every((c, i) => i === 0 || Number(c) > Number(axis.categories[i - 1]));
+      step("hour_like.month-order", { categories: axis.categories, note, ascending, spec: { type: spec.type, x: spec.x, y: spec.y, aggregation: spec.aggregation } });
+      await shot("36-hour-like-month-order", panel());
+      // hour_like covers three months (3, 4, 5): the backend ranks them by
+      // mean temp (5 > 4 > 3), the chart reads 3, 4, 5
+      if (!ascending || axis.categories.length < 3 || !note || !/數值順序/.test(note)) fail(`month bar not in natural order: ${JSON.stringify({ categories: axis.categories, note })}`);
+      // the ranked station bar still says it is ranked
+      await gotoPage("Insights");
+    }
+
     await gotoPage("Overview");
     const nearDupRow = (await page.locator("[data-near-duplicate=temp]").textContent())?.trim();
     const derivedCnt = (await page.locator("[data-derived-column=cnt]").count()) > 0;

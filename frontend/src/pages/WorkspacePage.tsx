@@ -2,8 +2,8 @@ import { Eye, Trash2 } from "lucide-react";
 import { useEffect, useRef } from "react";
 
 import { PageHeader } from "../components/PageHeader";
+import { chartMeta } from "../components/Recommendations";
 import type { SavedChart } from "../store";
-import type { ChartSpec } from "../types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -14,15 +14,6 @@ interface Props {
   currentKey: string | null;
   onPreview: (chart: SavedChart) => void;
   onRemove: (key: string) => void;
-}
-
-function variables(spec: ChartSpec): string {
-  const parts: string[] = [];
-  if (spec.x) parts.push(`x=${spec.x}`);
-  if (spec.y) parts.push(`y=${spec.y}`);
-  if (spec.group_by) parts.push(`group=${spec.group_by}`);
-  if (spec.aggregation) parts.push(`agg=${spec.aggregation}`);
-  return parts.join(" · ") || "—";
 }
 
 const time = new Intl.DateTimeFormat("zh-Hant", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -65,10 +56,13 @@ export function WorkspacePage({ charts, currentKey, onPreview, onRemove }: Props
                   <div className="flex items-start justify-between gap-2">
                     <span className="text-sm font-medium">{c.result.spec.title}</span>
                     <Badge variant="muted" className="shrink-0 font-normal">
-                      {c.result.spec.type}
+                      {chartMeta(c.result.spec)}
                     </Badge>
                   </div>
-                  <p className="text-xs text-muted-foreground">{variables(c.result.spec)}</p>
+                  {/* stage 18: purpose / finding first, technical roles in the panel */}
+                  <p className="text-xs text-muted-foreground line-clamp-2">
+                    {c.insight?.headline ?? c.rec?.spec.reason ?? chartMeta(c.result.spec)}
+                  </p>
                   <div className="mt-auto flex items-center justify-between gap-2 pt-1 text-xs text-muted-foreground">
                     <span className="tabular-nums">保存於 {time.format(new Date(c.savedAt))}</span>
                     <span className="flex items-center gap-1">

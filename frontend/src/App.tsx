@@ -20,7 +20,7 @@ import {
   type Preview,
   type SavedChart,
 } from "./store";
-import type { ChartSpec, DatasetMeta, Recommendation } from "./types";
+import type { ChartSpec, DatasetMeta, Insight, Recommendation } from "./types";
 import { Button } from "@/components/ui/button";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup, type GroupHandle, type Layout } from "@/components/ui/resizable";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -121,11 +121,23 @@ export default function App() {
   );
 
   const previewRecommendation = useCallback(
-    (rec: Recommendation) => {
-      const insightText = recs?.insights.find((i) => i.chart_priority === rec.spec.priority)?.text;
-      return previewSpec(rec.spec, { source: "insight", rec, insightText });
+    (rec: Recommendation, insight?: Insight) => {
+      // a chart may support a validated finding: carry it into the panel
+      const linked = insight ?? recs?.insights.find((i) => i.chart_priority === rec.spec.priority);
+      return previewSpec(rec.spec, { source: "insight", rec, insight: linked, insightText: linked?.text });
     },
     [previewSpec, recs],
+  );
+
+  /** Key Findings → View chart: the insight's supporting chart, with the
+   *  insight itself as the panel's context. */
+  const previewInsight = useCallback(
+    async (insight: Insight) => {
+      const rec = recs?.charts.find((c) => c.spec.priority === insight.chart_priority);
+      if (!rec) return;
+      await previewRecommendation(rec, insight);
+    },
+    [previewRecommendation, recs],
   );
 
   const previewManual = useCallback((spec: ChartSpec) => previewSpec(spec, { source: "explore" }), [previewSpec]);
@@ -209,6 +221,7 @@ export default function App() {
   }, [preview]);
   const selectedPriority =
     preview && preview.source !== "explore" && preview.rec ? (preview.rec.spec.priority ?? null) : null;
+  const selectedInsightText = preview?.source === "insight" ? (preview.insight?.text ?? null) : null;
   const currentSavedKey =
     preview?.source === "workspace" ? (preview.savedKey ?? null) : null;
 
@@ -237,7 +250,9 @@ export default function App() {
               recs={recs}
               aiPending={aiPending}
               selectedPriority={selectedPriority}
+              selectedInsightText={selectedInsightText}
               onPreview={previewRecommendation}
+              onPreviewInsight={previewInsight}
               exploratoryOpen={state.insightsExploratoryOpen}
               onExploratoryOpenChange={(open) => dispatch({ type: "SET_EXPLORATORY_OPEN", open })}
             />

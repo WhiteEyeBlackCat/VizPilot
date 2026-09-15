@@ -29,7 +29,7 @@ Source of truth: backend Pydantic models. `frontend/src/types.ts` mirrors them a
 ## Insight / RecommendationsResponse — `llm/service.py` `get()`
 - Producer: `RecommendationService.get(profile, use_llm)`.
 - Consumers: router, frontend Insights page.
-- Shape: `{charts: Recommendation[], insights: [{text, supported(strong|weak|unverified; backend-internal "neutral" is shown as weak), chart_priority|null}], message|null, warnings: Warning[]}`.
+- Shape: `{charts: Recommendation[], insights: [{text, supported(strong|weak|unverified; backend-internal "neutral" is shown as weak), chart_priority|null, headline|null, why_it_matters|null, validation(existing_evidence|probe), priority(1..5), effect{label, value, n}}], message|null, warnings: Warning[]}`. `headline` (stage 18) is LLM #2's short number-free claim, gated by the same wording check as `text` and dropped (null, never truncated) on any problem or > 120 chars; the frontend shows `text` when it is null. Presentation only: no statistic depends on it.
 - Invariants: with `use_llm=False` the output is a pure function of the profile (byte-identical across LLM changes); weak insights never make top; an insight's chart must pass `validate_spec` or `chart_priority` is null; `message` explains an empty result honestly; dataset-level warnings disclose excluded columns (`MAX_MISSING_RATIO`), derived and near-duplicate columns.
 
 ## RenderResult — `charts/render.py` L:50 → frontend `types.ts` L:211

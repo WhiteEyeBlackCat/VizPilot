@@ -62,6 +62,14 @@ panel (`[data-preview-panel]`), Save as the only way into the workspace:
     near-duplicate suppression (and its Overview row)
 12. every `/api/charts/render` request body is captured (`renderPayloads`) and
     the bar / heatmap / scatter shapes are asserted (aggregation prefill, nulls)
+13. stage 18 (`checkKeyFindings`, air_quality and hour_like): Key Findings rows
+    render badge + headline only until the row button is activated (click,
+    Enter, Space); the detail shows evidence rows and View chart drives the
+    analysis panel (insight section, evidence, Save/Export/Enlarge/Close,
+    chart ≈ 45–75% of the panel height); the section precedes "More charts";
+    cards no longer print `x=/y=/agg=`; a `mnth` bar is read in natural
+    order with a `[data-order-note]`. With the LLM off the step records
+    `insights: 0` and passes.
 
 `capture-fixtures.mjs` records real `RenderResult`s for the option-builder
 unit tests (`npm run capture-fixtures`, backend on 8100).
