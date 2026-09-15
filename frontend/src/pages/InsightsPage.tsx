@@ -10,9 +10,18 @@ interface Props {
   aiPending: boolean;
   selectedPriority: number | null;
   onPreview: (rec: Recommendation) => Promise<void>;
+  exploratoryOpen: boolean;
+  onExploratoryOpenChange: (open: boolean) => void;
 }
 
-export function InsightsPage({ recs, aiPending, selectedPriority, onPreview }: Props) {
+export function InsightsPage({
+  recs,
+  aiPending,
+  selectedPriority,
+  onPreview,
+  exploratoryOpen,
+  onExploratoryOpenChange,
+}: Props) {
   return (
     <div data-page="insights">
       <PageHeader
@@ -32,6 +41,8 @@ export function InsightsPage({ recs, aiPending, selectedPriority, onPreview }: P
         aiPending={aiPending}
         selectedPriority={selectedPriority}
         onPreview={onPreview}
+        exploratoryOpen={exploratoryOpen}
+        onExploratoryOpenChange={onExploratoryOpenChange}
       />
     </div>
   );

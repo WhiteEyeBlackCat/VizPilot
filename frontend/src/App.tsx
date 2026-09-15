@@ -12,7 +12,7 @@ import { WorkspacePage } from "./pages/WorkspacePage";
 import { initialState, isSaved, reducer, workspaceOf, type Page, type Preview, type SavedChart } from "./store";
 import type { ChartSpec, DatasetMeta, Recommendation } from "./types";
 import { Button } from "@/components/ui/button";
-import { ResizableHandle, ResizablePanel, ResizablePanelGroup, type Layout } from "@/components/ui/resizable";
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup, type GroupHandle, type Layout } from "@/components/ui/resizable";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useMediaQuery } from "@/lib/hooks";
 import { useHashRoute } from "@/lib/router";
@@ -25,9 +25,10 @@ export default function App() {
   const [newOpen, setNewOpen] = useState(false);
   const wide = useMediaQuery("(min-width: 1024px)");
   const saveSeq = useRef(0);
-  // remembered across collapse / expand (the panel re-mounts) and page
-  // switches; v4 has no autoSaveId, so the last layout is kept here
+  // remembered across collapse / expand (the preview panel re-mounts inside
+  // the ALWAYS-mounted group) and page switches; v4 has no autoSaveId
   const layoutRef = useRef<Layout>({ content: 55, preview: 45 });
+  const groupRef = useRef<GroupHandle>(null);
 
   const { datasets, meta, profile, recs, aiPending, preview, panelOpen } = state;
   const datasetId = meta?.dataset_id ?? null;
@@ -131,6 +132,30 @@ export default function App() {
   );
 
   const page: Page = route.datasetId && datasetId ? route.page : "overview";
+  const splitOpen = wide && preview !== null && panelOpen;
+
+  // the preview panel joins the persistent group: restore the remembered
+  // width (the group itself never re-mounts, so the pages keep their state)
+  useEffect(() => {
+    if (!splitOpen) return;
+    const id = requestAnimationFrame(() => groupRef.current?.setLayout(layoutRef.current));
+    return () => cancelAnimationFrame(id);
+  }, [splitOpen]);
+
+  // Esc closes the preview unless a dialog (enlarge / new dataset) is open —
+  // those own the key
+  useEffect(() => {
+    if (!preview) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      // Radix dismisses an open dialog on Escape and marks the event handled
+      if (e.defaultPrevented) return;
+      if (document.querySelector("[role=dialog][data-state=open]")) return;
+      dispatch({ type: "CLOSE_PREVIEW" });
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [preview]);
   const selectedPriority =
     preview && preview.source !== "explore" && preview.rec ? (preview.rec.spec.priority ?? null) : null;
   const currentSavedKey =
@@ -161,9 +186,18 @@ export default function App() {
               aiPending={aiPending}
               selectedPriority={selectedPriority}
               onPreview={previewRecommendation}
+              exploratoryOpen={state.insightsExploratoryOpen}
+              onExploratoryOpenChange={(open) => dispatch({ type: "SET_EXPLORATORY_OPEN", open })}
             />
           )}
-          {p === "explore" && <ExplorePage profile={profile} onGenerate={previewManual} />}
+          {p === "explore" && (
+            <ExplorePage
+              profile={profile}
+              form={state.explore}
+              onField={(field, value) => dispatch({ type: "EXPLORE_FIELD", field, value })}
+              onGenerate={previewManual}
+            />
+          )}
           {p === "workspace" && (
             <WorkspacePage
               charts={workspace}
@@ -243,10 +277,9 @@ export default function App() {
           )}
           {wide ? (
             <ResizablePanelGroup
-              key={preview && panelOpen ? "split" : "single"} // re-lay out when the panel mounts / unmounts
+              groupRef={groupRef}
               orientation="horizontal"
               className="min-h-0 flex-1"
-              defaultLayout={preview && panelOpen ? layoutRef.current : undefined}
               onLayoutChanged={(layout) => {
                 if (layout.preview !== undefined) layoutRef.current = layout;
               }}
@@ -254,7 +287,7 @@ export default function App() {
               <ResizablePanel id="content" minSize={360} className="min-h-0">
                 {main}
               </ResizablePanel>
-              {preview && panelOpen && (
+              {splitOpen && (
                 <>
                   <ResizableHandle withHandle aria-label="調整預覽面板寬度" />
                   <ResizablePanel id="preview" minSize={420} className="min-h-0">

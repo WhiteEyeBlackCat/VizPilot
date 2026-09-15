@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { ApiError } from "../api";
+import type { ExploreField, ExploreForm, FieldUpdate } from "../store";
 import type { Aggregation, ChartSpec, ChartType, ColumnProfile, DatasetProfile } from "../types";
 import { ErrorList } from "./ErrorList";
 import { FieldSelect } from "./FieldSelect";
@@ -8,6 +9,10 @@ import { Button } from "@/components/ui/button";
 
 interface Props {
   profile: DatasetProfile;
+  /** form values live in the app store (stage 16.2) so they survive
+   *  navigation and preview-panel changes */
+  form: ExploreForm;
+  onField: (field: ExploreField, value: FieldUpdate<string>) => void;
   onGenerate: (spec: ChartSpec) => Promise<void>;
 }
 
@@ -17,12 +22,15 @@ const NUMERIC_DTYPE = /^(U?Int|Float)\d+$/;
 
 const names = (cols: ColumnProfile[]) => cols.map((c) => c.name);
 
-export function ManualBuilder({ profile, onGenerate }: Props) {
-  const [type, setType] = useState<ChartType>("bar");
-  const [x, setX] = useState("");
-  const [y, setY] = useState("");
-  const [group, setGroup] = useState("");
-  const [agg, setAgg] = useState("");
+export function ManualBuilder({ profile, form, onField, onGenerate }: Props) {
+  // same names and setter semantics as the former useState pairs (value or
+  // updater), backed by the store; the logic below is unchanged
+  const { type, x, y, group, agg } = form;
+  const setType = (v: FieldUpdate<string>) => onField("type", v);
+  const setX = (v: FieldUpdate<string>) => onField("x", v);
+  const setY = (v: FieldUpdate<string>) => onField("y", v);
+  const setGroup = (v: FieldUpdate<string>) => onField("group", v);
+  const setAgg = (v: FieldUpdate<string>) => onField("agg", v);
   const [busy, setBusy] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
 
