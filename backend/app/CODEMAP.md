@@ -21,8 +21,8 @@ generated_at: 2026-09-15
 | `datasets/` | API | charts, config, serialization | Routes, loader, store. |
 | `profiling/` | Profiling | serialization | Typing, stats, quality, evidence L1/L2, `DatasetProfile`. |
 | `charts/` | Recommendation / Render | profiling | ChartSpec, rules, confidence, aggregation. |
-| `llm/` | LLM | charts, profiling | Prompt/provider/service merge layer. |
-| `probes/` | Probes | charts, profiling | Targeted validation tests (17.2; not yet routed). |
+| `llm/` | LLM | charts, probes, profiling | Two-stage hypothesis → coverage → probe → wording workflow; merge with rules. |
+| `probes/` | Probes | charts, profiling | Targeted validation tests (17.2), called by `llm/service.py`. |
 
 ## Key Exports
 

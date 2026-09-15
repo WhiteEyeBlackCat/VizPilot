@@ -3,7 +3,7 @@ mode: learning
 generated_at: 2026-09-15
 ---
 
-> pytest suite (535 tests on main): one module per backend concern plus HTTP tests via TestClient; `data/` holds small loader fixtures (run `data/make_fixtures.py` to regenerate).
+> pytest suite (591 tests on main): one module per backend concern plus HTTP tests via TestClient; `data/` holds small loader fixtures (run `data/make_fixtures.py` to regenerate).
 
 ## Task Guide
 
@@ -13,6 +13,8 @@ generated_at: 2026-09-15
 | End-to-end recommendation quality assertions on synthetic frames | Tests | `test_recommendation_quality.py` | `test_rules.py` |
 | HTTP contract (upload, 422 shapes, render) | Tests | `test_upload.py`, `test_render.py`, `test_spec.py` | `../app/datasets/router.py` |
 | LLM merge / insight state machine | Tests | `test_llm_service.py`, `test_llm_provider.py` | `conftest.py` |
+| Two-stage workflow: gate, coverage, probes, LLM #2 trigger, wording gate | Tests | `test_llm_workflow.py` (`TwoStageFake`, `_planted`, `_h`) | `test_probes.py` |
+| Planted end-to-end scenarios with known right answers (sales formula, hour_like, noise, tiny, hallucination) | Tests | `test_insight_benchmark.py` | `test_llm_workflow.py`, `test_recommendation_quality.py` |
 
 ## Files
 
@@ -23,7 +25,7 @@ generated_at: 2026-09-15
 | `test_evidence.py` (43), `test_layer2.py` (31), `test_probes.py` (25) | Tests | Evidence L1/L2, probe engine. |
 | `test_rules.py` (29), `test_confidence.py` (25), `test_spec.py` (34), `test_recommendation_quality.py` (17) | Tests | Recommendation engine. |
 | `test_render.py` (35), `test_upload.py` (22), `test_loader.py` (12) | Tests | Render + API + loader. |
-| `test_llm_service.py` (23), `test_llm_provider.py` (16) | Tests | LLM layer. |
+| `test_llm_service.py` (26), `test_llm_provider.py` (20), `test_llm_workflow.py` (32), `test_insight_benchmark.py` (8) | Tests | LLM layer: merge, prompts/provider, two-stage workflow, insight benchmark. |
 | `data/` | Tests | csv/xlsx/parquet fixtures incl. corrupt/empty/latin1/nan_inf. |
 
 Targeted run: `cd backend && .venv/bin/pytest tests/test_rules.py -q`. Full: `.venv/bin/pytest tests -q` (~1–2 min).
