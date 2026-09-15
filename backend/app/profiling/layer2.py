@@ -66,10 +66,17 @@ BIMODALITY_THRESHOLD = 0.555  # Sarle's bimodality coefficient of the uniform di
 PEAK_MIN_SHARE = 0.10  # a histogram peak must hold at least this share of rows
 VALLEY_MAX_RATIO = 0.6  # ...and the valley between two peaks at most this share of the lower peak
 SKEW_SYMMETRIC = 0.5  # |skewness| below this is "symmetric"
-MULTIMODAL_MIN_UNIQUE = 2 * DIST_BINS  # a handful of discrete values is not "multimodal"
+# a column with few distinct values (a 24-level hour, a 4-level discount) is
+# discrete, and its equal-width histogram is a comb whose teeth are not modes
+MULTIMODAL_MIN_UNIQUE = 50
 
 # group summaries
 GROUP_SUMMARY_TOP = 8  # cat×num pairs by eta-squared
+# a grouping is summarised only when it explains at least this much of the
+# column (top pairs and the per-column fallback alike): below it the
+# per-group means differ by noise only (weathersit x hr 0.002, 63 sensors
+# 0.0003-0.005, sales_basic 0.0) and would just pad the prompt
+GROUP_SUMMARY_MIN_ETA = 0.01
 MAX_GROUP_SUMMARIES = 12  # ...plus one pair per otherwise uncovered numeric column
 MAX_GROUPS_LISTED = 20
 
@@ -79,6 +86,7 @@ CONDITIONAL_TOP_GROUPS = 3  # grouping columns (2..8 categories) by best eta-squ
 CONDITIONAL_TOP_NUMS = 8  # numeric columns: layer-1 slope pairs first, then by strongest correlation
 MAX_GROUP_TIME_PATTERNS = 8
 MAX_TIME_POINTS = 24  # buckets per group; coarsened first, then evenly thinned
+MIN_TIME_POINTS = 4  # a group series shorter than this (and any group under MIN_ROWS) is noise
 TIME_PATTERN_GROUP_RANGE = (2, 8)  # categories of the grouping column
 TIME_PATTERN_TOP_NUMS = 4  # per datetime column, by time effect
 TIME_PATTERN_TOP_CATS = 2  # per num, by eta-squared
@@ -91,6 +99,12 @@ NONLINEAR_MIN_X_UNIQUE = 10  # fewer distinct x values is a categorical effect, 
 MAX_NONLINEAR_COLUMNS = 20
 SHAPE_FLAT_ETA = 0.05  # binned eta-squared below this: no dependence worth a shape
 SHAPE_LINEAR_GAP = 0.05  # nonlinear_gap below this: a straight line explains it
+MONOTONE_TOLERANCE = 0.05  # a step against the trend below this share of the range is noise
+# multi_peak: interior local maxima of the bin means (normalised to the
+# series range), each at least CURVE_PEAK_MIN above the minimum, separated by
+# a valley at most CURVE_VALLEY_MAX_RATIO of the lower peak
+CURVE_PEAK_MIN = 0.10
+CURVE_VALLEY_MAX_RATIO = 0.75
 
 # change points
 MAX_CHANGE_POINTS = 8
@@ -366,7 +380,10 @@ def _group_summaries(
     effects = [
         e
         for e in sorted(layer1.cat_num, key=lambda e: (-e.eta_squared, e.cat, e.num))
-        if e.num in usable and e.n_total >= MIN_ROWS and frozenset((e.cat, e.num)) not in definitional
+        if e.num in usable
+        and e.n_total >= MIN_ROWS
+        and e.eta_squared >= GROUP_SUMMARY_MIN_ETA
+        and frozenset((e.cat, e.num)) not in definitional
     ]
     chosen = effects[:GROUP_SUMMARY_TOP]
     covered = {e.num for e in chosen}
@@ -376,7 +393,7 @@ def _group_summaries(
         if c.name in covered:
             continue
         best = next((e for e in effects if e.num == c.name), None)
-        if best is not None:
+        if best is not None and best.eta_squared >= GROUP_SUMMARY_MIN_ETA:
             chosen.append(best)
             covered.add(c.name)
     results = []
@@ -640,14 +657,22 @@ def _one_group_time_pattern(
     keep = set(_thin_indices(len(buckets), MAX_TIME_POINTS))
     kept = {b for i, b in enumerate(buckets) if i in keep}
     series: dict[str, list[TimeSeriesPoint]] = {}
-    n_total = 0
+    group_rows: dict[str, int] = {}
     for r in agg.iter_rows(named=True):
-        n_total += int(r["n"])
+        key = str(r[cat])
+        group_rows[key] = group_rows.get(key, 0) + int(r["n"])
         if r[_BIN] not in kept or r["mean"] is None:
             continue
-        series.setdefault(str(r[cat]), []).append(
+        series.setdefault(key, []).append(
             TimeSeriesPoint(bucket=r[_BIN].isoformat(), mean=float(r["mean"]), n=int(r["n"]))
         )
+    # a group with too few rows, or whose series is a couple of points, is
+    # noise that would only pad the prompt (stage 17.1b)
+    series = {
+        key: points
+        for key, points in series.items()
+        if group_rows.get(key, 0) >= MIN_ROWS and len(points) >= MIN_TIME_POINTS
+    }
     if len(series) < 2:
         return None
     return GroupTimePattern(
@@ -656,7 +681,7 @@ def _one_group_time_pattern(
         group=cat,
         bucket=bucket,
         series=dict(sorted(series.items())),
-        n_total=n_total,
+        n_total=sum(group_rows[key] for key in series),
     )
 
 
@@ -687,16 +712,19 @@ def _nonlinear(
     uniques = data.select(pl.col(n).n_unique().alias(n) for n in names).row(0, named=True)
     pearson = _pearson_index(correlations)
 
-    results = []
+    # one lazy query per x (rank -> equal-frequency bin -> one group_by), all
+    # collected in a single call so polars runs them in parallel (17.1b)
+    queries: list[tuple[str, list[str], pl.LazyFrame]] = []
+    lazy = data.lazy()
     for x in names:
         if counts[x] < NONLINEAR_MIN_ROWS or uniques[x] < NONLINEAR_MIN_X_UNIQUE:
             continue
         ys = [y for y in names if y != x and frozenset((x, y)) not in definitional]
         if not ys:
             continue
-        xs = data.filter(pl.col(x).is_not_null()).select(x, *ys)
+        xs = lazy.filter(pl.col(x).is_not_null()).select(x, *ys)
         binned = xs.with_columns(
-            ((pl.col(x).rank(method="average") - 1) * NONLINEAR_BINS / xs.height)
+            ((pl.col(x).rank(method="average") - 1) * NONLINEAR_BINS / counts[x])
             .floor()
             .clip(0, NONLINEAR_BINS - 1)
             .cast(pl.Int32)
@@ -710,7 +738,13 @@ def _nonlinear(
                 col.mean().alias(f"mean:{y}"),
                 ((col - col.mean()) ** 2).sum().alias(f"ssw:{y}"),
             ]
-        per_bin = binned.group_by(_BIN).agg(aggs).sort(_BIN)
+        queries.append((x, ys, binned.group_by(_BIN).agg(aggs).sort(_BIN)))
+    if not queries:
+        return []
+    collected = pl.collect_all([q for _, _, q in queries])
+
+    results = []
+    for (x, ys, _), per_bin in zip(queries, collected):
         rows = list(per_bin.iter_rows(named=True))
         for y in ys:
             bins = [
@@ -784,8 +818,43 @@ def _binned_eta(bins: list[NonlinearBin], ssw: list[float]) -> float | None:
 
 
 def _is_monotone(means: list[float]) -> bool:
+    """Monotone up to noise: a step against the trend smaller than
+    MONOTONE_TOLERANCE of the series range does not break monotonicity."""
+    if len(means) < 2:
+        return True
+    slack = MONOTONE_TOLERANCE * (max(means) - min(means))
     diffs = [b - a for a, b in zip(means, means[1:])]
-    return all(d >= 0 for d in diffs) or all(d <= 0 for d in diffs)
+    return all(d >= -slack for d in diffs) or all(d <= slack for d in diffs)
+
+
+def _count_curve_peaks(means: list[float]) -> int:
+    """Separated INTERIOR peaks of a bin-mean curve (the endpoints of a U or
+    a monotone curve are never peaks): means normalised to [0, 1], a peak is
+    a local maximum at least CURVE_PEAK_MIN above the minimum, and two peaks
+    stay separate only when the valley between them drops to at most
+    CURVE_VALLEY_MAX_RATIO of the lower one."""
+    if len(means) < 3:
+        return 0
+    lo, hi = min(means), max(means)
+    if hi <= lo:
+        return 0
+    norm = [(m - lo) / (hi - lo) for m in means]
+    peaks = [
+        i
+        for i in range(1, len(norm) - 1)
+        if norm[i] > norm[i - 1] and norm[i] >= norm[i + 1] and norm[i] >= CURVE_PEAK_MIN
+    ]
+    if len(peaks) < 2:
+        return len(peaks)
+    merged = [peaks[0]]
+    for p in peaks[1:]:
+        last = merged[-1]
+        valley = min(norm[last : p + 1])
+        if valley <= CURVE_VALLEY_MAX_RATIO * min(norm[last], norm[p]):
+            merged.append(p)
+        elif norm[p] > norm[last]:
+            merged[-1] = p
+    return len(merged)
 
 
 def _curve_shape(eta: float, gap: float, monotone: bool, means: list[float]) -> str:
@@ -795,6 +864,8 @@ def _curve_shape(eta: float, gap: float, monotone: bool, means: list[float]) -> 
         return "linear"
     if monotone:
         return "monotone_nonlinear"
+    if _count_curve_peaks(means) >= 2:
+        return "multi_peak"
     curvature, vertex = _quadratic_fit(means)
     interior = 0 < vertex < len(means) - 1
     if curvature > 0 and interior:
@@ -862,6 +933,8 @@ def _change_points(
             k, before, after, effect = found
             std = column_std[n] or 0.0
             diff_sd = abs(after - before) / std if std > 0 else 0.0
+            flagged = effect >= CHANGE_FLAG_EFFECT and diff_sd >= CHANGE_FLAG_DIFF_SD
+            strength = "strong" if flagged else "weak" if effect >= CHANGE_FLAG_EFFECT else "none"
             results.append(
                 ChangePoint(
                     datetime_col=dt.name,
@@ -875,7 +948,8 @@ def _change_points(
                     diff_sd=round(diff_sd, 6),
                     n_before=sum(p[2] for p in points[:k]),
                     n_after=sum(p[2] for p in points[k:]),
-                    flagged=effect >= CHANGE_FLAG_EFFECT and diff_sd >= CHANGE_FLAG_DIFF_SD,
+                    flagged=flagged,
+                    strength=strength,
                 )
             )
     results.sort(key=lambda c: (-c.effect_size, c.datetime_col, c.num))
