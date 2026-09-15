@@ -82,7 +82,9 @@ function variables(spec: ChartSpec): string {
   return parts.join(" · ") || "—";
 }
 
-const CARD_GRID = "grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3";
+// columns follow the available width (the cards live in a half-width pane
+// since stage 15), not the viewport
+const CARD_GRID = "grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(250px,1fr))]";
 
 export function Recommendations({ recs, aiPending, onGenerate }: Props) {
   const [busyPriority, setBusyPriority] = useState<number | null>(null);
@@ -188,7 +190,7 @@ export function Recommendations({ recs, aiPending, onGenerate }: Props) {
 
   const title = (
     <span className="flex items-center gap-2">
-      C. 推薦圖表
+      推薦圖表
       {aiPending && (
         <Badge variant="accent" className="animate-pulse font-normal">
           <Sparkles className="mr-1 h-3 w-3" />

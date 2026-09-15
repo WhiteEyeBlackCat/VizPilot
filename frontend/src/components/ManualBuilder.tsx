@@ -123,7 +123,7 @@ export function ManualBuilder({ profile, onGenerate }: Props) {
   };
 
   return (
-    <SectionCard title="D. 手動建圖">
+    <SectionCard title="手動建圖">
       <div className="flex flex-wrap items-end gap-3">
         <FieldSelect
           label="圖表類型"

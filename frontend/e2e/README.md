@@ -1,10 +1,13 @@
 # Frontend E2E (real backend, real files, headless Chromium)
 
 `npm run e2e -- --tag <name>` drives the built SPA at `http://localhost:8100/`
-through the real API: uploads files from `dataset/`, reads the overview and
-recommendations, generates all six chart types through the manual builder,
-checks the `display_range` note (outliers.csv) and confidence warning chips
-(tiny_dataset.csv). Screenshots land in `e2e/screenshots/<tag>/` (git-ignored)
+through the real API: uploads files from `dataset/` (header upload button),
+reads the overview tab and the recommendations tab, generates all six chart
+types through the manual-builder tab, walks the shared plots pane (◀ ▶,
+thumbnail strip, remove, enlarge dialog, `data-count` / `data-current`),
+checks the stacked layout at 800px, the `display_range` note (outliers.csv),
+confidence warning chips (tiny_dataset.csv) and the derived-column demotion
+(sales_basic.csv). Screenshots land in `e2e/screenshots/<tag>/` (git-ignored)
 and a JSON summary is printed at the end (`[e2e] SUMMARY …`); exit code is
 non-zero on a fatal step or any page error.
 

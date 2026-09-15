@@ -1,10 +1,12 @@
-import { useRef, useState, type DragEvent } from "react";
+import { Upload } from "lucide-react";
+import { useCallback, useRef, useState, type DragEvent } from "react";
 
 import { api, ApiError } from "../api";
 import type { DatasetMeta } from "../types";
 import { ErrorList } from "./ErrorList";
 import { SectionCard } from "./SectionCard";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Select,
   SelectContent,
@@ -14,39 +16,38 @@ import {
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 
-interface Props {
+/** Upload state shared by the header button and the overview drop zone. */
+export function useUploader(onUploaded: (meta: DatasetMeta) => void) {
+  const [busy, setBusy] = useState(false);
+  const [errors, setErrors] = useState<string[]>([]);
+  const upload = useCallback(
+    async (file: File) => {
+      setBusy(true);
+      setErrors([]);
+      try {
+        onUploaded(await api.upload(file));
+      } catch (e) {
+        setErrors(e instanceof ApiError ? e.errors : [String(e)]);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [onUploaded],
+  );
+  return { busy, errors, upload };
+}
+
+const ACCEPT = ".csv,.xlsx,.parquet";
+
+interface SwitcherProps {
   datasets: DatasetMeta[];
   current: DatasetMeta | null;
-  onUploaded: (meta: DatasetMeta) => void;
   onSelect: (meta: DatasetMeta) => void;
 }
 
-export function UploadPanel({ datasets, current, onUploaded, onSelect }: Props) {
-  const [busy, setBusy] = useState(false);
-  const [errors, setErrors] = useState<string[]>([]);
-  const [dragging, setDragging] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  const upload = async (file: File) => {
-    setBusy(true);
-    setErrors([]);
-    try {
-      onUploaded(await api.upload(file));
-    } catch (e) {
-      setErrors(e instanceof ApiError ? e.errors : [String(e)]);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const onDrop = (e: DragEvent) => {
-    e.preventDefault();
-    setDragging(false);
-    const file = e.dataTransfer.files?.[0];
-    if (file) void upload(file);
-  };
-
-  const switcher = datasets.length > 0 && (
+export function DatasetSwitcher({ datasets, current, onSelect }: SwitcherProps) {
+  if (datasets.length === 0) return null;
+  return (
     <Select
       value={current?.dataset_id ?? ""}
       onValueChange={(id) => {
@@ -66,9 +67,59 @@ export function UploadPanel({ datasets, current, onUploaded, onSelect }: Props) 
       </SelectContent>
     </Select>
   );
+}
+
+interface ButtonProps {
+  busy: boolean;
+  onFile: (file: File) => void;
+}
+
+/** Header upload button: a hidden file input behind a shadcn Button. */
+export function UploadButton({ busy, onFile }: ButtonProps) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  return (
+    <>
+      <Button size="sm" className="h-8" disabled={busy} onClick={() => inputRef.current?.click()}>
+        <Upload className="mr-1.5 h-3.5 w-3.5" />
+        {busy ? "上傳中…" : "上傳"}
+      </Button>
+      <input
+        ref={inputRef}
+        type="file"
+        accept={ACCEPT}
+        className="hidden"
+        aria-label="上傳資料集檔案"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) onFile(file);
+          e.target.value = "";
+        }}
+      />
+    </>
+  );
+}
+
+interface PanelProps {
+  current: DatasetMeta | null;
+  busy: boolean;
+  errors: string[];
+  onFile: (file: File) => void;
+}
+
+/** Overview-page drop zone plus the current dataset's column chips. */
+export function UploadPanel({ current, busy, errors, onFile }: PanelProps) {
+  const [dragging, setDragging] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const onDrop = (e: DragEvent) => {
+    e.preventDefault();
+    setDragging(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) onFile(file);
+  };
 
   return (
-    <SectionCard title="A. 上傳資料集" aside={switcher}>
+    <SectionCard title="上傳資料集">
       <div
         className={cn(
           "flex cursor-pointer flex-col items-center justify-center rounded-md border-2 border-dashed p-6 text-sm transition-colors",
@@ -95,11 +146,11 @@ export function UploadPanel({ datasets, current, onUploaded, onSelect }: Props) 
         <input
           ref={inputRef}
           type="file"
-          accept=".csv,.xlsx,.parquet"
+          accept={ACCEPT}
           className="hidden"
           onChange={(e) => {
             const file = e.target.files?.[0];
-            if (file) void upload(file);
+            if (file) onFile(file);
             e.target.value = "";
           }}
         />
