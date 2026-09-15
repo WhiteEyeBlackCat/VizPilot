@@ -129,9 +129,27 @@ def test_group_summary_reports_per_group_stats_and_effect() -> None:
     assert summary.eta_squared > 0.4
 
 
-def test_group_summary_covers_every_numeric_column() -> None:
-    out = _l2(_grouped_df(shift=3.0))
-    assert {s.num for s in out.group_summaries} == {"v", "noise"}
+def test_group_summary_fallback_needs_a_minimal_effect() -> None:
+    # every numeric column gets its best grouping ONLY when that grouping
+    # explains at least GROUP_SUMMARY_MIN_ETA (17.1b): a pure-noise column
+    # against the same 6 groups is left out, a small real shift is kept
+    rng = random.Random(30)
+    n = 6000
+    groups = ["a", "b", "c", "d", "e", "f"]
+    cat = [groups[i % 6] for i in range(n)]
+    df = pl.DataFrame(
+        {
+            "g": cat,
+            "v": [rng.gauss(0, 1) + (3.0 if cat[i] == "f" else 0.0) for i in range(n)],
+            "small": [rng.gauss(0, 1) + (0.4 if cat[i] == "f" else 0.0) for i in range(n)],  # eta ~ 0.02
+            "noise": [rng.gauss(0, 1) for _ in range(n)],
+        }
+    )
+    profile = _profile(df)
+    eta = {(e.cat, e.num): e.eta_squared for e in profile.evidence.cat_num}
+    assert eta[("g", "noise")] < layer2.GROUP_SUMMARY_MIN_ETA
+    assert eta[("g", "small")] >= layer2.GROUP_SUMMARY_MIN_ETA
+    assert {s.num for s in profile.evidence.layer2.group_summaries} == {"v", "small"}
 
 
 def test_subgroup_anomaly_detected_and_absent_without_shift() -> None:
@@ -281,6 +299,41 @@ def test_nonlinear_shapes_and_ranking() -> None:
     assert out.nonlinear[-1].shape == "linear"
 
 
+def test_nonlinear_multi_peak_is_separated_from_u_shapes() -> None:
+    # two humps (a commuting profile) vs one hump vs a U: only the first is multi_peak
+    rng = random.Random(31)
+    n = 3000
+    x = [rng.uniform(0, 24) for _ in range(n)]
+
+    def humps(v: float) -> float:
+        return 5 * math.exp(-((v - 8) ** 2) / 2) + 6 * math.exp(-((v - 18) ** 2) / 2)
+
+    df = pl.DataFrame(
+        {
+            "x": x,
+            "two": [humps(v) + rng.gauss(0, 0.3) for v in x],
+            "one": [6 * math.exp(-((v - 12) ** 2) / 8) + rng.gauss(0, 0.3) for v in x],
+            "u": [(v - 12) ** 2 / 10 + rng.gauss(0, 0.3) for v in x],
+        }
+    )
+    by = {s.y: s for s in _l2(df).nonlinear if s.x == "x"}
+    assert by["two"].shape == "multi_peak"
+    assert by["one"].shape == "inverted_u"
+    assert by["u"].shape == "u_shape"
+    # the peak counter itself: endpoints never count, a shallow dip does not split a hill
+    assert layer2._count_curve_peaks([5, 3, 2, 1, 2, 3, 5]) == 0  # U
+    assert layer2._count_curve_peaks([0, 3, 5, 3, 0, 3, 6, 3, 0]) == 2
+    assert layer2._count_curve_peaks([0, 3, 5, 4.6, 5, 3, 0]) == 1  # dip of 8%: one hill
+    assert layer2._count_curve_peaks([0, 1, 2, 3, 4, 5, 6]) == 0  # monotone
+
+
+def test_monotone_tolerates_small_noise_steps() -> None:
+    assert layer2._is_monotone([0, 1, 2, 3, 4]) is True
+    assert layer2._is_monotone([0, 1, 2, 1.9, 4]) is True  # a 2.5%-of-range dip is noise
+    assert layer2._is_monotone([0, 1, 2, 1.0, 4]) is False  # a 25% drop is not
+    assert layer2._is_monotone([4, 3, 2, 2.1, 0]) is True
+
+
 def test_nonlinear_needs_enough_rows_and_distinct_x() -> None:
     rng = random.Random(10)
     small = pl.DataFrame({"x": [rng.uniform(-3, 3) for _ in range(80)]}).with_columns(
@@ -340,6 +393,22 @@ def test_change_point_found_at_the_step_and_not_on_stationary_series() -> None:
     assert cp.n_before + cp.n_after == 400
 
     assert by["stationary"].flagged is False
+    assert cp.strength == "strong"
+    assert by["stationary"].strength == "none"
+
+
+def test_change_point_clear_but_small_is_graded_weak() -> None:
+    # a step that is unmistakable against the bucket-mean noise but tiny in
+    # data units (0.15 column SDs): effect_size >= 1.5, diff_sd < 0.3 -> "weak"
+    rng = random.Random(12)
+    n = 8000  # hourly rows over ~11 months: ~720 rows per monthly bucket
+    level = [rng.gauss(0, 1) + (0.2 if i >= n // 2 else 0.0) for i in range(n)]
+    df = pl.DataFrame({"day": _dates(n, step=timedelta(hours=1)), "level": level})
+    cp = next(c for c in _l2(df).change_points if c.num == "level")
+    assert cp.effect_size >= layer2.CHANGE_FLAG_EFFECT, cp
+    assert cp.diff_sd < layer2.CHANGE_FLAG_DIFF_SD
+    assert cp.flagged is False
+    assert cp.strength == "weak"
 
 
 def test_change_point_needs_enough_buckets() -> None:
@@ -363,6 +432,31 @@ def test_group_time_pattern_series_per_group() -> None:
     assert mean_b - mean_a == pytest.approx(4.0, abs=1.0)
     buckets = [p.bucket for p in pattern.series["a"]]
     assert buckets == sorted(buckets)
+
+
+def test_group_time_pattern_drops_tiny_groups_and_short_series() -> None:
+    # 120 daily rows: group "a" 100 rows, "b" 15 rows (< MIN_ROWS), "c" 5 rows
+    # spread over 3 days (< MIN_TIME_POINTS) -> only groups with substance remain
+    rng = random.Random(13)
+    n_days = 120
+    g = ["a"] * 100 + ["b"] * 15 + ["c"] * 5
+    df = pl.DataFrame(
+        {
+            "day": _dates(n_days),
+            "level": [rng.gauss(0, 1) + (2.0 if g[i] == "b" else 0.0) for i in range(n_days)],
+            "g": g,
+            "h": [["p", "q"][i % 2] for i in range(n_days)],
+        }
+    )
+    out = _l2(df)
+    for p in out.group_time_patterns:
+        for key, points in p.series.items():
+            assert len(points) >= layer2.MIN_TIME_POINTS
+            assert sum(pt.n for pt in points) <= p.n_total
+        if p.group == "g":
+            assert "b" not in p.series and "c" not in p.series
+    # a pattern with fewer than two surviving groups is dropped entirely
+    assert all(len(p.series) >= 2 for p in out.group_time_patterns)
 
 
 def test_thin_indices_are_even_and_bounded() -> None:
@@ -401,6 +495,84 @@ def test_layer1_and_rules_unchanged_by_layer2() -> None:
     assert standalone.model_dump(exclude={"layer2"}) == profile.evidence.model_dump(exclude={"layer2"})
 
 
+def _assert_close(a, b, tol: float = 1e-6) -> None:
+    if isinstance(a, dict):
+        assert isinstance(b, dict) and a.keys() == b.keys()
+        for key in a:
+            _assert_close(a[key], b[key], tol)
+    elif isinstance(a, list):
+        assert isinstance(b, list) and len(a) == len(b)
+        for x, y in zip(a, b):
+            _assert_close(x, y, tol)
+    elif isinstance(a, float) and isinstance(b, float):
+        assert a == pytest.approx(b, rel=tol, abs=tol)
+    else:
+        assert a == b
+
+
+def test_layer2_structure_survives_row_shuffling() -> None:
+    # row order only changes floating-point summation order: every label,
+    # count, shape and ordering is identical and every number agrees to 1e-6
+    df = _curve_df().with_columns(
+        pl.Series("g", [["a", "b", "c"][i % 3] for i in range(1500)]),
+        pl.Series("day", _dates(1500)),
+    )
+    ordered = _profile(df).evidence.layer2.model_dump()
+    shuffled = _profile(df.sample(fraction=1.0, shuffle=True, seed=5)).evidence.layer2.model_dump()
+    _assert_close(ordered, shuffled)
+
+
+def test_layer2_counts_exclude_null_and_non_finite_rows() -> None:
+    rng = random.Random(14)
+    n = 600
+    g = [["a", "b", "c"][i % 3] for i in range(n)]
+    x = [rng.uniform(0, 10) for _ in range(n)]
+    v = [x[i] ** 2 + (20.0 if g[i] == "c" else 0.0) + rng.gauss(0, 1) for i in range(n)]
+    v[0] = None
+    v[1] = float("nan")
+    v[2] = float("inf")
+    v[3] = float("-inf")
+    df = pl.DataFrame({"g": g, "x": x, "v": v, "day": _dates(n)})
+    out = _l2(df)
+    dist = next(d for d in out.distributions if d.column == "v")
+    assert dist.n == n - 4
+    summary = next(s for s in out.group_summaries if s.num == "v")
+    assert summary.n_total == n - 4
+    signal = next(s for s in out.nonlinear if {s.x, s.y} == {"x", "v"})
+    assert signal.n == n - 4
+    cp = next(c for c in out.change_points if c.num == "v")
+    assert cp.n_before + cp.n_after == n - 4
+
+
+def test_layer2_respects_every_cap_and_skips_id_columns() -> None:
+    rng = random.Random(15)
+    n = 1200
+    frame: dict = {"record_id": list(range(1, n + 1))}  # identifier: never summarised
+    for i in range(12):  # 12 independent U-shaped pairs so the nonlinear cap binds
+        base = [rng.uniform(0, 10) for _ in range(n)]
+        frame[f"b{i:02d}"] = base
+        frame[f"c{i:02d}"] = [(b - 5) ** 2 + rng.gauss(0, 1) for b in base]
+    for i in range(30):  # 30 noise columns push every cap (54 numeric > MAX_DISTRIBUTIONS)
+        frame[f"s{i:02d}"] = [rng.gauss(0, 1) for _ in range(n)]
+    for k in range(6):
+        frame[f"cat{k}"] = [f"k{(i + k) % 6}" for i in range(n)]
+    frame["day"] = _dates(n)
+    out = _l2(pl.DataFrame(frame))
+    assert len(out.distributions) <= layer2.MAX_DISTRIBUTIONS
+    assert len(out.group_summaries) <= layer2.MAX_GROUP_SUMMARIES
+    assert len(out.conditional_relationships) <= layer2.MAX_CONDITIONAL
+    assert len(out.group_time_patterns) <= layer2.MAX_GROUP_TIME_PATTERNS
+    assert len(out.nonlinear) == layer2.MAX_NONLINEAR
+    assert len(out.change_points) <= layer2.MAX_CHANGE_POINTS
+    assert len(out.subgroup_anomalies) <= layer2.MAX_ANOMALIES
+    names = {d.column for d in out.distributions}
+    names |= {s.num for s in out.group_summaries}
+    names |= {s.x for s in out.nonlinear} | {s.y for s in out.nonlinear}
+    names |= {c.num for c in out.change_points}
+    names |= {r.x for r in out.conditional_relationships} | {r.y for r in out.conditional_relationships}
+    assert "record_id" not in names
+
+
 def test_layer2_empty_on_text_only_and_tiny_frames() -> None:
     text = pl.DataFrame({"note": [f"row {i}" for i in range(50)]})
     out = _l2(text)
@@ -430,7 +602,9 @@ def test_hour_like_hourly_demand_is_a_nonlinear_signal() -> None:
     by = {(s.x, s.y): s for s in out.nonlinear}
     signal = by.get(("hr", "cnt")) or by.get(("cnt", "hr"))
     assert signal is not None, [(s.x, s.y, s.shape) for s in out.nonlinear]
-    assert signal.shape in {"inverted_u", "other", "u_shape"}
+    # the commuting double peak (17.1b): two separated interior peaks, not an inverted U
+    assert signal.shape == "multi_peak", [round(b.y_mean, 1) for b in signal.bins]
+    assert layer2._count_curve_peaks([b.y_mean for b in signal.bins]) >= 2
     assert signal.nonlinear_gap > 0.1
     # the near-duplicate atemp never appears; cnt = casual + registered never as a pair
     names = {s.x for s in out.nonlinear} | {s.y for s in out.nonlinear} | {d.column for d in out.distributions}

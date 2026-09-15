@@ -318,7 +318,12 @@ class NonlinearBin(BaseModel):
     y_mean: float
 
 
-NonlinearShape = Literal["flat", "linear", "monotone_nonlinear", "u_shape", "inverted_u", "other"]
+NonlinearShape = Literal[
+    "flat", "linear", "monotone_nonlinear", "multi_peak", "u_shape", "inverted_u", "other"
+]
+# multi_peak (stage 17.1b): >= 2 separated interior peaks in the bin means
+# (a commuting double peak), decided before the quadratic fit so it is not
+# mislabelled as an inverted U
 
 
 class NonlinearSignal(BaseModel):
@@ -359,6 +364,10 @@ class ChangePoint(BaseModel):
     n_before: int  # rows in the buckets before the split
     n_after: int
     flagged: bool  # effect_size >= CHANGE_FLAG_EFFECT and diff_sd >= CHANGE_FLAG_DIFF_SD
+    # stage 17.1b grading for the LLM workflow: "strong" = flagged; "weak" =
+    # the split is clear against bucket noise (effect_size >= CHANGE_FLAG_EFFECT)
+    # but small in data units (diff_sd < CHANGE_FLAG_DIFF_SD); "none" otherwise
+    strength: Literal["strong", "weak", "none"] = "none"
 
 
 class SubgroupAnomaly(BaseModel):
