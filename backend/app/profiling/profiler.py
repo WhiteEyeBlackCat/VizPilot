@@ -1,8 +1,10 @@
 import math
 import os
+import threading
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import polars as pl
 from pydantic import ValidationError
@@ -177,33 +179,58 @@ class ProfileService:
 
     Cached files embed profile_version: a mismatch or a payload that fails
     Pydantic validation triggers recomputation and overwrite (critique #2).
+
+    Concurrency (stage 9b): the frontend fires profile + two recommendation
+    requests right after upload, so the first miss for a dataset arrives on
+    three threadpool workers at once. A per-dataset lock makes exactly one of
+    them compute and write; the others wait and take the in-memory result.
+    The temp file carries a unique suffix so even independent writers (other
+    processes) never move each other's file out from under os.replace.
     """
 
     def __init__(self, data_dir: Path, sample_threshold: int) -> None:
         self._data_dir = data_dir
         self._sample_threshold = sample_threshold
         self._cache: dict[str, DatasetProfile] = {}
+        self._lock = threading.Lock()
+        self._key_locks: dict[str, threading.Lock] = {}
 
     def get(self, dataset_id: str, df: pl.DataFrame) -> DatasetProfile:
-        if dataset_id in self._cache:
-            return self._cache[dataset_id]
+        cached = self._cache.get(dataset_id)  # hot path: no lock
+        if cached is not None:
+            return cached
+        with self._lock:
+            key_lock = self._key_locks.setdefault(dataset_id, threading.Lock())
+        with key_lock:
+            cached = self._cache.get(dataset_id)  # a concurrent miss already filled it
+            if cached is not None:
+                return cached
+            profile = self._load(dataset_id)
+            if profile is None:
+                profile = profile_dataset(df, dataset_id, self._sample_threshold)
+                self._write(dataset_id, profile)
+            self._cache[dataset_id] = profile
+            return profile
 
+    def _load(self, dataset_id: str) -> DatasetProfile | None:
         path = self._path(dataset_id)
-        if path.is_file():
-            try:
-                profile = DatasetProfile.model_validate_json(path.read_text())
-                if profile.profile_version == PROFILE_VERSION:
-                    self._cache[dataset_id] = profile
-                    return profile
-            except ValidationError:
-                pass  # stale/corrupt cache -> recompute below
+        if not path.is_file():
+            return None
+        try:
+            profile = DatasetProfile.model_validate_json(path.read_text())
+        except ValidationError:
+            return None  # stale/corrupt cache -> recompute
+        return profile if profile.profile_version == PROFILE_VERSION else None
 
-        profile = profile_dataset(df, dataset_id, self._sample_threshold)
-        tmp_path = path.with_suffix(".json.tmp")
-        tmp_path.write_text(profile.model_dump_json())
-        os.replace(tmp_path, path)
-        self._cache[dataset_id] = profile
-        return profile
+    def _write(self, dataset_id: str, profile: DatasetProfile) -> None:
+        path = self._path(dataset_id)
+        tmp_path = self._data_dir / f"{dataset_id}.profile.{uuid4().hex}.tmp"
+        try:
+            tmp_path.write_text(profile.model_dump_json())
+            os.replace(tmp_path, path)  # atomic publish
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
 
     def _path(self, dataset_id: str) -> Path:
         return self._data_dir / f"{dataset_id}.profile.json"

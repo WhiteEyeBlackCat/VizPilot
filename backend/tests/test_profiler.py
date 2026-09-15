@@ -1,4 +1,5 @@
 import json
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -239,6 +240,91 @@ def test_profile_cache_corrupt_file_recomputes(tmp_path: Path, counting_profile:
     ProfileService(tmp_path, BIG).get("a" * 32, pl.DataFrame({"v": [1.0, 2.0]}))
     assert counting_profile["n"] == 1
     assert json.loads(path.read_text())["profile_version"] == PROFILE_VERSION
+
+
+# --- ProfileService concurrency (stage 9b) -----------------------------------
+
+
+def _run_threads(targets) -> list[str]:
+    errors: list[str] = []
+
+    def wrap(fn):
+        def run() -> None:
+            try:
+                fn()
+            except Exception as exc:  # noqa: BLE001 - collected for the assertion
+                errors.append(repr(exc))
+
+        return run
+
+    threads = [threading.Thread(target=wrap(fn)) for fn in targets]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return errors
+
+
+def test_profile_service_concurrent_get_computes_once(tmp_path: Path, counting_profile: dict) -> None:
+    # the post-upload burst: profile + recs(llm=false) + recs(llm=true) all
+    # miss the cache at the same time; the original code wrote one shared
+    # .tmp and the second os.replace raised FileNotFoundError
+    df = pl.DataFrame({"v": [1.0, 2.0, 3.0, 4.0], "g": ["a", "b", "a", "b"]})
+    for rnd in range(20):
+        service = ProfileService(tmp_path / str(rnd), BIG)
+        (tmp_path / str(rnd)).mkdir()
+        results: list[DatasetProfile] = []
+        errors = _run_threads([lambda: results.append(service.get("a" * 32, df))] * 3)
+        assert errors == [], f"round {rnd}: {errors}"
+        assert len(results) == 3 and all(r is results[0] for r in results)
+        assert counting_profile["n"] == rnd + 1  # exactly one computation per round
+        assert (tmp_path / str(rnd) / f"{'a' * 32}.profile.json").is_file()
+
+
+def test_profile_service_leaves_no_tmp_files(tmp_path: Path) -> None:
+    df = pl.DataFrame({"v": [1.0, 2.0, 3.0]})
+    service = ProfileService(tmp_path, BIG)
+    assert _run_threads([lambda: service.get("b" * 32, df)] * 3) == []
+    assert list(tmp_path.glob("*.tmp")) == []
+    assert [p.name for p in tmp_path.iterdir()] == [f"{'b' * 32}.profile.json"]
+
+
+def test_profile_service_write_failure_cleans_tmp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(src, dst):  # noqa: ANN001
+        raise OSError("disk full")
+
+    monkeypatch.setattr(profiler_module.os, "replace", boom)
+    with pytest.raises(OSError, match="disk full"):
+        ProfileService(tmp_path, BIG).get("c" * 32, pl.DataFrame({"v": [1.0]}))
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_profile_service_different_datasets_do_not_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # dataset A's computation is held on a barrier until dataset B has
+    # finished: with a single global lock B would deadlock behind A
+    real = profiler_module.profile_dataset
+    b_done = threading.Event()
+
+    def gated(df: pl.DataFrame, dataset_id: str, sample_threshold: int) -> DatasetProfile:
+        if dataset_id == "a" * 32:
+            assert b_done.wait(timeout=5), "dataset B was blocked behind dataset A"
+        return real(df, dataset_id, sample_threshold)
+
+    monkeypatch.setattr(profiler_module, "profile_dataset", gated)
+    service = ProfileService(tmp_path, BIG)
+    df = pl.DataFrame({"v": [1.0, 2.0]})
+
+    def get_b() -> None:
+        service.get("b" * 32, df)
+        b_done.set()
+
+    errors = _run_threads([lambda: service.get("a" * 32, df), get_b])
+    assert errors == []
+    assert set(service._cache) == {"a" * 32, "b" * 32}
 
 
 # --- API --------------------------------------------------------------------
