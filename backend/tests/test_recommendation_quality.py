@@ -199,7 +199,10 @@ def test_monotonic_quadratic_still_recommended() -> None:
     # non-monotonic U-shapes are explicitly out of scope
     rng = random.Random(127)
     x = [rng.uniform(0.5, 3.0) for _ in range(600)]
-    df = pl.DataFrame({"x": x, "y": [v**2 for v in x]})
+    # 15% multiplicative noise (stage 14): an EXACT x^2 ranks identically to
+    # x and is now suppressed as a near-duplicate; the finding under test is
+    # the monotone non-linear relationship, which survives the noise
+    df = pl.DataFrame({"x": x, "y": [v**2 * (1 + rng.gauss(0, 0.15)) for v in x]})
     scatter = _find(_recs(df), "scatter")
     assert scatter is not None
     assert {scatter.spec.x, scatter.spec.y} == {"x", "y"}
@@ -210,7 +213,9 @@ def test_exponential_gets_nonlinear_note() -> None:
     # exp(x) drags Pearson well below Spearman (gap > 0.15) -> reason notes it
     rng = random.Random(131)
     x = [rng.uniform(0.0, 6.0) for _ in range(600)]
-    df = pl.DataFrame({"x": x, "y": [math.exp(v) for v in x]})
+    # 30% multiplicative noise keeps rho ~0.98 (below the duplicate line,
+    # stage 14) while Pearson stays far lower -> the non-linear note
+    df = pl.DataFrame({"x": x, "y": [math.exp(v) * (1 + rng.gauss(0, 0.3)) for v in x]})
     scatter = _find(_recs(df), "scatter")
     assert scatter is not None
     assert "non-linear" in scatter.spec.reason
@@ -293,7 +298,9 @@ from pathlib import Path  # noqa: E402
 
 import pytest  # noqa: E402
 
-from app.charts.rules import derived_column_warnings  # noqa: E402
+from collections import Counter  # noqa: E402
+
+from app.charts.rules import MAX_PER_Y, derived_column_warnings  # noqa: E402
 from app.datasets.loader import load_dataframe  # noqa: E402
 from app.llm.provider import DisabledProvider  # noqa: E402
 from app.llm.service import RecommendationService  # noqa: E402
@@ -354,4 +361,30 @@ def test_datasets_without_identities_are_untouched(name: str) -> None:
     assert all(w.code != "derived_relationship" for rec in recs for w in rec.warnings)
     assert all("definitional" not in rec.spec.reason for rec in recs)
     payload = RecommendationService(DisabledProvider()).get(profile, use_llm=False)
-    assert all(w["code"] not in ("derived_column", "near_copy_column") for w in payload["warnings"])
+    assert all(w["code"] not in ("derived_column", "near_duplicate_column") for w in payload["warnings"])
+    assert profile.evidence.near_duplicate_groups == []
+
+
+def test_hour_like_near_duplicate_is_suppressed_and_disclosed() -> None:
+    # stage 14: the bike-sharing shape (temp / atemp rho ~0.99, cnt = casual +
+    # registered). The duplicate never earns a chart, the pair chart cannot
+    # be top (it does not exist), the response says why.
+    profile = profile_dataset(_real_dataset("hour_like.csv"), "0" * 32, BIG)
+    groups = profile.evidence.near_duplicate_groups
+    assert [(g.representative, g.duplicates) for g in groups] == [("temp", ["atemp"])]
+    assert 0.98 <= groups[0].rho["atemp"] <= 1.0
+    recs = recommend_charts(profile)
+    assert recs
+    for rec in recs:
+        if rec.spec.type != "heatmap":
+            assert "atemp" not in (rec.spec.x, rec.spec.y, rec.spec.group_by), rec.spec
+    assert not any({rec.spec.x, rec.spec.y} == {"temp", "atemp"} for rec in recs)
+    assert any(rec.spec.y == "temp" or rec.spec.x == "temp" for rec in recs)  # the representative draws them
+    per_y = Counter(r.spec.y for r in recs if r.spec.type in ("bar", "box", "line") and r.spec.y)
+    assert all(count <= MAX_PER_Y for count in per_y.values())
+    payload = RecommendationService(DisabledProvider()).get(profile, use_llm=False)
+    codes = [(w["code"], w["meta"]["target"]) for w in payload["warnings"]]
+    assert ("near_duplicate_column", "atemp") in codes
+    assert ("derived_column", "cnt") in codes
+    message = next(w["message"] for w in payload["warnings"] if w["code"] == "near_duplicate_column")
+    assert message.startswith("atemp is a near-duplicate of temp") and "use temp only" in message

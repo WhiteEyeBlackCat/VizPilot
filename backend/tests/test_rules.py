@@ -1,3 +1,4 @@
+import math
 from collections import Counter
 from datetime import datetime, timedelta
 
@@ -22,7 +23,9 @@ def _mixed_df(n: int = 60) -> pl.DataFrame:
             "ts": [datetime(2024, 1, 1) + timedelta(days=i) for i in range(n)],
             "city": ["North", "South", "East"] * (n // 3),
             "value": [float(i) for i in range(n)],
-            "value2": [2.0 * i for i in range(n)],
+            # stage 14: a strong relationship (r ~ 0.96), deliberately NOT a
+            # near-duplicate — 2 * value would now be suppressed as a copy
+            "value2": [2.0 * i + 15 * math.sin(i) for i in range(n)],
             "value3": [float(i % 2) for i in range(n)],  # ~uncorrelated with value
             "cat25": [f"g{i % 25:02d}" for i in range(n)],
             "user_id": [f"u{i:03d}" for i in range(n)],
@@ -33,7 +36,10 @@ def _mixed_df(n: int = 60) -> pl.DataFrame:
 
 
 def _wide_df(n: int = 40) -> pl.DataFrame:
-    data = {f"n{k}": [float(i * (k + 1)) for i in range(n)] for k in range(8)}
+    # stage 14: distinct wobble per column keeps every pair below the
+    # near-duplicate threshold (max rho ~0.87) — 8 exact multiples of i
+    # would collapse into one representative
+    data = {f"n{k}": [i * (k + 1) + (k + 1) * 8 * math.sin(i * (k + 3)) for i in range(n)] for k in range(8)}
     data["ts"] = [datetime(2024, 1, 1) + timedelta(days=i) for i in range(n)]
     data["city"] = ["a", "b", "c", "d"] * (n // 4)
     return pl.DataFrame(data)
@@ -93,7 +99,7 @@ def test_count_bar_present(mixed_recs) -> None:
 
 
 def test_scatter_uses_correlation(mixed_recs) -> None:
-    _, recs = mixed_recs
+    profile, recs = mixed_recs
     scatters = [r for r in recs if r.spec.type == "scatter"]
     assert len(scatters) == 1  # only |corr(value, value2)| >= 0.3
     top = scatters[0]
@@ -101,7 +107,19 @@ def test_scatter_uses_correlation(mixed_recs) -> None:
     # stage7: grouping needs slope-heterogeneity evidence; the correlation is
     # identical inside every city group, so the scatter stays ungrouped
     assert top.spec.group_by is None
-    assert top.score == pytest.approx(0.5 + 0.4 * 1.0)
+    strength = max(abs(_corr(profile, "value", "value2")), abs(_spearman(profile, "value", "value2")))
+    assert 0.9 < strength < 0.98  # strong, below the near-duplicate line
+    assert top.score == pytest.approx(0.5 + 0.4 * strength)
+
+
+def _corr(profile, a: str, b: str) -> float:
+    c = profile.correlations
+    return c.matrix[c.columns.index(a)][c.columns.index(b)]
+
+
+def _spearman(profile, a: str, b: str) -> float:
+    c = profile.evidence.num_num_spearman
+    return c.matrix[c.columns.index(a)][c.columns.index(b)]
 
 
 def test_dedup_and_priorities(mixed_recs) -> None:
@@ -120,17 +138,20 @@ def test_higher_correlation_ranks_scatter_higher() -> None:
     df = pl.DataFrame(
         {
             "a": [float(i) for i in range(n)],
-            "b": [2.0 * i + 1 for i in range(n)],  # corr(a, b) = 1.0
+            "b": [2.0 * i + 1 + 10 * math.sin(i) for i in range(n)],  # corr(a, b) ~ 0.98, not a copy
             "c1": [100.0, 200.0, 300.0, 400.0] * (n // 4),
             "c2": [200.0, 100.0, 400.0, 300.0] * (n // 4),  # corr(c1, c2) = 0.6
         }
     )
-    recs = recommend_charts(_profile(df))
+    profile = _profile(df)
+    recs = recommend_charts(profile)
     scatters = [r for r in recs if r.spec.type == "scatter"]
     pairs = [{r.spec.x, r.spec.y} for r in scatters]
     assert pairs[0] == {"a", "b"} and {"c1", "c2"} in pairs
     strong, weak = scatters[0], scatters[pairs.index({"c1", "c2"})]
-    assert strong.score == pytest.approx(0.9)
+    ab = max(abs(_corr(profile, "a", "b")), abs(_spearman(profile, "a", "b")))
+    assert ab > 0.97
+    assert strong.score == pytest.approx(0.5 + 0.4 * ab)
     assert weak.score == pytest.approx(0.5 + 0.4 * 0.6)
     assert strong.spec.priority < weak.spec.priority
 
@@ -298,6 +319,9 @@ from app.charts.rules import (  # noqa: E402
     Recommendation,
     derived_column_warnings,
     evaluate_llm_spec,
+    MAX_PER_Y,
+    canonicalize_spec,
+    dedup_equivalent,
 )
 from app.charts.spec import ChartSpec  # noqa: E402
 
@@ -384,11 +408,119 @@ def test_derived_dataset_warning(derived_recs) -> None:
     assert "computed as unit_price × quantity" in warnings[0].message
 
 
-def test_near_copy_is_disclosed_but_not_demoted(mixed_recs) -> None:
-    # value2 = 2 * value ranks identically: the pair keeps its evidence
-    # score and tier (the transform is unknown), it just says so
+# --- stage 14: near-duplicate suppression + equivalence dedup ---------------
+
+
+def _near_dup_df(n: int = 120) -> pl.DataFrame:
+    import random
+
+    rng = random.Random(14)
+    temp = [rng.uniform(0, 30) for _ in range(n)]
+    hum = [60 - 0.8 * t + rng.gauss(0, 5) for t in temp]
+    return pl.DataFrame(
+        {
+            "ts": [datetime(2024, 1, 1) + timedelta(days=i) for i in range(n)],
+            "season": [["w", "sp", "su", "f"][(i // 30) % 4] for i in range(n)],
+            "temp": temp,
+            "atemp": [0.9 * t + rng.gauss(0, 1.1) for t in temp],  # rho ~0.99 + related name
+            "hum": hum,
+            "windspeed": [rng.uniform(0, 20) for _ in range(n)],
+        }
+    )
+
+
+@pytest.fixture(scope="module")
+def near_dup_recs():
+    profile = _profile(_near_dup_df())
+    return profile, recommend_charts(profile)
+
+
+def test_near_duplicate_group_detected(near_dup_recs) -> None:
+    profile, _ = near_dup_recs
+    groups = profile.evidence.near_duplicate_groups
+    assert [(g.representative, g.duplicates) for g in groups] == [("temp", ["atemp"])]
+    assert 0.98 <= groups[0].rho["atemp"] < 0.995  # only the name corroboration makes it a duplicate
+
+
+def test_suppressed_column_never_charted_except_heatmap(near_dup_recs) -> None:
+    _, recs = near_dup_recs
+    for rec in recs:
+        if rec.spec.type == "heatmap":
+            continue
+        assert "atemp" not in (rec.spec.x, rec.spec.y, rec.spec.group_by), rec.spec
+    assert any(r.spec.type == "heatmap" for r in recs)  # the duplication stays visible there
+    # the representative draws the charts the duplicate would have mirrored
+    assert any(r.spec.y == "temp" for r in recs)
+    assert not any(r.spec.type == "scatter" and {r.spec.x, r.spec.y} == {"temp", "atemp"} for r in recs)
+
+
+def test_near_duplicate_dataset_warning(near_dup_recs) -> None:
+    profile, _ = near_dup_recs
+    warnings = derived_column_warnings(profile)
+    assert [(w.code, w.severity, w.meta["target"], w.meta["components"]) for w in warnings] == [
+        ("near_duplicate_column", "info", "atemp", ["temp"])
+    ]
+    assert warnings[0].message.startswith("atemp is a near-duplicate of temp")
+    assert "recommendations use temp only" in warnings[0].message
+
+
+def test_canonicalize_spec_maps_duplicates_and_drops_the_pair(near_dup_recs) -> None:
+    profile, _ = near_dup_recs
+    spec = ChartSpec(title="hum vs atemp", type="scatter", x="atemp", y="hum")
+    mapped, notes = canonicalize_spec(spec, profile)
+    assert mapped is not None and (mapped.x, mapped.y) == ("temp", "hum")
+    assert mapped.title == "hum vs temp" and notes == ["atemp -> temp"]
+    assert spec.x == "atemp"  # the input is not mutated
+    # a chart of the pair collapses onto one column: nothing left to show
+    pair = ChartSpec(title="atemp vs temp", type="scatter", x="temp", y="atemp")
+    assert canonicalize_spec(pair, profile) == (None, ["atemp -> temp"])
+    untouched = ChartSpec(title="hum vs temp", type="scatter", x="temp", y="hum")
+    assert canonicalize_spec(untouched, profile) == (untouched, [])
+
+
+def test_dedup_equivalent_keeps_strongest_and_redirects(near_dup_recs) -> None:
+    profile, _ = near_dup_recs
+    strong = Recommendation(spec=ChartSpec(title="a", type="scatter", x="temp", y="hum"), score=0.8)
+    weak = Recommendation(
+        spec=ChartSpec(title="b", type="scatter", x="atemp", y="hum"), score=0.7, source="llm"
+    )
+    other = Recommendation(spec=ChartSpec(title="c", type="histogram", x="hum"), score=0.5)
+    kept, redirect = dedup_equivalent([weak, strong, other], profile)
+    assert kept == [strong, other]
+    assert redirect == {("scatter", "atemp", "hum", None): ("scatter", "temp", "hum", None)}
+    # ties go to the rules chart regardless of input order
+    tie = Recommendation(spec=ChartSpec(title="d", type="scatter", x="atemp", y="hum"), score=0.8, source="llm")
+    kept, _ = dedup_equivalent([tie, strong], profile)
+    assert kept == [strong]
+
+
+def test_per_y_cap_limits_one_measure(mixed_recs) -> None:
+    # stage 14: no column may be the y of more than MAX_PER_Y bar/box/line charts
     _, recs = mixed_recs
-    scatter = next(r for r in recs if r.spec.type == "scatter" and {r.spec.x, r.spec.y} == {"value", "value2"})
-    assert scatter.tier == "top"
-    assert scatter.spec.reason.startswith("value2 is nearly a transformed copy of value")
-    assert [(w.code, w.meta["kind"]) for w in scatter.warnings] == [("derived_relationship", "near_copy")]
+    per_y = Counter(r.spec.y for r in recs if r.spec.type in ("bar", "box", "line") and r.spec.y)
+    assert all(count <= MAX_PER_Y for count in per_y.values())
+
+
+def test_per_y_cap_frees_slots_for_other_measures() -> None:
+    # one measure with a huge group effect would otherwise fill bar + box + line
+    import random
+
+    rng = random.Random(41)
+    n = 240
+    cat = [["a", "b", "c", "d"][i % 4] for i in range(n)]
+    cat2 = [["p", "q", "r"][i % 3] for i in range(n)]
+    strong = [{"a": 0, "b": 10, "c": 20, "d": 30}[c] + rng.gauss(0, 1) for c in cat]
+    df = pl.DataFrame(
+        {
+            "ts": [datetime(2024, 1, 1) + timedelta(days=i) for i in range(n)],
+            "cat": cat,
+            "cat2": cat2,
+            "strong": strong,
+            "m1": [rng.gauss(0, 1) + (0.3 if c == "p" else 0) for c in cat2],
+            "m2": [rng.gauss(0, 1) for _ in range(n)],
+        }
+    )
+    recs = recommend_charts(_profile(df))
+    strong_y = [r for r in recs if r.spec.y == "strong" and r.spec.type in ("bar", "box", "line")]
+    assert len(strong_y) == MAX_PER_Y
+    assert any(r.spec.y in ("m1", "m2") for r in recs if r.spec.type in ("bar", "box", "line"))

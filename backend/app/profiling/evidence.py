@@ -21,6 +21,7 @@ from .models import (
     DerivedKind,
     Evidence,
     InteractionEffect,
+    NearDuplicateGroup,
     SlopeHet,
     TimeBucket,
     TimeEffect,
@@ -59,7 +60,16 @@ DERIVED_MAX_DECIMALS = 6
 # alone: y = 2x + N(0, 1) with x ~ U(0, 10) measures r = 0.985 and is a
 # finding, not a copy (calibration point: test_confidence healthy dataset)
 NEAR_COPY_MIN_RHO = 0.995
+# stage 14: a slightly weaker rank correlation still marks a duplicate when
+# the column NAMES corroborate it (temp / atemp: rho 0.989; price / price_usd).
+# Correlation alone cannot separate that case from y = 2x + N(0, 1) at
+# r = 0.985, so the name signal is required below NEAR_COPY_MIN_RHO.
+NEAR_DUP_NAMED_MIN_RHO = 0.98
 _NUMERIC_DTYPE_RE = re.compile(r"^(U?Int|Float)\d+$")
+_NAME_SPLIT_RE = re.compile(r"[^a-z]+")
+_CAMEL_RE = re.compile(r"(?<=[a-z])(?=[A-Z])")
+_NAME_MIN_TOKEN = 3  # shared token length that counts as related
+_NAME_MIN_SUBSTRING = 4  # one normalised name inside the other
 
 _BUCKET_TRUNC: dict[TimeBucket, str] = {"day": "1d", "month": "1mo", "year": "1y"}
 _COARSER: dict[TimeBucket, TimeBucket | None] = {"day": "month", "month": "year", "year": None}
@@ -75,13 +85,15 @@ def compute_evidence(
     cat_num = _cat_num_effects(df, cats, nums)
     best_eta = _best_eta_by_column(cat_num)
     spearman = _spearman_matrix(df, correlations)
+    derived = derived_columns(df, columns, correlations, spearman)
     return Evidence(
         cat_num=cat_num,
         time_effects=_time_effects(df, dts, nums),
         num_num_spearman=spearman,
         interactions=_interactions(df, cats, nums, dts, correlations, best_eta),
         slope_heterogeneity=_slope_heterogeneity(df, correlations, cats, best_eta),
-        derived_columns=derived_columns(df, columns, correlations, spearman),
+        derived_columns=derived,
+        near_duplicate_groups=near_duplicate_groups(spearman, derived, columns),
     )
 
 
@@ -515,7 +527,7 @@ def derived_columns(
     can then be missed — documented limitation)."""
     names = derived_candidates(columns)
     if len(names) < 2:
-        return _near_copies(spearman, [], names)
+        return _near_copies(spearman, [], columns)
     data = df.select(
         pl.when(pl.col(n).cast(pl.Float64).is_finite())
         .then(pl.col(n).cast(pl.Float64))
@@ -526,7 +538,7 @@ def derived_columns(
     if data.height > DERIVED_MAX_ROWS:
         data = data.sample(DERIVED_MAX_ROWS, seed=DERIVED_SAMPLE_SEED)
     if data.height < DERIVED_MIN_ROWS:
-        return _near_copies(spearman, [], names)
+        return _near_copies(spearman, [], columns)
 
     stats = _column_stats(data, names)
     unit_interval = {
@@ -546,7 +558,7 @@ def derived_columns(
         if found is not None:
             results.append(found)
     results = _dedup_rearrangements(results, names)
-    return results + _near_copies(spearman, results, names)
+    return results + _near_copies(spearman, results, columns)
 
 
 def _dedup_rearrangements(results: list[DerivedColumn], names: list[str]) -> list[DerivedColumn]:
@@ -713,33 +725,125 @@ def _best_form(data: pl.DataFrame, target: str, decimals: int, forms: list[_Form
 
 
 def _near_copies(
-    spearman: Correlations | None, found: list[DerivedColumn], names: list[str]
+    spearman: Correlations | None, found: list[DerivedColumn], columns: list[ColumnProfile]
 ) -> list[DerivedColumn]:
-    """|rho| >= 0.98 pairs among the numeric columns, one entry per pair
-    (target = the later column), skipping pairs an identity already explains."""
-    if spearman is None:
-        return []
-    explained = {frozenset((d.target, c)) for d in found for c in d.components}
-    counts = spearman.pair_counts
+    """One near_copy entry per suppressed duplicate (target = duplicate,
+    component = its group's representative), derived from the stage 14
+    groups so the disclosure and the suppression agree by construction."""
     out = []
-    cols = spearman.columns
-    for i, a in enumerate(cols):
-        for j in range(i + 1, len(cols)):
-            b = cols[j]
-            rho = spearman.matrix[i][j]
-            n = counts[i][j] if counts is not None else DERIVED_MIN_ROWS
-            if rho is None or abs(rho) < NEAR_COPY_MIN_RHO or n < DERIVED_MIN_ROWS:
-                continue
-            if frozenset((a, b)) in explained:
-                continue
+    for group in near_duplicate_groups(spearman, found, columns):
+        for dup in group.duplicates:
+            rho = group.rho[dup]
             out.append(
                 DerivedColumn(
-                    target=b,
-                    components=[a],
-                    formula=f"≈ monotone transform of {a} (rank correlation {rho:.3f})",
+                    target=dup,
+                    components=[group.representative],
+                    formula=f"≈ monotone transform of {group.representative} (rank correlation {rho:.3f})",
                     kind="near_copy",
-                    match_ratio=abs(rho),
-                    n=n,
+                    match_ratio=rho,
+                    n=group.n,
                 )
             )
     return out
+
+
+def _normalised_name(name: str) -> str:
+    return _NAME_SPLIT_RE.sub("", _CAMEL_RE.sub("_", name).lower())
+
+
+def _name_tokens(name: str) -> set[str]:
+    return {t for t in _NAME_SPLIT_RE.split(_CAMEL_RE.sub("_", name).lower()) if len(t) >= _NAME_MIN_TOKEN}
+
+
+def names_related(a: str, b: str) -> bool:
+    """temp / atemp, price / price_usd, tempC / temp_f: one normalised name
+    inside the other (>= 4 chars) or a shared alphabetic token (>= 3 chars).
+    Digits and separators never count, so s01 / s02 are unrelated."""
+    na, nb = _normalised_name(a), _normalised_name(b)
+    if len(na) >= _NAME_MIN_SUBSTRING and len(nb) >= _NAME_MIN_SUBSTRING and (na in nb or nb in na):
+        return True
+    return bool(_name_tokens(a) & _name_tokens(b))
+
+
+def near_duplicate_groups(
+    spearman: Correlations | None, found: list[DerivedColumn], columns: list[ColumnProfile]
+) -> list[NearDuplicateGroup]:
+    """Connected components of near-duplicate pairs among the numeric columns
+    (stage 14). A pair qualifies with |rho| >= NEAR_COPY_MIN_RHO, or with
+    |rho| >= NEAR_DUP_NAMED_MIN_RHO when names_related; >= DERIVED_MIN_ROWS
+    shared rows; pairs an identity already explains are skipped. The
+    representative is the member with the fewest missing values, then the
+    shorter name, then column order; rho maps each duplicate to |Spearman|
+    with the representative (falling back to the pair that linked it)."""
+    if spearman is None:
+        return []
+    by_name = {c.name: c for c in columns}
+    eligible = {n for n in derived_candidates(columns)}
+    explained = {frozenset((d.target, c)) for d in found if d.kind != "near_copy" for c in d.components}
+    counts = spearman.pair_counts
+    cols = spearman.columns
+    order = {name: i for i, name in enumerate(cols)}
+    parent: dict[str, str] = {}
+    pair_rho: dict[frozenset[str], float] = {}
+    pair_n: dict[frozenset[str], int] = {}
+
+    def find(x: str) -> str:
+        while parent.get(x, x) != x:
+            x = parent[x]
+        return x
+
+    for i, a in enumerate(cols):
+        for j in range(i + 1, len(cols)):
+            b = cols[j]
+            if a not in eligible or b not in eligible:
+                continue
+            rho = spearman.matrix[i][j]
+            n = counts[i][j] if counts is not None else DERIVED_MIN_ROWS
+            if rho is None or n < DERIVED_MIN_ROWS:
+                continue
+            strength = abs(rho)
+            if strength < NEAR_COPY_MIN_RHO and not (
+                strength >= NEAR_DUP_NAMED_MIN_RHO and names_related(a, b)
+            ):
+                continue
+            key = frozenset((a, b))
+            if key in explained:
+                continue
+            pair_rho[key] = strength
+            pair_n[key] = n
+            parent.setdefault(a, a)
+            parent.setdefault(b, b)
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[rb] = ra
+
+    members: dict[str, list[str]] = {}
+    for name in parent:
+        members.setdefault(find(name), []).append(name)
+
+    groups = []
+    for group in members.values():
+        group.sort(key=lambda n: order[n])
+        rep = min(group, key=lambda n: (by_name[n].missing_count, len(n), order[n]))
+        dups = [n for n in group if n != rep]
+        rho: dict[str, float] = {}
+        n_min = None
+        for dup in dups:
+            direct = pair_rho.get(frozenset((dup, rep)))
+            if direct is None:
+                # linked through another member: report the strongest link
+                direct = max(v for k, v in pair_rho.items() if dup in k)
+            rho[dup] = direct
+            n_pair = pair_n.get(frozenset((dup, rep)))
+            if n_pair is not None:
+                n_min = n_pair if n_min is None else min(n_min, n_pair)
+        groups.append(
+            NearDuplicateGroup(
+                representative=rep,
+                duplicates=dups,
+                rho=rho,
+                n=n_min if n_min is not None else min(pair_n[k] for k in pair_n if any(m in k for m in group)),
+            )
+        )
+    groups.sort(key=lambda g: order[g.representative])
+    return groups

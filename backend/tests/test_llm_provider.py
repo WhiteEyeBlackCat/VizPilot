@@ -272,5 +272,5 @@ def test_prompt_lists_derived_columns_as_definitional() -> None:
     content = user["content"]
     assert "Derived columns (definitional" in content
     assert "- total = a + b" in content
-    assert "Near-duplicate columns" in content
-    assert "- twice ≈ monotone transform of a" in content
+    assert "Near-duplicate columns (use the representative only" in content
+    assert "- twice (rank correlation 1.00) ≈ a — use a" in content

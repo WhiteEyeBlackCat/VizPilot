@@ -7,6 +7,7 @@ priority (1..N) is the cross-stage contract (D8).
 """
 
 import math
+import re
 import statistics
 from datetime import datetime
 from typing import Literal
@@ -28,6 +29,7 @@ from .spec import ChartSpec, TimeGranularity, validate_spec
 MAX_CHARTS = 12
 MAX_PER_TYPE = 3  # diversity cap (stage3 blocking #1)
 MAX_PER_X = 2  # within a type, one x column may fill at most 2 slots
+MAX_PER_Y = 3  # stage 14: one column as y in at most 3 bar/box/line charts
 # MAX_MISSING_RATIO lives in confidence.py (stage 9) and is re-exported here
 MAX_GRANULARITY_POINTS = 500
 SCATTER_MIN_CORR = 0.3
@@ -154,16 +156,16 @@ def derived_relationship_warning(derived: DerivedColumn) -> Warning:
 
 def derived_column_warnings(profile: DatasetProfile) -> list[Warning]:
     """Dataset-level: one `derived_column` per detected identity (and one
-    `near_copy_column` per near-duplicate pair) so the response discloses
-    what the ranking demoted."""
+    `near_duplicate_column` per suppressed duplicate, stage 14) so the
+    response discloses what the ranking demoted or left out."""
     out = []
     for d in getattr(profile.evidence, "derived_columns", []):
         if d.kind == "near_copy":
             message = (
-                f"{d.target} is nearly a transformed copy of {d.components[0]} "
-                f"(rank correlation {d.match_ratio:.2f}); charts of the pair mostly show that."
+                f"{d.target} is a near-duplicate of {d.components[0]} "
+                f"(rank correlation {d.match_ratio:.2f}); recommendations use {d.components[0]} only."
             )
-            code = "near_copy_column"
+            code = "near_duplicate_column"
         else:
             components = ", ".join(d.components)
             message = (
@@ -249,6 +251,17 @@ class _EvidenceIndex:
             table = self.near_copy_pairs if d.kind == "near_copy" else self.derived_pairs
             for component in d.components:
                 table.setdefault(frozenset((d.target, component)), d)
+        # stage 14: near-duplicate columns -> their group's representative;
+        # only the representative takes part in candidates (heatmap excepted)
+        self.suppressed: dict[str, str] = {}
+        self.group_rho: dict[str, float] = {}
+        for g in getattr(evidence, "near_duplicate_groups", []):
+            for dup in g.duplicates:
+                self.suppressed[dup] = g.representative
+                self.group_rho[dup] = g.rho.get(dup, 0.0)
+
+    def canonical(self, name: str | None) -> str | None:
+        return None if name is None else self.suppressed.get(name, name)
 
     def derived_for(self, spec: ChartSpec) -> DerivedColumn | None:
         """The identity a chart's x/y pair merely restates, if any."""
@@ -275,12 +288,16 @@ def recommend_charts(profile: DatasetProfile) -> list[Recommendation]:
         if c.semantic_type not in ("id", "unknown", "text")
         and c.missing_ratio <= MAX_MISSING_RATIO
     ]
+    index = _EvidenceIndex(profile.evidence)
     datetime_cols = [c for c in usable if c.semantic_type == "datetime"]
-    numeric_cols = [c for c in usable if c.semantic_type == "numeric"]
+    all_numeric = [c for c in usable if c.semantic_type == "numeric"]
+    # stage 14: a near-duplicate (atemp next to temp) never earns its own
+    # charts — its representative already draws them. The heatmap keeps
+    # every column so the duplication itself stays visible.
+    numeric_cols = [c for c in all_numeric if c.name not in index.suppressed]
     cat_cols = [c for c in usable if c.semantic_type in ("categorical", "boolean")]
     lo, hi = GROUP_CATEGORIES_RANGE
     group_cols = [c.name for c in cat_cols if lo <= (c.n_categories or 0) <= hi]
-    index = _EvidenceIndex(profile.evidence)
 
     candidates: list[Recommendation] = []
     candidates += _line_charts(profile, datetime_cols, numeric_cols, group_cols, index)
@@ -288,9 +305,10 @@ def recommend_charts(profile: DatasetProfile) -> list[Recommendation]:
     candidates += _box_charts(cat_cols, numeric_cols, index)
     candidates += _scatter_charts(profile, numeric_cols, group_cols, index)
     candidates += _histogram_charts(numeric_cols)
-    candidates += _heatmap_chart(numeric_cols)
+    candidates += _heatmap_chart(all_numeric)
 
     valid = _dedup(r for r in candidates if not validate_spec(r.spec, profile))
+    valid, _ = dedup_equivalent(valid, profile)  # stage 14: no-op for rules, shared post-pass
     apply_confidence(valid, profile)  # before the caps: slots go to confident charts
     apply_derived_caps(valid, profile)  # stage 13: definitional pairs sink before the slot cut
     ranked = apply_diversity_caps(valid)
@@ -645,6 +663,87 @@ def _group_supported(spec: ChartSpec, index: _EvidenceIndex) -> bool:
     return True  # bar/histogram grouping carries no scanned hypothesis
 
 
+def canonicalize_spec(spec: ChartSpec, profile: DatasetProfile) -> tuple[ChartSpec | None, list[str]]:
+    """Stage 14: maps near-duplicate columns in x / y / group_by to their
+    representative (an LLM may still ask for atemp). Returns the rewritten
+    spec and the substitutions made ("atemp -> temp"); None when the
+    substitution collapses x and y onto the same column (the chart would
+    only show the duplication)."""
+    index = _EvidenceIndex(profile.evidence)
+    if not index.suppressed:
+        return spec, []
+    changes: dict[str, str | None] = {}
+    notes: list[str] = []
+    for field in ("x", "y", "group_by"):
+        value = getattr(spec, field)
+        mapped = index.canonical(value)
+        if mapped != value:
+            changes[field] = mapped
+            notes.append(f"{value} -> {mapped}")
+    if not changes:
+        return spec, []
+    x = changes.get("x", spec.x)
+    y = changes.get("y", spec.y)
+    if x is not None and x == y:
+        return None, notes
+    title = spec.title
+    for note in notes:
+        old_name, new_name = note.split(" -> ")
+        title = re.sub(rf"(?<![A-Za-z0-9_]){re.escape(old_name)}(?![A-Za-z0-9_])", new_name, title)
+    changes["title"] = title
+    return spec.model_copy(update=changes), notes
+
+
+def near_duplicate_substituted_warning(notes: list[str]) -> Warning:
+    pairs = [n.split(" -> ") for n in notes]
+    return Warning(
+        code="near_duplicate_substituted",
+        severity="info",
+        message="; ".join(f"{a} replaced by {b} (near-duplicate)" for a, b in pairs) + ".",
+        meta={"substitutions": [{"from": a, "to": b} for a, b in pairs]},
+    )
+
+
+def _canonical_key(spec: ChartSpec, index: _EvidenceIndex) -> tuple:
+    return (
+        spec.type,
+        index.canonical(spec.x),
+        index.canonical(spec.y),
+        index.canonical(spec.group_by),
+        spec.aggregation,
+    )
+
+
+def dedup_equivalent(
+    recs: list[Recommendation], profile: DatasetProfile
+) -> tuple[list[Recommendation], dict[tuple, tuple]]:
+    """Stage 14: charts that are the same chart once near-duplicates are
+    mapped to their representative keep only the strongest (rules before
+    LLM on ties). Returns the survivors in input order plus a map from a
+    dropped chart's dedup key to the survivor's, so an insight that pointed
+    at the dropped chart can follow it."""
+    index = _EvidenceIndex(profile.evidence)
+    best: dict[tuple, Recommendation] = {}
+    for rec in recs:
+        key = _canonical_key(rec.spec, index)
+        current = best.get(key)
+        if current is None or (
+            (-rec.score, rec.source != "rules", _sort_key(rec)) < (-current.score, current.source != "rules", _sort_key(current))
+        ):
+            best[key] = rec
+    kept_ids = {id(rec) for rec in best.values()}
+    redirect: dict[tuple, tuple] = {}
+    for rec in recs:
+        if id(rec) not in kept_ids:
+            survivor = best[_canonical_key(rec.spec, index)]
+            redirect[_dedup_key(rec.spec)] = _dedup_key(survivor.spec)
+    return [rec for rec in recs if id(rec) in kept_ids], redirect
+
+
+def _dedup_key(spec: ChartSpec) -> tuple:
+    return (spec.type, spec.x, spec.y, spec.group_by)
+
+
 def _dedup(recs) -> list[Recommendation]:
     seen: set[tuple] = set()
     result = []
@@ -661,29 +760,35 @@ def _sort_key(rec: Recommendation) -> tuple:
 
 
 def apply_diversity_caps(recs: list[Recommendation]) -> list[Recommendation]:
-    """Per-type/per-x slots picked in score order plus the overall MAX_CHARTS
-    cut. Also called after the LLM merge (stage8 critique #4): re-suggesting a
-    chart the caps removed must not bypass the diversity defenses."""
-    per_type: dict[str, list[Recommendation]] = {}
+    """Slots picked in score order under three caps, then the overall
+    MAX_CHARTS cut. Also called after the LLM merge (stage8 critique #4):
+    re-suggesting a chart the caps removed must not bypass the defenses.
+
+    - per type: at most MAX_PER_TYPE charts of one type
+    - per x (bar/box): one strong categorical must not monopolize a type's
+      slots (stage7 review: quantity took all three bar slots on sales_basic)
+    - per y (bar/box/line, stage 14): one measure must not fill the list
+      from every angle (temp took 5 of 12 slots on the bike-sharing hours)
+    """
+    kept: list[Recommendation] = []
+    per_type: dict[str, int] = {}
+    per_x: dict[tuple[str, str], int] = {}
+    per_y: dict[str, int] = {}
     for rec in sorted(recs, key=_sort_key):
-        per_type.setdefault(rec.spec.type, []).append(rec)
-    kept = []
-    for chart_type, group in per_type.items():
-        # per-x cap for bar/box: one strong categorical must not monopolize a
-        # type's slots (stage7 review: quantity took all three bar slots on
-        # sales_basic). Other types put their variety on y, not x.
-        if chart_type not in ("bar", "box"):
-            kept += group[:MAX_PER_TYPE]
+        chart_type = rec.spec.type
+        if per_type.get(chart_type, 0) >= MAX_PER_TYPE:
             continue
-        picked: list[Recommendation] = []
-        per_x: dict[str, int] = {}
-        for rec in group:
-            x = rec.spec.x or ""
-            if per_x.get(x, 0) >= MAX_PER_X:
-                continue
-            per_x[x] = per_x.get(x, 0) + 1
-            picked.append(rec)
-            if len(picked) >= MAX_PER_TYPE:
-                break
-        kept += picked
+        x_key = (chart_type, rec.spec.x or "")
+        if chart_type in ("bar", "box") and per_x.get(x_key, 0) >= MAX_PER_X:
+            continue
+        y = rec.spec.y
+        counts_y = chart_type in ("bar", "box", "line") and y is not None
+        if counts_y and per_y.get(y, 0) >= MAX_PER_Y:
+            continue
+        kept.append(rec)
+        per_type[chart_type] = per_type.get(chart_type, 0) + 1
+        if chart_type in ("bar", "box"):
+            per_x[x_key] = per_x.get(x_key, 0) + 1
+        if counts_y:
+            per_y[y] = per_y.get(y, 0) + 1
     return sorted(kept, key=_sort_key)[:MAX_CHARTS]

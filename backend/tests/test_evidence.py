@@ -480,6 +480,7 @@ from app.profiling.evidence import (  # noqa: E402
     DERIVED_MAX_COLUMNS,
     derived_candidates,
     derived_columns,
+    names_related,
 )
 
 
@@ -604,6 +605,69 @@ def test_near_copy_flagged_only_for_transformed_duplicates() -> None:
     # double ranks identically to x (rho = 1); noisy (r ~ 0.985) does not qualify
     assert copies == [("double", ["x"], "near_copy")]
     assert all("noisy" not in (d.target, *d.components) for d in found)
+
+
+def test_near_duplicate_needs_name_corroboration_below_0995() -> None:
+    # stage 14: temp / atemp (rho ~0.99) is a duplicate because the names
+    # agree; the same statistics under unrelated names is a finding
+    rng = random.Random(14)
+    t = [rng.uniform(0, 30) for _ in range(400)]
+    apparent = [0.9 * v + rng.gauss(0, 1.5) for v in t]
+    named = _profile(pl.DataFrame({"temp": t, "atemp": apparent, "hum": [rng.uniform(0, 1) for _ in t]}))
+    unnamed = _profile(pl.DataFrame({"temp": t, "felt": apparent, "hum": [rng.uniform(0, 1) for _ in t]}))
+    rho = abs(named.evidence.num_num_spearman.matrix[0][1])
+    assert 0.98 <= rho < 0.995
+    assert [(g.representative, g.duplicates) for g in named.evidence.near_duplicate_groups] == [("temp", ["atemp"])]
+    assert named.evidence.near_duplicate_groups[0].rho["atemp"] == pytest.approx(rho)
+    assert named.evidence.near_duplicate_groups[0].n == 400
+    assert unnamed.evidence.near_duplicate_groups == []
+    assert [d.kind for d in named.evidence.derived_columns] == ["near_copy"]
+    assert unnamed.evidence.derived_columns == []
+
+
+def test_near_duplicate_named_threshold_is_a_documented_tradeoff() -> None:
+    # y = 2x + N(0, 1) measures rho ~0.985: under a related name (temp2) it
+    # is treated as a duplicate — the name signal is what tips it
+    rng = random.Random(3)
+    x = [rng.uniform(0, 10) for _ in range(400)]
+    noisy = [2 * v + rng.gauss(0, 1) for v in x]
+    related = _profile(pl.DataFrame({"temp": x, "temp2": noisy}))
+    unrelated = _profile(pl.DataFrame({"temp": x, "load": noisy}))
+    assert [(g.representative, g.duplicates) for g in related.evidence.near_duplicate_groups] == [("temp", ["temp2"])]
+    assert unrelated.evidence.near_duplicate_groups == []
+
+
+def test_near_duplicate_group_representative_and_transitivity() -> None:
+    rng = random.Random(5)
+    x = [rng.uniform(0, 10) for _ in range(300)]
+    a = [2 * v for v in x]
+    b = [3 * v + 1 for v in x]
+    a_missing = list(a)
+    a_missing[0] = None  # one missing value: x (complete) is the representative
+    profile = _profile(pl.DataFrame({"a_scaled": a_missing, "x": x, "b_scaled": b}))
+    (group,) = profile.evidence.near_duplicate_groups
+    assert group.representative == "x"
+    assert group.duplicates == ["a_scaled", "b_scaled"]
+    assert group.rho == {"a_scaled": pytest.approx(1.0, abs=1e-4), "b_scaled": pytest.approx(1.0, abs=1e-4)}
+    # fewer missing wins over column order and name length
+    complete = _profile(pl.DataFrame({"first_long_name": a, "x": x}))
+    assert complete.evidence.near_duplicate_groups[0].representative == "x"
+
+
+def test_names_related_rules() -> None:
+    assert names_related("temp", "atemp")
+    assert names_related("price", "price_usd")
+    assert names_related("tempC", "temp_f")
+    assert names_related("value", "value2")
+    assert not names_related("s01", "s02")
+    assert not names_related("casual", "registered")
+    assert not names_related("x", "y")
+
+
+def test_near_duplicate_requires_enough_rows() -> None:
+    x = [float(i) for i in range(20)]
+    profile = _profile(pl.DataFrame({"temp": x, "atemp": [2 * v for v in x]}))
+    assert profile.evidence.near_duplicate_groups == []
 
 
 def test_near_copy_not_repeated_for_an_explained_identity() -> None:

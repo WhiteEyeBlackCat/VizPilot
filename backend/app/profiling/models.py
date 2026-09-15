@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 # Bump whenever the profile schema or inference rules change: cached
 # {id}.profile.json files with a different version are recomputed.
-PROFILE_VERSION = 8  # v8: derived-column evidence (stage 13); v7: robust stats, sentinels, extremes (stage 9)
+PROFILE_VERSION = 9  # v9: near-duplicate groups (stage 14); v8: derived columns (stage 13)
 
 SemanticType = Literal["numeric", "categorical", "datetime", "boolean", "text", "id", "unknown"]
 Frequency = Literal["daily", "weekly", "monthly", "irregular", "unknown"]
@@ -183,9 +183,9 @@ class DerivedColumn(BaseModel):
 
     kind != near_copy: `target ≈ formula(components)` row-wise within a
     rounding tolerance on >= 99% of the rows where every column is finite.
-    kind == near_copy: |Spearman| >= 0.995 with the single component — a
-    transformed duplicate; disclosed but not demoted (the transform is not
-    known, and two genuinely co-moving measurements look the same)."""
+    kind == near_copy: a near-duplicate (stage 14 NearDuplicateGroup member)
+    of its single component, the group's representative. Disclosed; the
+    duplicate itself is suppressed from candidate generation."""
 
     target: str
     components: list[str]
@@ -193,6 +193,19 @@ class DerivedColumn(BaseModel):
     kind: DerivedKind
     match_ratio: float  # matched / valid rows (kind near_copy: |rho|)
     n: int  # valid rows the check ran on (profiled-sample level, capped)
+
+
+class NearDuplicateGroup(BaseModel):
+    """Columns that rank (almost) identically (stage 14): a strong rank
+    correlation alone (|rho| >= 0.995) or a slightly weaker one corroborated
+    by related names (|rho| >= 0.98, e.g. temp / atemp). Only the
+    representative takes part in chart candidates (heatmap excepted); the
+    duplicates are disclosed."""
+
+    representative: str
+    duplicates: list[str]
+    rho: dict[str, float]  # duplicate -> |Spearman| with the representative
+    n: int  # shared rows behind the weakest duplicate/representative pair
 
 
 class Evidence(BaseModel):
@@ -203,6 +216,7 @@ class Evidence(BaseModel):
     interactions: list[InteractionEffect] = []
     slope_heterogeneity: list[SlopeHet] = []
     derived_columns: list[DerivedColumn] = []  # stage 13, additive
+    near_duplicate_groups: list[NearDuplicateGroup] = []  # stage 14, additive
 
 
 class DatasetProfile(BaseModel):

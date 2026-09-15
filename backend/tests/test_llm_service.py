@@ -1,3 +1,4 @@
+import math
 from datetime import datetime, timedelta
 
 import polars as pl
@@ -36,7 +37,8 @@ def profile():
             "ts": [datetime(2024, 1, 1) + timedelta(days=i) for i in range(n)],
             "city": ["a", "b", "c"] * (n // 3),
             "value": [float(i) for i in range(n)],
-            "value2": [2.0 * i for i in range(n)],
+            # strong (r ~ 0.96) but not a near-duplicate (stage 14 suppresses copies)
+            "value2": [2.0 * i + 15 * math.sin(i) for i in range(n)],
             "value3": [float(i % 2) for i in range(n)],  # ~uncorrelated
             "rating": [i % 5 + 1 for i in range(n)],  # numeric-backed categorical
         }
@@ -71,13 +73,9 @@ def test_rules_only_path_identical_to_stage3(profile) -> None:
     service, provider = _service(LLMResponse(insights=["ignored"], charts=[NEW_CHART]))
     result = service.get(profile, use_llm=False)
     expected = [rec.model_dump() for rec in recommend_charts(profile)]
-    # stage 13: value2 = 2 * value is a near copy, disclosed at dataset level
-    # on every path (exactly that one warning, nothing else)
-    warnings = [w.model_dump() for w in derived_column_warnings(profile)]
-    assert [(w["code"], w["meta"]["target"], w["meta"]["components"]) for w in warnings] == [
-        ("near_copy_column", "value2", ["value"])
-    ]
-    assert result == {"charts": expected, "insights": [], "message": None, "warnings": warnings}
+    # no identity and no near-duplicate in this fixture: no dataset warning
+    assert derived_column_warnings(profile) == []
+    assert result == {"charts": expected, "insights": [], "message": None, "warnings": []}
     assert provider.calls == 0
 
 
@@ -481,3 +479,81 @@ def test_new_llm_chart_on_derived_pair_is_capped(derived_profile) -> None:
     assert added["tier"] == "exploratory"
     assert "definitional" in added["spec"]["reason"]
     assert any(w["code"] == "derived_relationship" for w in added["warnings"])
+
+
+# --- stage 14: near-duplicate suppression through the LLM merge -------------
+
+
+@pytest.fixture(scope="module")
+def dup_profile():
+    n = 90
+    df = pl.DataFrame(
+        {
+            "ts": [datetime(2024, 1, 1) + timedelta(days=i) for i in range(n)],
+            "city": ["a", "b", "c"] * (n // 3),
+            "temp": [10 + 0.3 * i + 4 * math.sin(i) for i in range(n)],
+            "atemp": [9 + 0.27 * i + 3.6 * math.sin(i) + 0.05 * math.cos(3 * i) for i in range(n)],
+            "hum": [60 - 0.2 * i + 3 * math.cos(i / 2) for i in range(n)],
+        }
+    )
+    return profile_dataset(df, "0" * 32, BIG)
+
+
+def test_llm_duplicate_chart_is_canonicalised_and_deduped(dup_profile) -> None:
+    assert [(g.representative, g.duplicates) for g in dup_profile.evidence.near_duplicate_groups] == [
+        ("temp", ["atemp"])
+    ]
+    rules = recommend_charts(dup_profile)
+    assert all("atemp" not in (r.spec.x, r.spec.y) for r in rules if r.spec.type != "heatmap")
+    rules_scatter = next(r for r in rules if r.spec.type == "scatter" and {r.spec.x, r.spec.y} == {"temp", "hum"})
+    charts = [
+        {"title": "hum vs atemp", "type": "scatter", "x": "atemp", "y": "hum", "reason": "llm says", "priority": 1},
+        {"title": "atemp vs temp", "type": "scatter", "x": "temp", "y": "atemp", "reason": "dup", "priority": 2},
+        {"title": "atemp over time", "type": "line", "x": "ts", "y": "atemp", "reason": "trend", "priority": 3},
+    ]
+    service, _ = _service(
+        LLMResponse(insights=[{"text": "humidity falls as it warms", "chart": charts[0]}], charts=charts[1:])
+    )
+    result = service.get(dup_profile, use_llm=True)
+    specs = [(c["spec"]["type"], c["spec"]["x"], c["spec"]["y"]) for c in result["charts"]]
+    assert "atemp" not in {x for _, x, _ in specs} | {y for _, _, y in specs}
+    # the LLM's atemp scatter became the rules' temp scatter (LLM wording adopted)
+    kept = _chart_by(result, "scatter", x="temp", y="hum")
+    assert kept is not None and kept["source"] == "rules" and kept["spec"]["reason"] == "llm says"
+    assert specs.count(("scatter", "temp", "hum")) == 1
+    (insight,) = result["insights"]
+    assert insight["chart_priority"] == kept["spec"]["priority"]
+    assert insight["supported"] == "strong"
+    assert kept["score"] == pytest.approx(rules_scatter.score)
+    # the pair chart collapsed onto temp == temp and was dropped
+    assert _chart_by(result, "scatter", x="temp", y="temp") is None
+    # a genuinely new chart on the duplicate is re-pointed at the representative
+    line = _chart_by(result, "line", x="ts", y="temp")
+    assert line is not None
+    assert [(w["code"], w["meta"]["target"]) for w in result["warnings"]] == [("near_duplicate_column", "atemp")]
+
+
+def test_llm_new_chart_on_duplicate_carries_substitution_warning(dup_profile) -> None:
+    # a chart the rules did not produce (grouped line: city has no effect on
+    # temp), requested on the duplicate: kept on the representative, says so
+    chart = {
+        "title": "atemp over time by city",
+        "type": "line",
+        "x": "ts",
+        "y": "atemp",
+        "group_by": "city",
+        "aggregation": "mean",
+        "reason": "trend per city",
+        "priority": 1,
+    }
+    rules_keys = {(r.spec.type, r.spec.x, r.spec.y, r.spec.group_by) for r in recommend_charts(dup_profile)}
+    assert ("line", "ts", "temp", "city") not in rules_keys
+    service, _ = _service(LLMResponse(charts=[chart]))
+    result = service.get(dup_profile, use_llm=True)
+    line = _chart_by(result, "line", x="ts", y="temp", group="city")
+    assert line is not None and line["source"] == "llm"
+    assert line["spec"]["title"] == "temp over time by city"
+    assert [w["meta"]["substitutions"] for w in line["warnings"] if w["code"] == "near_duplicate_substituted"] == [
+        [{"from": "atemp", "to": "temp"}]
+    ]
+    assert _chart_by(result, "line", x="ts", y="atemp", group="city") is None

@@ -156,13 +156,18 @@ def _evidence_section(profile: DatasetProfile) -> list[str]:
 
     derived = getattr(evidence, "derived_columns", [])
     identities = [d for d in derived if d.kind != "near_copy"]
-    copies = [d for d in derived if d.kind == "near_copy"]
     if identities:
         lines.append("Derived columns (definitional — never present these as insights):")
         lines += [f"- {d.target} = {d.formula}" for d in identities]
-    if copies:
-        lines.append("Near-duplicate columns (a chart of the pair mostly shows the duplication):")
-        lines += [f"- {d.target} {d.formula}" for d in copies]
+    groups = getattr(evidence, "near_duplicate_groups", [])
+    if groups:
+        lines.append(
+            "Near-duplicate columns (use the representative only; never chart a duplicate "
+            "or the pair — it only shows the duplication):"
+        )
+        for g in groups:
+            dups = ", ".join(f"{d} (rank correlation {g.rho[d]:.2f})" for d in g.duplicates)
+            lines.append(f"- {dups} ≈ {g.representative} — use {g.representative}")
 
     return lines if len(lines) > 2 else []
 

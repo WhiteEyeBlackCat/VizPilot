@@ -22,9 +22,12 @@ from ..charts.rules import (
     apply_derived_caps,
     apply_diversity_caps,
     assign_tiers,
+    canonicalize_spec,
+    dedup_equivalent,
     definitional_reason,
     derived_column_warnings,
     evaluate_llm_spec,
+    near_duplicate_substituted_warning,
     recommend_charts,
     stricter_cap,
 )
@@ -191,6 +194,15 @@ class _Merger:
         except ValidationError as exc:
             logger.warning("dropping LLM chart '%s': %s", suggestion.title, exc)
             return None
+        # stage 14: a near-duplicate column (atemp) is mapped to its
+        # representative (temp) before validation, so the chart dedups with
+        # the rules chart it restates; x == y after the mapping means the
+        # chart only showed the duplication and is dropped
+        canonical, substitutions = canonicalize_spec(spec, self.profile)
+        if canonical is None:
+            logger.warning("dropping LLM chart '%s': near-duplicate pair %s", suggestion.title, substitutions)
+            return None
+        spec = canonical
         errors = validate_spec(spec, self.profile)
         if errors:
             logger.warning("dropping LLM chart '%s': %s", suggestion.title, "; ".join(errors))
@@ -215,6 +227,8 @@ class _Merger:
                 rec = Recommendation(spec=spec, score=score, source="llm", tier_cap=_TIER_CAP[level])
                 apply_confidence([rec], self.profile)  # same chain as the rules charts
                 apply_derived_caps([rec], self.profile)
+                if substitutions:
+                    rec.warnings = rec.warnings + [near_duplicate_substituted_warning(substitutions)]
                 self.added[key] = rec
             target = self.added[key]
         # a hypothesis is only "strong" if it still clears the top floor after
@@ -255,9 +269,11 @@ def _merge(
         if suggestion is not None:
             merger.integrate(suggestion)
 
-    # merge -> re-apply diversity caps (critique #4) -> display order ->
-    # score-based tiers with LLM caps (blocking #2)
-    capped = apply_diversity_caps(rules + list(merger.added.values()))
+    # merge -> equivalence dedup (stage 14) -> re-apply diversity caps
+    # (critique #4) -> display order -> score-based tiers with LLM caps
+    # (blocking #2)
+    pool, redirect = dedup_equivalent(rules + list(merger.added.values()), profile)
+    capped = apply_diversity_caps(pool)
     llm_priority = merger.llm_priority
 
     def display_key(rec: Recommendation) -> tuple:
@@ -278,7 +294,7 @@ def _merge(
             "supported": supported,
             # None when the chart fell to the caps/MAX_CHARTS cut — the
             # insight survives, it just has no chart to link to
-            "chart_priority": final_priority.get(key) if key is not None else None,
+            "chart_priority": final_priority.get(redirect.get(key, key)) if key is not None else None,
         }
         # deliberate: charts from beyond-cap insights were already integrated —
         # they carry their own evidence score and diversity caps, so keeping
