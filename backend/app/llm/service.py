@@ -756,7 +756,7 @@ class _Workflow:
                 text, source = words["text"], "llm2"
             else:
                 text, source = self._fallback_text(v, names)
-            why = words["why_it_matters"] if words and words["why_it_matters"] else v.reason
+            why = words["why_it_matters"] if words and words["why_it_matters"] else self._gated_reason(v, names)
             priority = max(1, min(5, int(words["priority"] if words else v.importance)))
             self.trace.wording.append({"id": v.id, "statement": v.statement, "final_text": text, "source": source})
             rows.append(
@@ -810,12 +810,35 @@ class _Workflow:
         """The backend chart first, the LLM's own chart as fallback; both go
         through the stage-8 merge (evidence score, caps, canonicalisation)."""
         priority = 6 - max(1, min(5, v.importance))
+        names = set(self.columns)
         for _, spec in v.chart_candidates:
             spec = spec.model_copy()
-            reason = spec.reason or v.reason or v.statement
+            # LLM-written reasons (the chart's own or the hypothesis') are free
+            # text: only one that passes the wording gate may caption the chart
+            reason = self._first_gated(v, names, spec.reason, v.reason, v.statement) or _neutral(v)
             result = self.merger.integrate_spec(spec, priority, reason)
             if result is not None:
                 return result[0]
+        return None
+
+    def _gated_reason(self, v: ValidatedHypothesis, names: set[str]) -> str | None:
+        """LLM #1's `reason` is as ungated as its statement: it may caption
+        the finding only if every number is a backend number for this
+        hypothesis and every column-like token is a column of the claim."""
+        reason = (v.reason or "").strip()
+        if not reason:
+            return None
+        problem = _wording_problem(reason, v, names)
+        if problem is None:
+            return reason
+        self.trace.errors.append(f"reason {v.id}: {problem} — why_it_matters omitted")
+        return None
+
+    def _first_gated(self, v: ValidatedHypothesis, names: set[str], *texts: str | None) -> str | None:
+        for text in texts:
+            text = (text or "").strip()
+            if text and _wording_problem(text, v, names) is None:
+                return text
         return None
 
     def _drop_validated(self, v: ValidatedHypothesis, reason: str) -> None:
@@ -887,8 +910,14 @@ def _wording_problem(text: str, v: ValidatedHypothesis, names: set[str]) -> str 
     if mentioned:
         return f"names columns outside the hypothesis {sorted(mentioned)}"
     evidence_numbers = quotable_numbers(v)
-    # an ISO date is quoted as its parts (2025-04-26 -> 2025 4 26), never as "-4"
-    text = _ISO_DATE.sub(lambda m: " ".join(str(int(g)) for g in m.groups()), text)
+    # a full ISO date must be a backend date verbatim (its parts are also
+    # quotable individually, so "2023-01-11" must not pass by recombining the
+    # digits of 2023-11-01); a matching date is removed before the number scan
+    dates = quotable_dates(v)
+    for m in _ISO_DATE.finditer(text):
+        if m.group(0) not in dates:
+            return f"date {m.group(0)} is not in the validated evidence"
+    text = _ISO_DATE.sub(" ", text)
     for token in _NUMBER.findall(text):
         if not _number_supported(token, evidence_numbers):
             return f"number {token} is not in the validated evidence"
@@ -941,6 +970,16 @@ def quotable_numbers(v: ValidatedHypothesis) -> set[float]:
         means = [b["y_mean"] for b in bins if isinstance(b, dict) and isinstance(b.get("y_mean"), (int, float))]
         if means:
             out |= {float(max(means)), float(min(means))}
+    return out
+
+
+def quotable_dates(v: ValidatedHypothesis) -> set[str]:
+    """The ISO dates (YYYY-MM-DD) the wording may quote verbatim: the change
+    point's `change_at`."""
+    out: set[str] = set()
+    change = v.evidence.get("change_point")
+    if isinstance(change, dict) and isinstance(change.get("change_at"), str):
+        out.add(change["change_at"][:10])
     return out
 
 

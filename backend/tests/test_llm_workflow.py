@@ -558,3 +558,56 @@ def test_grouped_bar_implies_an_interaction_probe(profile, df) -> None:
     assert result["insights"] == []
     (dropped,) = result["debug"]["dropped"]
     assert "interaction share of variance" in dropped["reason"]
+
+
+# --- round 4: LLM #1 reason and full-date literals go through the same gate ---------------
+
+
+def test_llm1_reason_is_gated_before_it_captions_anything(profile, df) -> None:
+    # LLM #2 not called (single covered finding) -> the hypothesis' own reason is the fallback
+    bad = _h("Segment e sells far more.", "group_difference", {"group": "segment", "target": "sales"}, None, 5)
+    bad["reason"] = "Segment e drove 1,284 orders in Q3 2019, a 37% lift; churn_rate fell to 4.2%."
+    result, provider = _run(profile, df, [bad])
+    assert provider.final_calls == 0
+    (insight,) = result["insights"]
+    assert insight["why_it_matters"] is None
+    assert any(e.startswith("reason 1:") for e in result["debug"]["errors"])
+    for chart in result["charts"]:
+        assert "1,284" not in (chart["spec"]["reason"] or "") and "churn_rate" not in (chart["spec"]["reason"] or "")
+    # LLM #2 called but silent on one hypothesis -> same fallback, same gate
+    hyps = _two_covered()
+    hyps[1]["reason"] = "Because revenue_total jumped 1,284% in 2019."
+    final = {"insights": [{"hypothesis_id": 1, "text": "Segment e averages far higher sales.", "why_it_matters": "pricing", "priority": 5}]}
+    result, provider = _run(profile, df, hyps, final=final)
+    assert provider.final_calls == 1
+    by_text = {i["text"][:20]: i for i in result["insights"]}
+    assert by_text["Segment e averages f"]["why_it_matters"] == "pricing"
+    assert by_text["u is U-shaped in x ("]["why_it_matters"] is None
+    # a clean reason still passes through
+    good = _h("Segment e sells far more.", "group_difference", {"group": "segment", "target": "sales"}, None, 5)
+    good["reason"] = "segment e behaves like a separate market"
+    result, _ = _run(profile, df, [good])
+    assert result["insights"][0]["why_it_matters"] == "segment e behaves like a separate market"
+
+
+def test_full_iso_date_must_match_the_change_point_literally(profile, df) -> None:
+    change = next((c for c in profile.evidence.layer2.change_points if c.num == "growth" and c.strength != "none"), None)
+    if change is None:
+        pytest.skip("no graded change point on growth in this fixture")
+    day = change.change_at[:10]
+    year, month, dom = day.split("-")
+    if int(dom) <= 12 and dom != month:
+        recombined = f"{year}-{dom}-{month}"  # month and day swapped
+    elif month != dom:
+        recombined = f"{year}-{month}-{month}"  # day borrowed from the month
+    else:
+        pytest.skip("change point date has no distinct recombination")
+    hyps = _two_covered() + [_h("growth shifts over time.", "time_pattern", {"time": "ts", "target": "growth"}, None, 3)]
+    final = {"insights": [{"hypothesis_id": 3, "text": f"Growth shifts level around {recombined}.", "why_it_matters": "?", "priority": 3}]}
+    result, _ = _run(profile, df, hyps, final=final)
+    assert not any(recombined in i["text"] for i in result["insights"])
+    assert any(f"date {recombined} is not in the validated evidence" in e for e in result["debug"]["errors"])
+    # partial dates still lean on the parts: the month and year alone are quotable
+    partial = {"insights": [{"hypothesis_id": 3, "text": f"Growth shifts level in month {int(month)} of {year}.", "why_it_matters": "?", "priority": 3}]}
+    result, _ = _run(profile, df, hyps, final=partial)
+    assert any(i["text"] == f"Growth shifts level in month {int(month)} of {year}." for i in result["insights"])
