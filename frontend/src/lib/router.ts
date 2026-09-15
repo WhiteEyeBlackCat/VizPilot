@@ -22,16 +22,31 @@ export function buildHash(route: Route): string {
   return route.datasetId ? `#/d/${encodeURIComponent(route.datasetId)}/${route.page}` : "#/";
 }
 
-export function useHashRoute(): [Route, (route: Route) => void] {
+export type Navigate = (route: Route, opts?: { replace?: boolean }) => void;
+
+/** True when the hash is exactly the canonical form of the route it parses
+ *  to (a bogus page, an unknown prefix or "#/garbage" are not). */
+export function isCanonicalHash(hash: string): boolean {
+  if (hash === "" || hash === "#/" || hash === "#") return true;
+  return buildHash(parseHash(hash)) === hash;
+}
+
+export function useHashRoute(): [Route, Navigate] {
   const [route, setRoute] = useState<Route>(() => parseHash(window.location.hash));
   useEffect(() => {
     const onChange = () => setRoute(parseHash(window.location.hash));
     window.addEventListener("hashchange", onChange);
     return () => window.removeEventListener("hashchange", onChange);
   }, []);
-  const navigate = useCallback((next: Route) => {
+  const navigate = useCallback<Navigate>((next, opts) => {
     const hash = buildHash(next);
     if (window.location.hash === hash) return;
+    if (opts?.replace) {
+      // normalising a malformed hash must not leave the bad one in history
+      window.history.replaceState(null, "", hash);
+      setRoute(parseHash(hash)); // replaceState fires no hashchange
+      return;
+    }
     window.location.hash = hash; // hashchange updates the state
   }, []);
   return [route, navigate];

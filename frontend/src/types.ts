@@ -37,6 +37,7 @@ export interface ColumnProfile {
   unique_count: number;
   cast_params: unknown;
   nominal?: boolean; // numeric-backed categorical that is a code, never a quantity (stage 9)
+  quality?: ColumnQuality | null; // per-column data-quality counts (stage 9; additive)
   min: number | string | null;
   max: number | string | null;
   mean: number | null;
@@ -67,6 +68,10 @@ export interface DatasetProfile {
   columns: ColumnProfile[];
   correlations: Correlations | null;
   sample_rows: Record<string, unknown>[];
+  /** rows every statistic was computed on (== n_rows unless sampled); additive */
+  profiled_rows?: number;
+  /** measured evidence (stages 7-17); additive, the UI reads only the parts it shows */
+  evidence?: Evidence;
 }
 
 export type ChartType = "line" | "bar" | "scatter" | "histogram" | "box" | "heatmap";
@@ -209,4 +214,71 @@ export interface RenderResult {
   sampled: boolean;
   n_points: number;
   display_range?: DisplayRange | null;
+}
+
+// --- profiling extras mirrored from backend profiling/models.py (stage 16.3,
+// additive: the Overview page reads them; nothing else depends on them) ----
+
+export interface SentinelCandidate {
+  value: number;
+  count: number;
+  /** subset of {extreme, repeated, pattern, scale} */
+  signals: string[];
+}
+
+export interface RobustRange {
+  lo: number;
+  hi: number;
+}
+
+/** Per-column data-quality counts (sample-level, like every profile count). */
+export interface ColumnQuality {
+  profiled_rows: number;
+  missing_count: number;
+  missing_token_count: number;
+  invalid_count: number;
+  valid_count: number;
+  valid_ratio: number;
+  q1: number | null;
+  q3: number | null;
+  iqr: number | null;
+  mad: number | null;
+  robust_z_max: number | null;
+  extreme_value_count: number;
+  extreme_value_ratio: number;
+  suspected_sentinels: SentinelCandidate[];
+  sentinel_row_count: number;
+  robust_range: RobustRange | null;
+}
+
+export type DerivedKind = "product" | "product_discount" | "sum" | "difference" | "ratio" | "near_copy";
+
+/** A column that is (almost) a deterministic function of others (stage 13). */
+export interface DerivedColumn {
+  target: string;
+  components: string[];
+  formula: string;
+  kind: DerivedKind;
+  match_ratio: number;
+  n: number;
+}
+
+/** Columns that rank (almost) identically; only the representative charts (stage 14). */
+export interface NearDuplicateGroup {
+  representative: string;
+  duplicates: string[];
+  rho: Record<string, number>;
+  n: number;
+}
+
+/** Only the evidence the UI shows is typed; the statistical layers stay opaque. */
+export interface Evidence {
+  cat_num?: unknown[];
+  time_effects?: unknown[];
+  num_num_spearman?: Correlations | null;
+  interactions?: unknown[];
+  slope_heterogeneity?: unknown[];
+  derived_columns?: DerivedColumn[];
+  near_duplicate_groups?: NearDuplicateGroup[];
+  layer2?: unknown;
 }

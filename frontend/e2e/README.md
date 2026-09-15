@@ -26,26 +26,41 @@ JSON summary is printed on stdout (`[e2e] SUMMARY …`, `ok: true|false`).
 - `dataset/hour_like.csv` (generate with `backend/.venv/bin/python dataset/syn/hour_like.py`)
   and the other synthetic CSVs from `dataset/syn/`.
 
-## What the run covers (stage 16.2 layout)
+## What the run covers (stage 16.3 layout)
 
 Sidebar navigation (`#/d/<dataset_id>/<page>` hash routes), one shared preview
 panel (`[data-preview-panel]`), Save as the only way into the workspace:
 
 1. empty state → **New Dataset** dialog upload → lands on Overview
-2. Insights: three tiers, click a top card → preview panel (chart, confidence),
-   workspace still 0; collapse / expand the panel
-3. Explore: option filtering per chart type, six chart types previewed with
-   tooltips; Save two → workspace 2 (Save turns into 已保存)
-4. Explore form keeps its selection across page switches
-5. Workspace: list, preview, Enlarge dialog (bigger second instance, disposed on
-   Escape), Export (real download of a PNG data URL), Remove
-6. 422 path (box without y), stable document height (no page scroll)
-7. dataset switch clears the preview and keeps per-dataset workspaces;
-   reload keeps the route (the workspace is in-memory and starts empty)
-8. 800px viewport: top bar navigation, preview as a bottom drawer
-9. outliers `display_range` note, tiny_dataset warning chips + empty-top notice,
-   sales_basic derived-column disclosure, hour_like near-duplicate suppression
-10. every `/api/charts/render` request body is captured (`renderPayloads`) and
+2. Overview: summary tiles (rows / columns / missing / profiled rows / quality
+   flags) match the dataset, the type chips filter the column table, the
+   derived-fields and warnings sections are present; a same-name upload shows
+   the confirmation prompt and cancelling changes nothing
+3. Insights: three tiers (h2 headings), click a top card → preview panel
+   (chart, confidence), workspace still 0; the first opening is the 55 / 45
+   split and the panel chart hides its in-canvas title (the header names it);
+   collapse / expand the panel
+4. Explore: option filtering per chart type, six chart types previewed with
+   tooltips; Save two → workspace 2 (Save turns into 已保存); the column-role
+   hints and the "最近一次生成" recap update
+5. Explore form and the Insights 探索 toggle survive page switches AND
+   preview-panel open / close (the panel group never re-mounts)
+6. Workspace: list, preview, Enlarge dialog (bigger second instance that keeps
+   its title, disposed on Escape), Export (real download of a PNG data URL),
+   Remove; Escape closes the panel when no dialog is open
+7. 422 path (box without y), stable document height (no page scroll)
+8. 1100px viewport: the preview overlays the content without squeezing it;
+   800px viewport: top bar navigation, preview as a bottom drawer
+9. outliers: `display_range` note in the panel and the suspected-sentinel
+   quality flag on the Overview; dataset switch clears the preview and keeps
+   per-dataset workspaces; reload keeps the route (the workspace is in-memory
+   and starts empty)
+10. hash normalisation: an unknown dataset id or `#/garbage` → empty state,
+    `#/d/<id>/bogus` → `/overview` (replaced, no history entry)
+11. tiny_dataset warning chips + empty-top notice, sales_basic derived-column
+    disclosure (Insights banner and the Overview derived row), hour_like
+    near-duplicate suppression (and its Overview row)
+12. every `/api/charts/render` request body is captured (`renderPayloads`) and
     the bar / heatmap / scatter shapes are asserted (aggregation prefill, nulls)
 
 `capture-fixtures.mjs` records real `RenderResult`s for the option-builder

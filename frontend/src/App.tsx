@@ -9,26 +9,45 @@ import { ExplorePage } from "./pages/ExplorePage";
 import { InsightsPage } from "./pages/InsightsPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { WorkspacePage } from "./pages/WorkspacePage";
-import { initialState, isSaved, reducer, workspaceOf, type Page, type Preview, type SavedChart } from "./store";
+import {
+  initialState,
+  isSaved,
+  reducer,
+  workspaceOf,
+  type ExploreField,
+  type FieldUpdate,
+  type Page,
+  type Preview,
+  type SavedChart,
+} from "./store";
 import type { ChartSpec, DatasetMeta, Recommendation } from "./types";
 import { Button } from "@/components/ui/button";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup, type GroupHandle, type Layout } from "@/components/ui/resizable";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useMediaQuery } from "@/lib/hooks";
-import { useHashRoute } from "@/lib/router";
+import { isCanonicalHash, useHashRoute } from "@/lib/router";
 
 const PAGE_ORDER: Page[] = ["overview", "insights", "explore", "workspace"];
+const DEFAULT_LAYOUT: Layout = { content: 55, preview: 45 };
 
 export default function App() {
   const [state, dispatch] = useReducer(reducer, initialState);
   const [route, navigate] = useHashRoute();
   const [newOpen, setNewOpen] = useState(false);
+  // three layouts: ≥1280 sidebar + content + resizable preview column;
+  // 1024–1279 sidebar + content with the preview overlaying the right edge
+  // (the content keeps its width); <1024 top bar + bottom drawer
   const wide = useMediaQuery("(min-width: 1024px)");
+  const split = useMediaQuery("(min-width: 1280px)");
   const saveSeq = useRef(0);
   // remembered across collapse / expand (the preview panel re-mounts inside
   // the ALWAYS-mounted group) and page switches; v4 has no autoSaveId
-  const layoutRef = useRef<Layout>({ content: 55, preview: 45 });
+  const layoutRef = useRef<Layout>(DEFAULT_LAYOUT);
   const groupRef = useRef<GroupHandle>(null);
+  // while the preview panel is (re)joining the group, the library reports
+  // its own provisional layout (an even split); those events must not
+  // overwrite the remembered width that is about to be restored
+  const restoringRef = useRef(false);
 
   const { datasets, meta, profile, recs, aiPending, preview, panelOpen } = state;
   const datasetId = meta?.dataset_id ?? null;
@@ -61,15 +80,25 @@ export default function App() {
       .catch(() => dispatch({ type: "AI_DONE", datasetId: id }));
   }, []);
 
-  // the hash is the source of truth for the selected dataset
+  // the hash is the source of truth for the selected dataset; malformed
+  // hashes are normalised (replace, no history entry) and an unknown id
+  // falls back to the empty state
   useEffect(() => {
     if (!datasets) return;
-    if (!route.datasetId) return;
-    if (route.datasetId === datasetId) return;
+    const raw = window.location.hash;
+    if (!route.datasetId) {
+      if (!isCanonicalHash(raw)) navigate({ datasetId: null, page: "overview" }, { replace: true });
+      if (datasetId) dispatch({ type: "CLEAR_SELECTION" });
+      return;
+    }
     const m = datasets.find((d) => d.dataset_id === route.datasetId);
-    if (m) selectDataset(m);
-    else navigate({ datasetId: null, page: "overview" }); // unknown id in the hash
-  }, [datasets, route.datasetId, datasetId, selectDataset, navigate]);
+    if (!m) {
+      navigate({ datasetId: null, page: "overview" }, { replace: true }); // unknown id in the hash
+      return;
+    }
+    if (!isCanonicalHash(raw)) navigate(route, { replace: true }); // e.g. #/d/<id>/bogus → /overview
+    if (route.datasetId !== datasetId) selectDataset(m);
+  }, [datasets, route, datasetId, selectDataset, navigate]);
 
   const onUploaded = useCallback(
     (m: DatasetMeta) => {
@@ -131,15 +160,37 @@ export default function App() {
     [datasetId],
   );
 
+  const onExploreField = useCallback(
+    (field: ExploreField, value: FieldUpdate<string>) => dispatch({ type: "EXPLORE_FIELD", field, value }),
+    [],
+  );
+
   const page: Page = route.datasetId && datasetId ? route.page : "overview";
-  const splitOpen = wide && preview !== null && panelOpen;
+  const panelVisible = preview !== null && panelOpen;
+  const splitOpen = split && panelVisible;
+  const overlayOpen = wide && !split && panelVisible;
+  const panelMode = !wide ? "drawer" : split ? "split" : "overlay";
 
   // the preview panel joins the persistent group: restore the remembered
-  // width (the group itself never re-mounts, so the pages keep their state)
+  // width (the group itself never re-mounts, so the pages keep their state).
+  // The library's provisional layout events are ignored until then.
+  const wasSplitOpen = useRef(false);
+  if (splitOpen && !wasSplitOpen.current) restoringRef.current = true;
+  wasSplitOpen.current = splitOpen;
   useEffect(() => {
     if (!splitOpen) return;
-    const id = requestAnimationFrame(() => groupRef.current?.setLayout(layoutRef.current));
-    return () => cancelAnimationFrame(id);
+    let second = 0;
+    const first = requestAnimationFrame(() => {
+      groupRef.current?.setLayout(layoutRef.current);
+      second = requestAnimationFrame(() => {
+        restoringRef.current = false;
+      });
+    });
+    return () => {
+      cancelAnimationFrame(first);
+      cancelAnimationFrame(second);
+      restoringRef.current = false;
+    };
   }, [splitOpen]);
 
   // Esc closes the preview unless a dialog (enlarge / new dataset) is open —
@@ -166,6 +217,7 @@ export default function App() {
       preview={preview}
       saved={isSaved(state, preview.result.spec)}
       variant={wide ? "side" : "drawer"}
+      mode={panelMode}
       open={panelOpen}
       onToggle={() => dispatch({ type: "SET_PANEL_OPEN", open: !panelOpen })}
       onClose={() => dispatch({ type: "CLOSE_PREVIEW" })}
@@ -179,7 +231,7 @@ export default function App() {
     <>
       {PAGE_ORDER.map((p) => (
         <section key={p} hidden={page !== p} aria-hidden={page !== p} className="px-6 py-5" data-page-section={p}>
-          {p === "overview" && <OverviewPage meta={meta} profile={profile} />}
+          {p === "overview" && <OverviewPage meta={meta} profile={profile} warnings={recs ? (recs.warnings ?? []) : null} />}
           {p === "insights" && (
             <InsightsPage
               recs={recs}
@@ -194,8 +246,9 @@ export default function App() {
             <ExplorePage
               profile={profile}
               form={state.explore}
-              onField={(field, value) => dispatch({ type: "EXPLORE_FIELD", field, value })}
+              onField={onExploreField}
               onGenerate={previewManual}
+              lastSpec={state.lastExploreSpec}
             />
           )}
           {p === "workspace" && (
@@ -233,6 +286,7 @@ export default function App() {
       data-profile={profile ? "loaded" : "none"}
       data-dataset={datasetId ?? ""}
       data-active-page={meta ? page : "none"}
+      data-panel-mode={panelMode}
     >
       {meta ? pages : emptyState}
       {/* collapsed side panel: a slim edge control brings it back */}
@@ -275,12 +329,13 @@ export default function App() {
               onNewDataset={() => setNewOpen(true)}
             />
           )}
-          {wide ? (
+          {split ? (
             <ResizablePanelGroup
               groupRef={groupRef}
               orientation="horizontal"
               className="min-h-0 flex-1"
               onLayoutChanged={(layout) => {
+                if (restoringRef.current) return;
                 if (layout.preview !== undefined) layoutRef.current = layout;
               }}
             >
@@ -296,6 +351,17 @@ export default function App() {
                 </>
               )}
             </ResizablePanelGroup>
+          ) : wide ? (
+            // overlay: the content keeps its full width; the panel floats over
+            // its right edge and can be collapsed to the edge control
+            <div className="relative min-h-0 flex-1" data-panel-overlay-host>
+              {main}
+              {overlayOpen && (
+                <div className="absolute inset-y-0 right-0 z-20 w-[480px] max-w-[62%] shadow-2xl" data-panel-overlay>
+                  {panel}
+                </div>
+              )}
+            </div>
           ) : (
             <div className="flex min-h-0 flex-1 flex-col">
               <div className="min-h-0 flex-1">{main}</div>
@@ -304,7 +370,12 @@ export default function App() {
           )}
         </div>
       </div>
-      <NewDatasetDialog open={newOpen} onOpenChange={setNewOpen} onUploaded={onUploaded} />
+      <NewDatasetDialog
+        open={newOpen}
+        onOpenChange={setNewOpen}
+        onUploaded={onUploaded}
+        existingNames={(datasets ?? []).map((d) => d.filename)}
+      />
     </TooltipProvider>
   );
 }

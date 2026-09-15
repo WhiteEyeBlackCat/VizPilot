@@ -260,7 +260,7 @@ export function Recommendations({
           if (tier === "top" && (recs?.charts.length ?? 0) > 0) {
             return (
               <div key={tier} className="mt-5 first:mt-0">
-                <h3 className="mb-2 text-sm font-medium text-muted-foreground">{title}</h3>
+                <h2 className="mb-2 text-sm font-medium text-muted-foreground">{title}</h2>
                 <p className="text-sm text-muted-foreground/80">
                   沒有圖表在資料中展現足夠強的證據（定義性關係不算發現）——以下為次要與探索性建議。
                 </p>
@@ -272,8 +272,8 @@ export function Recommendations({
         if (tier === "exploratory") {
           return (
             <Collapsible key={tier} open={exploratoryOpen} onOpenChange={setExploratoryOpen} className="mt-5">
-              {/* h3 like the other tiers, with the toggle inside it */}
-              <h3 className="mb-2 text-sm font-medium text-muted-foreground">
+              {/* h2 like the other tiers, with the toggle inside it */}
+              <h2 className="mb-2 text-sm font-medium text-muted-foreground">
                 <CollapsibleTrigger asChild>
                   <Button variant="ghost" size="sm" className="-ml-2 h-7 px-2 text-sm font-medium text-muted-foreground">
                     <ChevronRight
@@ -282,7 +282,7 @@ export function Recommendations({
                     {title}（{charts.length}）
                   </Button>
                 </CollapsibleTrigger>
-              </h3>
+              </h2>
               <CollapsibleContent>
                 <div className={CARD_GRID}>{charts.map((rec) => card(rec, tier))}</div>
               </CollapsibleContent>
@@ -291,9 +291,9 @@ export function Recommendations({
         }
         return (
           <div key={tier} className="mt-5 first:mt-0">
-            <h3 className={cn("mb-2 text-sm font-medium", tier === "top" ? "text-foreground" : "text-muted-foreground")}>
+            <h2 className={cn("mb-2 text-sm font-medium", tier === "top" ? "text-foreground" : "text-muted-foreground")}>
               {title}
-            </h3>
+            </h2>
             <div className={tier === "top" ? TOP_GRID : CARD_GRID}>{charts.map((rec) => card(rec, tier))}</div>
           </div>
         );

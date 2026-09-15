@@ -106,18 +106,48 @@ the LLM — never the raw dataset. Sample rows can be withheld too with
 Dataset → Profiler → Evidence → Rules / LLM → ChartSpec → RenderResult (backend)
                                                               │
                               src/charts/echarts/option.ts ◄──┘  pure RenderResult → ECharts option
-                              src/charts/echarts/theme.ts        one visual style for all six chart types
+                              src/charts/echarts/theme.ts        one dark visual style for all six chart types
                               src/charts/echarts/EChartsView.tsx thin React binding (init / setOption / resize / dispose)
-                              src/components/*                   shadcn/ui interface (upload, overview, recommendations, builder, workspace)
+                              src/store.ts                       one reducer: dataset selection, preview, per-dataset workspace
+                              src/lib/router.ts                  hash routes  #/d/<dataset_id>/<page>
+                              src/components/Sidebar.tsx         datasets + Overview / Insights / Explore / Workspace
+                              src/components/PreviewPanel.tsx    the one place a chart is drawn (Save / Export / Enlarge / Close)
+                              src/pages/*                        Overview, Insights, Explore, Workspace
 ```
 
 All aggregation, sampling, binning and statistics happen in the backend; the
 browser only draws the RenderResult it receives. The LLM never produces UI or
 chart code — only ChartSpec JSON, validated server-side.
 
+### Pages
+
+| Page | What it shows |
+|---|---|
+| **Overview** | rows / columns / missing / profiled rows / quality-flag tiles, a type filter over the column table (type, missing, unique, statistics, quality flags: missing tokens, unparsable values, suspected sentinels, extreme values, coded categories), derived fields (`sales = unit_price × quantity × (1 − discount)`, near-duplicate columns) and the engine's dataset-level warnings |
+| **Insights** | rule / LLM recommendations in three tiers (top, secondary, exploratory — the last collapsed); cards preview into the panel, they never embed charts |
+| **Explore** | the manual builder (chart type, X, Y, group, aggregation with the same option filtering and prefill as before), column-role hints and a recap of the last generated spec |
+| **Workspace** | only the charts you saved from the panel, per dataset (in memory); preview / remove / enlarge / export |
+
+### Preview panel and Save semantics
+
+Previewing a recommendation, generating in Explore or clicking a saved chart
+renders **into the preview panel** — nothing is added anywhere. **Save** is the
+only way a chart enters the Workspace (the same spec is never saved twice;
+the button reads 已保存). Export downloads a PNG of the current chart on the
+dark surface colour; Enlarge opens it in a dialog; Close (or `Esc`, when no
+dialog is open) clears the preview. The panel is a resizable column from
+1280px, an overlay over the content between 1024px and 1279px (the content
+keeps its width) and a bottom drawer below 1024px. Page state (Explore form,
+the exploratory toggle, the panel width) survives navigation and panel changes.
+
+Shortcuts: `Esc` closes the enlarge dialog, then the panel; the panel
+separator is keyboard-resizable (arrow keys).
+
 ## Status
 
-Backend pipeline (upload → profiling → evidence → rule-based recommendations →
-chart rendering → optional local-LLM re-ranking and insights) plus a React SPA
-on shadcn/ui with Apache ECharts charts (tooltips, zoom, image export,
-enlarged view). End-to-end tests run headless against the real backend.
+Backend pipeline (upload → profiling → evidence layers → rule-based
+recommendations with derived-column and near-duplicate handling → chart
+rendering → optional local-LLM insights) plus a dark, sidebar-navigated React
+SPA on shadcn/ui with Apache ECharts charts (tooltips, zoom, image export,
+enlarged view) and a shared preview panel with explicit Save into a per-dataset
+workspace. End-to-end tests run headless against the real backend.

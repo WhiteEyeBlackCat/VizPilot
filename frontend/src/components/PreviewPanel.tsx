@@ -19,6 +19,9 @@ interface Props {
   saved: boolean;
   /** "side": right column; "drawer": bottom sheet on narrow viewports */
   variant: "side" | "drawer";
+  /** how the side variant is placed: resizable split (≥1280px) or an overlay
+   *  over the content (1024–1279px); informational (data attribute) */
+  mode?: "split" | "overlay" | "drawer";
   /** drawer only: expanded or collapsed to its header */
   open: boolean;
   onToggle: () => void;
@@ -63,7 +66,7 @@ function safeFileName(title: string): string {
 /** The one place a chart is drawn: preview of a recommendation, of an
  *  Explore result, or of a saved workspace chart. Save is the only way a
  *  chart enters the workspace. */
-export function PreviewPanel({ preview, saved, variant, open, onToggle, onClose, onSave, onRemove }: Props) {
+export function PreviewPanel({ preview, saved, variant, mode, open, onToggle, onClose, onSave, onRemove }: Props) {
   const rootRef = useRef<HTMLElement>(null);
   const [areaRef, area] = useElementSize<HTMLDivElement>();
   const [enlarged, setEnlarged] = useState(false);
@@ -108,6 +111,7 @@ export function PreviewPanel({ preview, saved, variant, open, onToggle, onClose,
       aria-label="預覽面板"
       data-preview-panel
       data-variant={variant}
+      data-mode={mode ?? (variant === "drawer" ? "drawer" : "split")}
       data-source={source}
       data-seq={preview.seq}
       data-title={spec.title}
@@ -155,7 +159,8 @@ export function PreviewPanel({ preview, saved, variant, open, onToggle, onClose,
       {!collapsedDrawer && (
         <>
           <div ref={areaRef} className="min-h-0 flex-1 overflow-hidden px-2" data-preview-chart>
-            <ChartView key={preview.seq} result={result} height={chartHeight} />
+            {/* the header names the chart: no second title inside the canvas */}
+            <ChartView key={preview.seq} result={result} height={chartHeight} showTitle={false} />
           </div>
 
           <div className="max-h-[42%] shrink-0 space-y-2 overflow-y-auto border-t border-subtle px-4 py-3 text-xs">
@@ -240,7 +245,7 @@ export function PreviewPanel({ preview, saved, variant, open, onToggle, onClose,
 
       <Dialog open={enlarged} onOpenChange={(next) => !next && setEnlarged(false)}>
         <DialogContent className="max-w-[90vw] p-4 pt-10" data-chart-dialog>
-          {/* the chart draws its own title; keep the accessible name for the dialog */}
+          {/* the chart draws its own title here; keep the accessible name for the dialog */}
           <DialogTitle className="sr-only">{spec.title}</DialogTitle>
           <DialogDescription className="sr-only">放大檢視圖表</DialogDescription>
           {enlarged && <ChartView result={result} height="70vh" />}
