@@ -611,3 +611,18 @@ def test_full_iso_date_must_match_the_change_point_literally(profile, df) -> Non
     partial = {"insights": [{"hypothesis_id": 3, "text": f"Growth shifts level in month {int(month)} of {year}.", "why_it_matters": "?", "priority": 3}]}
     result, _ = _run(profile, df, hyps, final=partial)
     assert any(i["text"] == f"Growth shifts level in month {int(month)} of {year}." for i in result["insights"])
+
+
+def test_new_llm_chart_caption_is_the_gated_reason(profile, df, monkeypatch) -> None:
+    # no backend chart -> the LLM's own chart is the only candidate; its raw
+    # reason carries fabricated numbers and must not become the caption
+    monkeypatch.setattr("app.llm.service.suggest_chart", lambda *a, **k: None)
+    chart = _scatter("x", "u")
+    chart["reason"] = "u drops 1,284 units at x = 4.95 then recovers; churn_rate flat."
+    h = _h("u is U-shaped in x.", "nonlinear_relationship", {"x": "x", "y": "u"}, chart, 4)
+    h["reason"] = "the curve says 37% of the effect is nonlinear"
+    result, _ = _run(profile, df, [h])
+    (insight,) = result["insights"]
+    llm_charts = [c for c in result["charts"] if c["source"] == "llm"]
+    assert llm_charts and all("1,284" not in c["spec"]["reason"] and "37%" not in c["spec"]["reason"] for c in llm_charts)
+    assert insight["why_it_matters"] is None

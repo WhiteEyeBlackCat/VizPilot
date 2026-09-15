@@ -378,6 +378,10 @@ class _Merger:
                 target.spec.reason = with_caution(wording, target.warnings)
         else:
             if key not in self.added:
+                if reason:
+                    # the caller's (gated) caption wins over the raw LLM chart reason;
+                    # for bare chart suggestions the two are the same text
+                    spec.reason = reason
                 if level == "unverified":
                     note = f" ({UNVERIFIED_NOTE})"
                     spec.reason = (spec.reason + note) if spec.reason else UNVERIFIED_NOTE
