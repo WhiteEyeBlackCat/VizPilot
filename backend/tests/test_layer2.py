@@ -475,7 +475,7 @@ def test_layer2_is_deterministic_and_round_trips() -> None:
     assert first.evidence.layer2 == second.evidence.layer2
     reloaded = DatasetProfile.model_validate_json(first.model_dump_json())
     assert reloaded.evidence.layer2 == first.evidence.layer2
-    assert first.profile_version == 10
+    assert first.profile_version == 11
 
 
 def test_layer1_and_rules_unchanged_by_layer2() -> None:

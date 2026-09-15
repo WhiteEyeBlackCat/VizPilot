@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 # Bump whenever the profile schema or inference rules change: cached
 # {id}.profile.json files with a different version are recomputed.
-PROFILE_VERSION = 10  # v10: evidence layer 2 (stage 17.1); v9: near-duplicate groups (stage 14)
+PROFILE_VERSION = 11  # v11: layer-2 shapes/strength (stage 17.1b); v10: evidence layer 2 (stage 17.1); v9: near-duplicate groups (stage 14)
 
 SemanticType = Literal["numeric", "categorical", "datetime", "boolean", "text", "id", "unknown"]
 Frequency = Literal["daily", "weekly", "monthly", "irregular", "unknown"]
