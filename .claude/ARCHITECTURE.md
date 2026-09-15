@@ -17,9 +17,15 @@ upload (CSV/XLSX/Parquet)
       rules: recommend_charts → evidence score → derived/near-dup caps
              → confidence (score × sample × missingness × robustness)
              → diversity caps (per-x ≤2, per-y ≤3) → assign_tiers
-      llm (optional): build_messages(metadata only) → provider → tolerant parse
-             → canonicalize → evaluate_llm_spec (strong/weak/unverified/neutral)
-             → merge with rules → re-cap → tiers; insights paired with charts
+      llm (optional, two-stage since 17.3):
+             LLM #1 build_hypothesis_messages(metadata only) → hypotheses (≤5)
+             → hallucination gate (columns, probe type, roles, definitional/near-dup)
+             → coverage: claim already answered by evidence L1/L2? pass → validated, fail → drop
+             → uncovered: typed probe (probes/engine, ≤5, cached, n ≥ 30) pass → validated, fail → drop
+             → LLM #2 build_final_messages(validated facts only) iff a probe validated or ≥2 validated
+             → wording gate (only backend numbers/dates quotable; else template/neutral)
+             → backend chart per finding → merge with rules → re-cap → tiers
+             → any LLM failure: silent fallback to rules (message says so)
       → {charts: Recommendation[], insights, message, warnings}
   → POST /charts/render(ChartSpec) → validate_spec → render_chart → RenderResult
   → frontend buildOption(RenderResult) → ECharts

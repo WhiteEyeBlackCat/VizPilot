@@ -23,7 +23,7 @@ stats:
 | Understand why a chart is (not) recommended, scores, tiers, caps | Recommendation | `backend/app/charts/CODEMAP.md` → `rules.py`, `confidence.py` | `backend/tests/test_recommendation_quality.py` |
 | Understand ChartSpec validation (422) | Recommendation | `backend/app/charts/spec.py` | `frontend/src/components/ManualBuilder.tsx` |
 | Understand chart data aggregation | Render | `backend/app/charts/render.py` | `frontend/src/charts/echarts/option.ts` |
-| Understand LLM prompt, provider, merge, insight verification | LLM | `backend/app/llm/CODEMAP.md` | `backend/app/charts/rules.py` (`evaluate_llm_spec`) |
+| Understand LLM prompts, provider, two-stage hypothesis → coverage → probe → wording workflow, merge | LLM | `backend/app/llm/CODEMAP.md` | `backend/app/probes/CODEMAP.md`, `backend/tests/test_insight_benchmark.py` |
 | Understand targeted validation probes | Probes | `backend/app/probes/CODEMAP.md` | `backend/app/profiling/layer2.py.analysis.md` |
 | Understand HTTP endpoints, upload, storage | API | `backend/app/datasets/CODEMAP.md` | `backend/tests/test_upload.py` |
 | Understand app shell, state, routing, preview panel | Frontend Shell | `frontend/src/CODEMAP.md` → `App.tsx`, `store.ts` | `frontend/src/components/CODEMAP.md` |
@@ -49,7 +49,7 @@ stats:
 | `ChartSpec`, `validate_spec` | `backend/app/charts/spec.py` | L:28, L:61 |
 | `Recommendation`, `recommend_charts`, `assign_tiers` | `backend/app/charts/rules.py` | L:54, L:284, L:321 |
 | `render_chart` | `backend/app/charts/render.py` | L:50 |
-| `RecommendationService` | `backend/app/llm/service.py` | L:67 |
+| `RecommendationService` | `backend/app/llm/service.py` | L:106 |
 | `run_probes` | `backend/app/probes/engine.py` | L:137 |
 | `buildOption` | `frontend/src/charts/echarts/option.ts` | L:466 |
 | `reducer` / `AppState` | `frontend/src/store.ts` | L:143 / L:70 |

@@ -3,7 +3,7 @@ mode: learning
 generated_at: 2026-09-15
 ---
 
-> Targeted validation probe engine (stage 17.2): runs a bounded set of typed statistical tests requested by the LLM workflow, returns structured verdicts. Not yet wired to an HTTP route or the service on main.
+> Targeted validation probe engine (stage 17.2): runs a bounded set of typed statistical tests requested by the LLM workflow, returns structured verdicts. Called only by `llm/service.py` (`_Workflow`); no HTTP route of its own.
 
 ## Task Guide
 

@@ -39,9 +39,9 @@ Source of truth: backend Pydantic models. `frontend/src/types.ts` mirrors them a
 - Invariants: category order is backend order; nulls are gaps, never zeros; histogram binned over robust range with `display_range` disclosing excluded rows (`sum(counts)+excluded == valid rows`); `y_label` alone drives the axis title; `HARD_MAX_POINTS` → `RenderError` (422), scatter sampled with `sampled=true`.
 
 ## ProbeRequest / ProbeResult — `probes/schemas.py` L:49 / L:70
-- Producer: LLM workflow (stage 17.3, not yet on main); engine `run_probes`.
+- Producer: LLM workflow `llm/service.py` (`_Workflow`, stage 17.3); engine `run_probes`.
 - Shape: request `{type, columns{role: name}}` with `extra="forbid"`; result `{type, columns, effect_size, effect_label, n, n_min_group, confidence, verdict(pass|weak|fail), thresholds{pass, weak}, evidence(structured only), chart|null, notes, cached}`; rejected `{type, columns, reason, rejected: true}`.
 - Invariants: never returns raw rows; thresholds come from the engine, LLM-stated numbers are ignored; ≤5 probes per dataset; cache key = (type, sorted columns).
 
 ## HTTP API — `datasets/router.py`
-`GET /api/health` · `POST /api/datasets` (multipart) → `DatasetMeta` · `GET /api/datasets` · `GET /api/datasets/{id}` · `/preview` · `/profile` → DatasetProfile · `/recommendations?llm=true|false` → RecommendationsResponse · `POST /api/charts/render` → RenderResult. Errors: 404 unknown id, 422 `{detail:{errors}}` for spec/loader problems.
+`GET /api/health` · `POST /api/datasets` (multipart) → `DatasetMeta` · `GET /api/datasets` · `GET /api/datasets/{id}` · `/preview` · `/profile` → DatasetProfile · `/recommendations?llm=true|false&debug=0|1` → RecommendationsResponse (`debug=1` adds the optional `debug` workflow trace) · `POST /api/charts/render` → RenderResult. Errors: 404 unknown id, 422 `{detail:{errors}}` for spec/loader problems.
