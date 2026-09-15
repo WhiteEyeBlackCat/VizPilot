@@ -2,6 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 
 import { ApiError } from "../api";
 import type { Aggregation, ChartSpec, ChartType, ColumnProfile, DatasetProfile } from "../types";
+import { ErrorList } from "./ErrorList";
+import { FieldSelect } from "./FieldSelect";
+import { SectionCard } from "./SectionCard";
+import { Button } from "@/components/ui/button";
 
 interface Props {
   profile: DatasetProfile;
@@ -118,68 +122,33 @@ export function ManualBuilder({ profile, onGenerate }: Props) {
     }
   };
 
-  const select = (
-    label: string,
-    value: string,
-    setter: (v: string) => void,
-    choices: string[],
-    disabled = false,
-  ) => (
-    <label className="flex flex-col gap-1 text-xs text-slate-500">
-      {label}
-      <select
-        className="rounded border border-slate-300 px-2 py-1 text-sm text-slate-800 disabled:bg-slate-100"
-        value={value}
-        disabled={disabled || choices.length === 0}
-        onChange={(e) => setter(e.target.value)}
-      >
-        <option value="">—</option>
-        {choices.map((c) => (
-          <option key={c} value={c}>
-            {c}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
-
   return (
-    <section className="rounded-lg bg-white p-4 shadow">
-      <h2 className="mb-3 font-semibold">D. 手動建圖</h2>
+    <SectionCard title="D. 手動建圖">
       <div className="flex flex-wrap items-end gap-3">
-        <label className="flex flex-col gap-1 text-xs text-slate-500">
-          圖表類型
-          <select
-            className="rounded border border-slate-300 px-2 py-1 text-sm text-slate-800"
-            value={type}
-            onChange={(e) => setType(e.target.value as ChartType)}
-          >
-            {CHART_TYPES.map((t) => (
-              <option key={t} value={t}>
-                {t}
-              </option>
-            ))}
-          </select>
-        </label>
-        {select("X 軸", x, setX, options.x)}
-        {select("Y 軸", y, setY, yOptions)}
-        {select("分組", group, setGroup, groupOptions)}
-        {showAgg && select("聚合", agg, setAgg, AGGREGATIONS, type === "bar" && !y)}
-        <button
-          className="rounded bg-blue-600 px-4 py-1.5 text-sm text-white hover:bg-blue-700 disabled:opacity-50"
-          disabled={busy}
-          onClick={() => void generate()}
-        >
+        <FieldSelect
+          label="圖表類型"
+          value={type}
+          onChange={(v) => setType(v as ChartType)}
+          choices={CHART_TYPES}
+          allowNone={false}
+        />
+        <FieldSelect label="X 軸" value={x} onChange={setX} choices={options.x} />
+        <FieldSelect label="Y 軸" value={y} onChange={setY} choices={yOptions} />
+        <FieldSelect label="分組" value={group} onChange={setGroup} choices={groupOptions} />
+        {showAgg && (
+          <FieldSelect
+            label="聚合"
+            value={agg}
+            onChange={setAgg}
+            choices={AGGREGATIONS}
+            disabled={type === "bar" && !y}
+          />
+        )}
+        <Button size="sm" className="h-8" disabled={busy} onClick={() => void generate()}>
           {busy ? "生成中…" : "生成圖表"}
-        </button>
+        </Button>
       </div>
-      {errors.length > 0 && (
-        <ul className="mt-2 list-inside list-disc text-sm text-red-600">
-          {errors.map((e, i) => (
-            <li key={i}>{e}</li>
-          ))}
-        </ul>
-      )}
-    </section>
+      <ErrorList errors={errors} />
+    </SectionCard>
   );
 }

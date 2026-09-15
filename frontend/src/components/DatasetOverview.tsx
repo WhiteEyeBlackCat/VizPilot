@@ -1,13 +1,23 @@
-import type { ColumnProfile, DatasetProfile } from "../types";
+import type { ColumnProfile, DatasetProfile, SemanticType } from "../types";
+import { SectionCard } from "./SectionCard";
+import { Badge, type BadgeVariant } from "@/components/ui/badge";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 
-const TYPE_COLORS: Record<string, string> = {
-  numeric: "bg-blue-100 text-blue-700",
-  categorical: "bg-emerald-100 text-emerald-700",
-  datetime: "bg-purple-100 text-purple-700",
-  boolean: "bg-amber-100 text-amber-700",
-  text: "bg-slate-200 text-slate-600",
-  id: "bg-slate-200 text-slate-600",
-  unknown: "bg-slate-200 text-slate-500",
+const TYPE_VARIANT: Record<SemanticType, BadgeVariant> = {
+  numeric: "info",
+  categorical: "success",
+  datetime: "accent",
+  boolean: "warning",
+  text: "muted",
+  id: "muted",
+  unknown: "muted",
 };
 
 function fmt(value: number | string | null): string {
@@ -38,43 +48,48 @@ function summary(c: ColumnProfile): string {
 }
 
 export function DatasetOverview({ profile }: { profile: DatasetProfile }) {
+  const title = (
+    <>
+      B. 資料總覽
+      <span className="ml-2 text-sm font-normal text-muted-foreground">
+        {profile.n_rows} 列 × {profile.n_cols} 欄
+        {profile.sampled && "（統計基於抽樣）"}
+      </span>
+    </>
+  );
   return (
-    <section className="rounded-lg bg-white p-4 shadow">
-      <h2 className="mb-2 font-semibold">
-        B. 資料總覽
-        <span className="ml-2 text-sm font-normal text-slate-500">
-          {profile.n_rows} 列 × {profile.n_cols} 欄
-          {profile.sampled && "（統計基於抽樣）"}
-        </span>
-      </h2>
+    <SectionCard title={title}>
       <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b text-left text-xs uppercase text-slate-500">
-              <th className="py-1.5 pr-3">欄位</th>
-              <th className="py-1.5 pr-3">型別</th>
-              <th className="py-1.5 pr-3">缺失</th>
-              <th className="py-1.5 pr-3">唯一值</th>
-              <th className="py-1.5">統計摘要</th>
-            </tr>
-          </thead>
-          <tbody>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>欄位</TableHead>
+              <TableHead>型別</TableHead>
+              <TableHead>缺失</TableHead>
+              <TableHead>唯一值</TableHead>
+              <TableHead>統計摘要</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
             {profile.columns.map((c) => (
-              <tr key={c.name} className="border-b border-slate-100">
-                <td className="py-1.5 pr-3 font-medium">{c.name}</td>
-                <td className="py-1.5 pr-3">
-                  <span className={`rounded px-1.5 py-0.5 text-xs ${TYPE_COLORS[c.semantic_type]}`}>
+              <TableRow key={c.name}>
+                <TableCell className="font-medium">{c.name}</TableCell>
+                <TableCell>
+                  <Badge variant={TYPE_VARIANT[c.semantic_type] ?? "muted"}>
                     {c.semantic_type}
-                  </span>
-                </td>
-                <td className="py-1.5 pr-3 text-slate-500">{(c.missing_ratio * 100).toFixed(1)}%</td>
-                <td className="py-1.5 pr-3 text-slate-500">{c.unique_count}</td>
-                <td className="py-1.5 text-slate-600">{summary(c)}</td>
-              </tr>
+                    {c.nominal && <span className="ml-1 font-normal opacity-70">code</span>}
+                  </Badge>
+                </TableCell>
+                <TableCell className="text-muted-foreground">
+                  {(c.missing_ratio * 100).toFixed(1)}%
+                </TableCell>
+                <TableCell className="text-muted-foreground">{c.unique_count}</TableCell>
+                <TableCell className="text-muted-foreground">{summary(c)}</TableCell>
+              </TableRow>
             ))}
-          </tbody>
-        </table>
+          </TableBody>
+        </Table>
       </div>
-    </section>
+    </SectionCard>
   );
 }

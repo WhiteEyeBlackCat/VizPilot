@@ -1,7 +1,26 @@
+import { ChevronRight, Sparkles } from "lucide-react";
 import { useState } from "react";
 
 import { ApiError } from "../api";
-import type { ChartSpec, Insight, Recommendation, RecommendationsResponse, Tier, Warning, WarningSeverity } from "../types";
+import type {
+  ChartSpec,
+  Insight,
+  Recommendation,
+  RecommendationsResponse,
+  Tier,
+  Warning,
+  WarningSeverity,
+} from "../types";
+import { ErrorList } from "./ErrorList";
+import { SectionCard } from "./SectionCard";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge, type BadgeVariant } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { cn } from "@/lib/utils";
 
 interface Props {
   recs: RecommendationsResponse | null;
@@ -9,17 +28,17 @@ interface Props {
   onGenerate: (spec: ChartSpec) => Promise<void>;
 }
 
-const SUPPORTED_BADGE = {
-  strong: { label: "強證據", className: "bg-emerald-100 text-emerald-700" },
-  weak: { label: "弱證據", className: "bg-amber-100 text-amber-700" },
-  unverified: { label: "未驗證", className: "bg-slate-200 text-slate-500" },
-} as const;
+const SUPPORTED_BADGE: Record<Insight["supported"], { label: string; variant: BadgeVariant }> = {
+  strong: { label: "強證據", variant: "success" },
+  weak: { label: "弱證據", variant: "warning" },
+  unverified: { label: "未驗證", variant: "muted" },
+};
 
 // stage 9 confidence warnings: severe = red, warning = amber, info = grey
-const WARNING_CHIP: Record<WarningSeverity, string> = {
-  severe: "bg-red-100 text-red-700",
-  warning: "bg-amber-100 text-amber-700",
-  info: "bg-slate-100 text-slate-500",
+const WARNING_VARIANT: Record<WarningSeverity, BadgeVariant> = {
+  severe: "danger",
+  warning: "warning",
+  info: "muted",
 };
 
 const TIER_SECTIONS: { tier: Tier; title: string }[] = [
@@ -31,10 +50,15 @@ const TIER_SECTIONS: { tier: Tier; title: string }[] = [
 function warningChips(warnings: Warning[] | undefined) {
   if (!warnings || warnings.length === 0) return null;
   return (
-    <ul className="mb-1 flex flex-wrap gap-1">
+    <ul className="mb-2 flex flex-wrap gap-1">
       {warnings.map((w, i) => (
-        <li key={i} className={`rounded px-1.5 py-0.5 text-xs ${WARNING_CHIP[w.severity] ?? WARNING_CHIP.info}`}>
-          {w.message}
+        <li key={i}>
+          <Badge
+            variant={WARNING_VARIANT[w.severity] ?? "muted"}
+            className="whitespace-normal text-left font-normal leading-snug"
+          >
+            {w.message}
+          </Badge>
         </li>
       ))}
     </ul>
@@ -57,6 +81,8 @@ function variables(spec: ChartSpec): string {
   if (spec.aggregation) parts.push(`agg=${spec.aggregation}`);
   return parts.join(" · ") || "—";
 }
+
+const CARD_GRID = "grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3";
 
 export function Recommendations({ recs, aiPending, onGenerate }: Props) {
   const [busyPriority, setBusyPriority] = useState<number | null>(null);
@@ -91,44 +117,47 @@ export function Recommendations({ recs, aiPending, onGenerate }: Props) {
   const card = (rec: Recommendation) => {
     const priority = rec.spec.priority ?? 0;
     return (
-      <div
+      <Card
         key={priority}
         id={`rec-card-${priority}`}
-        className={`flex flex-col rounded border p-3 transition-colors ${
-          highlighted === priority ? "border-violet-500 bg-violet-50" : "border-slate-200"
-        }`}
+        className={cn(
+          "flex flex-col p-3 shadow-none transition-colors",
+          highlighted === priority && "border-violet-500 bg-violet-50",
+        )}
       >
         <div className="mb-1 flex items-start justify-between gap-2">
           <span className="text-sm font-medium">{rec.spec.title}</span>
           <span className="flex shrink-0 gap-1">
-            <span className="rounded bg-slate-100 px-1.5 py-0.5 text-xs text-slate-600">{rec.spec.type}</span>
-            <span
-              className={`rounded px-1.5 py-0.5 text-xs ${
-                rec.source === "llm" ? "bg-violet-100 text-violet-700" : "bg-slate-100 text-slate-500"
-              }`}
-            >
+            <Badge variant="muted">{rec.spec.type}</Badge>
+            <Badge variant={rec.source === "llm" ? "accent" : "muted"}>
               {rec.source === "llm" ? "AI" : "rules"}
-            </span>
+            </Badge>
           </span>
         </div>
-        <p className="mb-1 flex-1 text-xs text-slate-600">{rec.spec.reason}</p>
+        <p className="mb-1 flex-1 text-xs text-muted-foreground">{rec.spec.reason}</p>
         {warningChips(rec.warnings)}
-        <p className="mb-2 text-xs text-slate-400">
+        <p className="mb-2 text-xs text-muted-foreground/80">
           {variables(rec.spec)}
           {rec.confidence && rec.confidence.overall < 1 && (
-            <span className="ml-2" title={confidenceTitle(rec)}>
-              信心 {Math.round(rec.confidence.overall * 100)}%
-            </span>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="ml-2 cursor-help underline decoration-dotted underline-offset-2">
+                  信心 {Math.round(rec.confidence.overall * 100)}%
+                </span>
+              </TooltipTrigger>
+              <TooltipContent>{confidenceTitle(rec)}</TooltipContent>
+            </Tooltip>
           )}
         </p>
-        <button
-          className="self-start rounded bg-blue-600 px-3 py-1 text-xs text-white hover:bg-blue-700 disabled:opacity-50"
+        <Button
+          size="sm"
+          className="h-7 self-start px-3 text-xs"
           disabled={busyPriority !== null}
           onClick={() => void generate(rec.spec)}
         >
           {busyPriority === priority ? "生成中…" : "Generate"}
-        </button>
-      </div>
+        </Button>
+      </Card>
     );
   };
 
@@ -136,64 +165,77 @@ export function Recommendations({ recs, aiPending, onGenerate }: Props) {
     const badge = SUPPORTED_BADGE[insight.supported];
     return (
       <li key={index} className="flex items-start gap-2">
-        <span className={`mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-xs ${badge.className}`}>{badge.label}</span>
+        <Badge variant={badge.variant} className="mt-0.5 shrink-0">
+          {badge.label}
+        </Badge>
         {/* plain text only — LLM free text must never be rendered as HTML */}
         <span className="flex-1">{insight.text}</span>
         {insight.chart_priority !== null && (
-          <button
-            className="shrink-0 rounded border border-violet-300 px-2 py-0.5 text-xs text-violet-700 hover:bg-violet-100"
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-6 shrink-0 border-violet-300 px-2 text-xs text-violet-700 hover:bg-violet-100 hover:text-violet-800"
             onClick={() => showChart(insight.chart_priority!)}
           >
             看圖
-          </button>
+          </Button>
         )}
       </li>
     );
   };
 
-  const byTier = (tier: Tier) =>
-    (recs?.charts ?? []).filter((rec) => rec.tier === tier);
+  const byTier = (tier: Tier) => (recs?.charts ?? []).filter((rec) => rec.tier === tier);
+
+  const title = (
+    <span className="flex items-center gap-2">
+      C. 推薦圖表
+      {aiPending && (
+        <Badge variant="accent" className="animate-pulse font-normal">
+          <Sparkles className="mr-1 h-3 w-3" />
+          AI 分析中…
+        </Badge>
+      )}
+    </span>
+  );
 
   return (
-    <section className="rounded-lg bg-white p-4 shadow">
-      <h2 className="mb-2 font-semibold">
-        C. 推薦圖表
-        {aiPending && (
-          <span className="ml-2 animate-pulse rounded bg-violet-100 px-2 py-0.5 text-xs font-normal text-violet-700">
-            AI 分析中…
-          </span>
-        )}
-      </h2>
-
+    <SectionCard title={title}>
       {recs?.message && (
-        <div className="mb-3 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-          {recs.message}
-        </div>
+        <Alert className="mb-3 border-amber-200 bg-amber-50 text-amber-800">
+          <AlertDescription>{recs.message}</AlertDescription>
+        </Alert>
       )}
 
       {recs?.warnings && recs.warnings.length > 0 && (
-        <ul className="mb-3 space-y-1 rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
-          {recs.warnings.map((w, i) => (
-            <li key={i}>{w.message}</li>
-          ))}
-        </ul>
+        <Alert className="mb-3 bg-muted/50 text-muted-foreground">
+          <AlertDescription>
+            <ul className="space-y-1 text-xs">
+              {recs.warnings.map((w, i) => (
+                <li key={i}>{w.message}</li>
+              ))}
+            </ul>
+          </AlertDescription>
+        </Alert>
       )}
 
       {recs && recs.insights.length > 0 && (
-        <ul className="mb-3 space-y-2 rounded bg-violet-50 p-3 text-sm text-violet-900">
+        <ul className="mb-3 space-y-2 rounded-md bg-violet-50 p-3 text-sm text-violet-900">
           {recs.insights.map(insightCard)}
         </ul>
       )}
 
-      {error.length > 0 && (
-        <ul className="mb-2 list-inside list-disc text-sm text-red-600">
-          {error.map((e, i) => (
-            <li key={i}>{e}</li>
-          ))}
-        </ul>
-      )}
+      <ErrorList errors={error} className="mb-3" />
 
-      {!recs && <p className="text-sm text-slate-400">載入推薦中…</p>}
+      {!recs && (
+        <div className="space-y-2" aria-label="載入推薦中…">
+          <p className="text-sm text-muted-foreground">載入推薦中…</p>
+          <div className={CARD_GRID}>
+            {[0, 1, 2].map((i) => (
+              <Skeleton key={i} className="h-28" />
+            ))}
+          </div>
+        </div>
+      )}
 
       {TIER_SECTIONS.map(({ tier, title }) => {
         const charts = byTier(tier);
@@ -201,9 +243,9 @@ export function Recommendations({ recs, aiPending, onGenerate }: Props) {
           // an empty top tier is a finding, not a rendering gap: say so
           if (tier === "top" && (recs?.charts.length ?? 0) > 0) {
             return (
-              <div key={tier} className="mt-4">
-                <h3 className="mb-2 text-sm font-semibold text-slate-700">{title}</h3>
-                <p className="text-sm text-slate-400">
+              <div key={tier} className="mt-4 first:mt-0">
+                <h3 className="mb-2 text-sm font-medium text-muted-foreground">{title}</h3>
+                <p className="text-sm text-muted-foreground/80">
                   沒有圖表在資料中展現足夠強的證據——以下為次要與探索性建議。
                 </p>
               </div>
@@ -213,29 +255,31 @@ export function Recommendations({ recs, aiPending, onGenerate }: Props) {
         }
         if (tier === "exploratory") {
           return (
-            <div key={tier} className="mt-4">
-              <button
-                className="mb-2 flex items-center gap-1 text-sm font-medium text-slate-500 hover:text-slate-700"
-                onClick={() => setExploratoryOpen((open) => !open)}
-              >
-                <span>{exploratoryOpen ? "▾" : "▸"}</span>
-                {title}（{charts.length}）
-              </button>
-              {exploratoryOpen && (
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-                  {charts.map(card)}
-                </div>
-              )}
-            </div>
+            <Collapsible key={tier} open={exploratoryOpen} onOpenChange={setExploratoryOpen} className="mt-4">
+              {/* h3 like the other tiers, with the toggle inside it */}
+              <h3 className="mb-2 text-sm font-medium text-muted-foreground">
+                <CollapsibleTrigger asChild>
+                  <Button variant="ghost" size="sm" className="-ml-2 h-7 px-2 text-sm font-medium text-muted-foreground">
+                    <ChevronRight
+                      className={cn("h-4 w-4 transition-transform", exploratoryOpen && "rotate-90")}
+                    />
+                    {title}（{charts.length}）
+                  </Button>
+                </CollapsibleTrigger>
+              </h3>
+              <CollapsibleContent>
+                <div className={CARD_GRID}>{charts.map(card)}</div>
+              </CollapsibleContent>
+            </Collapsible>
           );
         }
         return (
           <div key={tier} className="mt-4 first:mt-0">
-            <h3 className="mb-2 text-sm font-medium text-slate-500">{title}</h3>
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">{charts.map(card)}</div>
+            <h3 className="mb-2 text-sm font-medium text-muted-foreground">{title}</h3>
+            <div className={CARD_GRID}>{charts.map(card)}</div>
           </div>
         );
       })}
-    </section>
+    </SectionCard>
   );
 }

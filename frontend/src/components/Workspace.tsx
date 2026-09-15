@@ -1,5 +1,10 @@
-import { ChartView } from "./ChartView";
+import { X } from "lucide-react";
+
 import type { RenderResult } from "../types";
+import { ChartView } from "./ChartView";
+import { SectionCard } from "./SectionCard";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 
 export interface WorkspaceChart {
   key: string;
@@ -13,21 +18,23 @@ interface Props {
 
 export function ChartsWorkspace({ charts, onRemove }: Props) {
   return (
-    <section className="rounded-lg bg-white p-4 shadow">
-      <h2 className="mb-3 font-semibold">已生成圖表</h2>
+    <SectionCard title="已生成圖表">
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         {charts.map((chart) => (
-          <div key={chart.key} className="relative rounded border border-slate-200 p-2">
-            <button
-              className="absolute right-2 top-2 z-10 rounded bg-slate-100 px-2 py-0.5 text-xs text-slate-500 hover:bg-red-100 hover:text-red-600"
+          <Card key={chart.key} className="relative p-2 shadow-none">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="absolute right-2 top-2 z-10 h-7 px-2 text-xs text-muted-foreground hover:text-destructive"
               onClick={() => onRemove(chart.key)}
             >
+              <X className="h-3.5 w-3.5" />
               移除
-            </button>
+            </Button>
             <ChartView result={chart.result} />
-          </div>
+          </Card>
         ))}
       </div>
-    </section>
+    </SectionCard>
   );
 }

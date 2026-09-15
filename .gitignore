@@ -27,3 +27,7 @@ backend/data/
 # Generated synthetic datasets (regenerate with dataset/syn/*.py)
 dataset/*.csv
 dataset/*.parquet
+
+# Frontend e2e artefacts
+frontend/e2e/screenshots/
+frontend/e2e/.xlibs/

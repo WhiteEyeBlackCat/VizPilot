@@ -7,6 +7,7 @@ import { ManualBuilder } from "./components/ManualBuilder";
 import { Recommendations } from "./components/Recommendations";
 import { UploadPanel } from "./components/UploadPanel";
 import type { ChartSpec, DatasetMeta, DatasetProfile, RecommendationsResponse } from "./types";
+import { TooltipProvider } from "@/components/ui/tooltip";
 
 export default function App() {
   const [datasets, setDatasets] = useState<DatasetMeta[]>([]);
@@ -77,35 +78,37 @@ export default function App() {
   );
 
   return (
-    <div className="mx-auto max-w-6xl space-y-6 p-6">
-      <header>
-        <h1 className="text-2xl font-bold text-slate-900">VizPilot</h1>
-        <p className="text-sm text-slate-500">
-          本地 AI 資料探索助手 — 上傳資料、理解資料、獲得可解釋的圖表推薦
-        </p>
-      </header>
+    <TooltipProvider delayDuration={200}>
+      <div className="mx-auto max-w-6xl space-y-6 p-6">
+        <header>
+          <h1 className="text-2xl font-bold tracking-tight">VizPilot</h1>
+          <p className="text-sm text-muted-foreground">
+            本地 AI 資料探索助手 — 上傳資料、理解資料、獲得可解釋的圖表推薦
+          </p>
+        </header>
 
-      <UploadPanel
-        datasets={datasets}
-        current={meta}
-        onUploaded={onUploaded}
-        onSelect={selectDataset}
-      />
-
-      {profile && <DatasetOverview profile={profile} />}
-
-      {meta && (
-        <Recommendations recs={recs} aiPending={aiPending} onGenerate={generateChart} />
-      )}
-
-      {profile && <ManualBuilder profile={profile} onGenerate={generateChart} />}
-
-      {charts.length > 0 && (
-        <ChartsWorkspace
-          charts={charts}
-          onRemove={(key) => setCharts((prev) => prev.filter((c) => c.key !== key))}
+        <UploadPanel
+          datasets={datasets}
+          current={meta}
+          onUploaded={onUploaded}
+          onSelect={selectDataset}
         />
-      )}
-    </div>
+
+        {profile && <DatasetOverview profile={profile} />}
+
+        {meta && (
+          <Recommendations recs={recs} aiPending={aiPending} onGenerate={generateChart} />
+        )}
+
+        {profile && <ManualBuilder profile={profile} onGenerate={generateChart} />}
+
+        {charts.length > 0 && (
+          <ChartsWorkspace
+            charts={charts}
+            onRemove={(key) => setCharts((prev) => prev.filter((c) => c.key !== key))}
+          />
+        )}
+      </div>
+    </TooltipProvider>
   );
 }
