@@ -4,7 +4,6 @@ import { ApiError } from "../api";
 import type { Aggregation, ChartSpec, ChartType, ColumnProfile, DatasetProfile } from "../types";
 import { ErrorList } from "./ErrorList";
 import { FieldSelect } from "./FieldSelect";
-import { SectionCard } from "./SectionCard";
 import { Button } from "@/components/ui/button";
 
 interface Props {
@@ -123,7 +122,7 @@ export function ManualBuilder({ profile, onGenerate }: Props) {
   };
 
   return (
-    <SectionCard title="手動建圖">
+    <div className="space-y-3" data-manual-builder>
       <div className="flex flex-wrap items-end gap-3">
         <FieldSelect
           label="圖表類型"
@@ -149,6 +148,6 @@ export function ManualBuilder({ profile, onGenerate }: Props) {
         </Button>
       </div>
       <ErrorList errors={errors} />
-    </SectionCard>
+    </div>
   );
 }

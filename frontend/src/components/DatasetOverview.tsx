@@ -1,5 +1,4 @@
 import type { ColumnProfile, DatasetProfile, SemanticType } from "../types";
-import { SectionCard } from "./SectionCard";
 import { Badge, type BadgeVariant } from "@/components/ui/badge";
 import {
   Table,
@@ -48,17 +47,7 @@ function summary(c: ColumnProfile): string {
 }
 
 export function DatasetOverview({ profile }: { profile: DatasetProfile }) {
-  const title = (
-    <>
-      資料總覽
-      <span className="ml-2 text-sm font-normal text-muted-foreground">
-        {profile.n_rows} 列 × {profile.n_cols} 欄
-        {profile.sampled && "（統計基於抽樣）"}
-      </span>
-    </>
-  );
   return (
-    <SectionCard title={title}>
       <div className="overflow-x-auto">
         <Table>
           <TableHeader>
@@ -90,6 +79,5 @@ export function DatasetOverview({ profile }: { profile: DatasetProfile }) {
           </TableBody>
         </Table>
       </div>
-    </SectionCard>
   );
 }

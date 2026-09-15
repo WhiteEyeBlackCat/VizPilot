@@ -11,10 +11,23 @@ import { COLORS, DIVERGING, PALETTE } from "./theme";
 // values. This test pins the two together: change one, and this fails.
 const css = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../../index.css"), "utf8");
 
+/** A hex token (`--danger: #f87171`) or an HSL triplet (`--card: 222 18% 11%`)
+ *  resolved to lowercase hex; `--surface: hsl(var(--card))` follows the alias. */
 function token(name: string): string {
-  const m = css.match(new RegExp(`--${name}:\\s*(#[0-9a-fA-F]{6})`));
-  if (!m) throw new Error(`token --${name} not found in index.css`);
-  return m[1].toLowerCase();
+  const hex = css.match(new RegExp(`--${name}:\\s*(#[0-9a-fA-F]{6})`));
+  if (hex) return hex[1].toLowerCase();
+  const alias = css.match(new RegExp(`--${name}:\\s*hsl\\(var\\(--([a-z-]+)\\)\\)`));
+  if (alias) return token(alias[1]);
+  const hsl = css.match(new RegExp(`--${name}:\\s*(\\d+)\\s+(\\d+)%\\s+(\\d+)%`));
+  if (!hsl) throw new Error(`token --${name} not found in index.css`);
+  return hslToHex(Number(hsl[1]), Number(hsl[2]) / 100, Number(hsl[3]) / 100);
+}
+
+function hslToHex(h: number, s: number, l: number): string {
+  const k = (n: number) => (n + h / 30) % 12;
+  const a = s * Math.min(l, 1 - l);
+  const f = (n: number) => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+  return "#" + [f(0), f(8), f(4)].map((v) => Math.round(v * 255).toString(16).padStart(2, "0")).join("");
 }
 
 // WCAG 2.x relative luminance / contrast ratio
@@ -39,6 +52,13 @@ describe("theme tokens mirror src/index.css", () => {
     expect(COLORS.splitLine).toBe(token("border-subtle"));
     expect(COLORS.outlier).toBe(token("danger"));
     expect(COLORS.cellBorder).toBe(token("surface"));
+  });
+
+  it("chart text colours equal --foreground / --muted-foreground", () => {
+    expect(COLORS.text).toBe(token("foreground"));
+    expect(COLORS.muted).toBe(token("muted-foreground"));
+    expect(COLORS.surface).toBe(token("card"));
+    expect(COLORS.elevated).toBe(token("popover"));
   });
 
   it("every palette colour and both diverging ends read on the surface (≥ 3:1)", () => {

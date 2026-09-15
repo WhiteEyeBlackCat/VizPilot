@@ -1,178 +1,277 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { PanelRightOpen, Plus } from "lucide-react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 
 import { api } from "./api";
-import { DatasetOverview } from "./components/DatasetOverview";
-import { ErrorList } from "./components/ErrorList";
-import { ManualBuilder } from "./components/ManualBuilder";
-import { PlotsPane, type WorkspaceChart } from "./components/PlotsPane";
-import { Recommendations } from "./components/Recommendations";
-import { SplitPage } from "./components/SplitPage";
-import { DatasetSwitcher, UploadButton, UploadPanel, useUploader } from "./components/UploadPanel";
-import type { ChartSpec, DatasetMeta, DatasetProfile, RecommendationsResponse } from "./types";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { NewDatasetDialog } from "./components/NewDatasetDialog";
+import { PreviewPanel } from "./components/PreviewPanel";
+import { Sidebar } from "./components/Sidebar";
+import { ExplorePage } from "./pages/ExplorePage";
+import { InsightsPage } from "./pages/InsightsPage";
+import { OverviewPage } from "./pages/OverviewPage";
+import { WorkspacePage } from "./pages/WorkspacePage";
+import { initialState, isSaved, reducer, workspaceOf, type Page, type Preview, type SavedChart } from "./store";
+import type { ChartSpec, DatasetMeta, Recommendation } from "./types";
+import { Button } from "@/components/ui/button";
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup, type Layout } from "@/components/ui/resizable";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { useMediaQuery } from "@/lib/hooks";
+import { useHashRoute } from "@/lib/router";
 
-type Page = "overview" | "recommend" | "manual";
+const PAGE_ORDER: Page[] = ["overview", "insights", "explore", "workspace"];
 
 export default function App() {
-  const [datasets, setDatasets] = useState<DatasetMeta[]>([]);
-  const [meta, setMeta] = useState<DatasetMeta | null>(null);
-  const [profile, setProfile] = useState<DatasetProfile | null>(null);
-  const [recs, setRecs] = useState<RecommendationsResponse | null>(null);
-  const [aiPending, setAiPending] = useState(false);
-  const [charts, setCharts] = useState<WorkspaceChart[]>([]);
-  const [currentKey, setCurrentKey] = useState<string | null>(null);
-  const [page, setPage] = useState<Page>("overview");
-  const currentId = useRef<string | null>(null);
-  const fullRecsLoaded = useRef<Record<string, boolean>>({});
-  const chartSeq = useRef(0);
+  const [state, dispatch] = useReducer(reducer, initialState);
+  const [route, navigate] = useHashRoute();
+  const [newOpen, setNewOpen] = useState(false);
+  const wide = useMediaQuery("(min-width: 1024px)");
+  const saveSeq = useRef(0);
+  // remembered across collapse / expand (the panel re-mounts) and page
+  // switches; v4 has no autoSaveId, so the last layout is kept here
+  const layoutRef = useRef<Layout>({ content: 55, preview: 45 });
+
+  const { datasets, meta, profile, recs, aiPending, preview, panelOpen } = state;
+  const datasetId = meta?.dataset_id ?? null;
+  const workspace = workspaceOf(state, datasetId);
 
   useEffect(() => {
-    api.listDatasets().then(setDatasets).catch(() => {});
+    api
+      .listDatasets()
+      .then((list) => dispatch({ type: "DATASETS_LOADED", datasets: list }))
+      .catch(() => dispatch({ type: "DATASETS_LOADED", datasets: [] }));
   }, []);
 
+  /** Load a dataset: profile plus the two-phase recommendations. Every
+   *  response is tagged with its dataset id; the reducer drops stale ones. */
   const selectDataset = useCallback((m: DatasetMeta) => {
     const id = m.dataset_id;
-    currentId.current = id;
-    setMeta(m);
-    setProfile(null);
-    setRecs(null);
-    setCharts([]);
-    setCurrentKey(null);
-    setAiPending(true);
-    setPage("recommend");
-
+    dispatch({ type: "SELECT_DATASET", meta: m });
     api
       .profile(id)
-      .then((p) => currentId.current === id && setProfile(p))
+      .then((p) => dispatch({ type: "PROFILE_LOADED", datasetId: id, profile: p }))
       .catch(() => {});
     // two-phase load: rules instantly, then the full (possibly LLM) result
     api
       .recommendations(id, false)
-      .then((r) => {
-        if (currentId.current === id && !fullRecsLoaded.current[id]) setRecs(r);
-      })
+      .then((r) => dispatch({ type: "RECS_LOADED", datasetId: id, recs: r, final: false }))
       .catch(() => {});
     api
       .recommendations(id, true)
-      .then((r) => {
-        if (currentId.current !== id) return;
-        fullRecsLoaded.current[id] = true;
-        setRecs(r);
-        setAiPending(false);
-      })
-      .catch(() => {
-        if (currentId.current === id) setAiPending(false);
-      });
+      .then((r) => dispatch({ type: "RECS_LOADED", datasetId: id, recs: r, final: true }))
+      .catch(() => dispatch({ type: "AI_DONE", datasetId: id }));
   }, []);
+
+  // the hash is the source of truth for the selected dataset
+  useEffect(() => {
+    if (!datasets) return;
+    if (!route.datasetId) return;
+    if (route.datasetId === datasetId) return;
+    const m = datasets.find((d) => d.dataset_id === route.datasetId);
+    if (m) selectDataset(m);
+    else navigate({ datasetId: null, page: "overview" }); // unknown id in the hash
+  }, [datasets, route.datasetId, datasetId, selectDataset, navigate]);
 
   const onUploaded = useCallback(
     (m: DatasetMeta) => {
-      setDatasets((prev) => [m, ...prev.filter((d) => d.dataset_id !== m.dataset_id)]);
-      selectDataset(m);
+      dispatch({ type: "DATASET_ADDED", meta: m });
+      navigate({ datasetId: m.dataset_id, page: "overview" });
     },
-    [selectDataset],
+    [navigate],
   );
-  const uploader = useUploader(onUploaded);
 
-  const generateChart = useCallback(async (spec: ChartSpec) => {
-    const id = currentId.current;
-    if (!id) return;
-    const result = await api.render(id, spec);
-    if (currentId.current !== id) return; // dataset switched while rendering
-    chartSeq.current += 1;
-    const key = `chart-${chartSeq.current}`;
-    setCharts((prev) => [...prev, { key, result }]);
-    setCurrentKey(key); // the newest chart becomes the current plot
+  /** Render a spec and show it in the preview panel. Never touches the
+   *  workspace. Errors propagate to the caller's error list. */
+  const previewSpec = useCallback(
+    async (spec: ChartSpec, extra: Omit<Preview, "result" | "seq">) => {
+      const id = datasetId;
+      if (!id) return;
+      const result = await api.render(id, spec);
+      dispatch({ type: "SET_PREVIEW", datasetId: id, preview: { result, ...extra } });
+    },
+    [datasetId],
+  );
+
+  const previewRecommendation = useCallback(
+    (rec: Recommendation) => {
+      const insightText = recs?.insights.find((i) => i.chart_priority === rec.spec.priority)?.text;
+      return previewSpec(rec.spec, { source: "insight", rec, insightText });
+    },
+    [previewSpec, recs],
+  );
+
+  const previewManual = useCallback((spec: ChartSpec) => previewSpec(spec, { source: "explore" }), [previewSpec]);
+
+  const previewSaved = useCallback(
+    (chart: SavedChart) => {
+      if (!datasetId) return;
+      dispatch({
+        type: "SET_PREVIEW",
+        datasetId,
+        preview: {
+          result: chart.result,
+          source: "workspace",
+          rec: chart.rec,
+          insightText: chart.insightText,
+          savedKey: chart.key,
+        },
+      });
+    },
+    [datasetId],
+  );
+
+  const savePreview = useCallback(() => {
+    saveSeq.current += 1;
+    dispatch({ type: "SAVE_PREVIEW", key: `saved-${Date.now()}-${saveSeq.current}`, savedAt: new Date().toISOString() });
   }, []);
 
-  const removeChart = useCallback((key: string) => {
-    setCharts((prev) => {
-      const idx = prev.findIndex((c) => c.key === key);
-      const next = prev.filter((c) => c.key !== key);
-      // keep the position: show the neighbour that took the removed slot
-      setCurrentKey((cur) =>
-        cur !== key ? cur : next.length === 0 ? null : next[Math.min(idx, next.length - 1)].key,
-      );
-      return next;
-    });
-  }, []);
+  const removeSaved = useCallback(
+    (key: string) => {
+      if (datasetId) dispatch({ type: "REMOVE_SAVED", datasetId, key });
+    },
+    [datasetId],
+  );
 
-  const clearCharts = useCallback(() => {
-    setCharts([]);
-    setCurrentKey(null);
-  }, []);
+  const page: Page = route.datasetId && datasetId ? route.page : "overview";
+  const selectedPriority =
+    preview && preview.source !== "explore" && preview.rec ? (preview.rec.spec.priority ?? null) : null;
+  const currentSavedKey =
+    preview?.source === "workspace" ? (preview.savedKey ?? null) : null;
 
-  const plots = (
-    <PlotsPane
-      charts={charts}
-      currentKey={currentKey}
-      onSelect={setCurrentKey}
-      onRemove={removeChart}
-      onClear={clearCharts}
+  const panel = preview && (
+    <PreviewPanel
+      preview={preview}
+      saved={isSaved(state, preview.result.spec)}
+      variant={wide ? "side" : "drawer"}
+      open={panelOpen}
+      onToggle={() => dispatch({ type: "SET_PANEL_OPEN", open: !panelOpen })}
+      onClose={() => dispatch({ type: "CLOSE_PREVIEW" })}
+      onSave={savePreview}
+      onRemove={() => preview.savedKey && removeSaved(preview.savedKey)}
     />
+  );
+
+  // pages stay mounted (hidden) so their local state survives navigation
+  const pages = meta && (
+    <>
+      {PAGE_ORDER.map((p) => (
+        <section key={p} hidden={page !== p} aria-hidden={page !== p} className="px-6 py-5" data-page-section={p}>
+          {p === "overview" && <OverviewPage meta={meta} profile={profile} />}
+          {p === "insights" && (
+            <InsightsPage
+              recs={recs}
+              aiPending={aiPending}
+              selectedPriority={selectedPriority}
+              onPreview={previewRecommendation}
+            />
+          )}
+          {p === "explore" && <ExplorePage profile={profile} onGenerate={previewManual} />}
+          {p === "workspace" && (
+            <WorkspacePage
+              charts={workspace}
+              currentKey={currentSavedKey}
+              onPreview={previewSaved}
+              onRemove={removeSaved}
+            />
+          )}
+        </section>
+      ))}
+    </>
+  );
+
+  const emptyState = (
+    <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center" data-empty-state>
+      <h1 className="text-xl font-semibold tracking-tight">VizPilot</h1>
+      <p className="max-w-md text-sm text-muted-foreground">
+        上傳一份 CSV、XLSX 或 Parquet。系統會建立 profile、計算證據並推薦圖表；再用 Explore
+        自行建圖，把值得留下的圖 Save 到 Workspace。
+      </p>
+      <Button size="sm" onClick={() => setNewOpen(true)}>
+        <Plus className="mr-1.5 h-3.5 w-3.5" />
+        New Dataset
+      </Button>
+      {datasets === null && <p className="text-xs text-muted-foreground">載入資料集清單中…</p>}
+    </div>
+  );
+
+  const main = (
+    <main
+      className="relative h-full min-h-0 overflow-y-auto"
+      data-page-content
+      data-profile={profile ? "loaded" : "none"}
+      data-dataset={datasetId ?? ""}
+      data-active-page={meta ? page : "none"}
+    >
+      {meta ? pages : emptyState}
+      {/* collapsed side panel: a slim edge control brings it back */}
+      {wide && preview && !panelOpen && (
+        <Button
+          variant="outline"
+          size="sm"
+          className="absolute right-3 top-3 h-7 px-2 text-xs"
+          aria-label="展開預覽面板"
+          onClick={() => dispatch({ type: "SET_PANEL_OPEN", open: true })}
+        >
+          <PanelRightOpen className="mr-1 h-3.5 w-3.5" />
+          預覽
+        </Button>
+      )}
+    </main>
   );
 
   return (
     <TooltipProvider delayDuration={200}>
-      <div
-        className="mx-auto max-w-[1600px] space-y-4 p-4 md:p-6"
-        data-profile={profile ? "loaded" : "none"}
-      >
-        <header className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h1 className="text-2xl font-bold tracking-tight">VizPilot</h1>
-            <p className="text-sm text-muted-foreground">
-              本地 AI 資料探索助手 — 上傳資料、理解資料、獲得可解釋的圖表推薦
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <DatasetSwitcher datasets={datasets} current={meta} onSelect={selectDataset} />
-            <UploadButton busy={uploader.busy} onFile={uploader.upload} />
-          </div>
-        </header>
-
-        <Tabs value={page} onValueChange={(v) => setPage(v as Page)}>
-          <TabsList>
-            <TabsTrigger value="overview">總覽</TabsTrigger>
-            <TabsTrigger value="recommend" disabled={!meta}>
-              推薦圖表
-            </TabsTrigger>
-            <TabsTrigger value="manual" disabled={!profile}>
-              手動建圖
-            </TabsTrigger>
-          </TabsList>
-
-          <TabsContent value="overview" className="space-y-4">
-            <UploadPanel
-              current={meta}
-              busy={uploader.busy}
-              errors={uploader.errors}
-              onFile={uploader.upload}
+      <div className="flex h-screen w-full overflow-hidden bg-background text-foreground" data-app-shell>
+        {wide && (
+          <Sidebar
+            variant="side"
+            datasets={datasets ?? []}
+            currentId={datasetId}
+            page={page}
+            workspaceCount={workspace.length}
+            onNewDataset={() => setNewOpen(true)}
+          />
+        )}
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          {!wide && (
+            <Sidebar
+              variant="top"
+              datasets={datasets ?? []}
+              currentId={datasetId}
+              page={page}
+              workspaceCount={workspace.length}
+              onNewDataset={() => setNewOpen(true)}
             />
-            {profile && <DatasetOverview profile={profile} />}
-          </TabsContent>
-
-          <TabsContent value="recommend">
-            {meta && (
-              <SplitPage plots={plots}>
-                <Recommendations recs={recs} aiPending={aiPending} onGenerate={generateChart} />
-              </SplitPage>
-            )}
-          </TabsContent>
-
-          <TabsContent value="manual">
-            {profile && (
-              <SplitPage plots={plots}>
-                <ManualBuilder profile={profile} onGenerate={generateChart} />
-              </SplitPage>
-            )}
-          </TabsContent>
-        </Tabs>
-
-        {/* upload errors raised from the header button while not on the overview page */}
-        {page !== "overview" && <ErrorList errors={uploader.errors} />}
+          )}
+          {wide ? (
+            <ResizablePanelGroup
+              key={preview && panelOpen ? "split" : "single"} // re-lay out when the panel mounts / unmounts
+              orientation="horizontal"
+              className="min-h-0 flex-1"
+              defaultLayout={preview && panelOpen ? layoutRef.current : undefined}
+              onLayoutChanged={(layout) => {
+                if (layout.preview !== undefined) layoutRef.current = layout;
+              }}
+            >
+              <ResizablePanel id="content" minSize={360} className="min-h-0">
+                {main}
+              </ResizablePanel>
+              {preview && panelOpen && (
+                <>
+                  <ResizableHandle withHandle aria-label="調整預覽面板寬度" />
+                  <ResizablePanel id="preview" minSize={420} className="min-h-0">
+                    {panel}
+                  </ResizablePanel>
+                </>
+              )}
+            </ResizablePanelGroup>
+          ) : (
+            <div className="flex min-h-0 flex-1 flex-col">
+              <div className="min-h-0 flex-1">{main}</div>
+              {panel}
+            </div>
+          )}
+        </div>
       </div>
+      <NewDatasetDialog open={newOpen} onOpenChange={setNewOpen} onUploaded={onUploaded} />
     </TooltipProvider>
   );
 }

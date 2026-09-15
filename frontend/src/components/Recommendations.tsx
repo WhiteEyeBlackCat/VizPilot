@@ -1,4 +1,4 @@
-import { ChevronRight, Sparkles } from "lucide-react";
+import { ChevronRight } from "lucide-react";
 import { useState } from "react";
 
 import { ApiError } from "../api";
@@ -12,11 +12,9 @@ import type {
   WarningSeverity,
 } from "../types";
 import { ErrorList } from "./ErrorList";
-import { SectionCard } from "./SectionCard";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge, type BadgeVariant } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -25,7 +23,10 @@ import { cn } from "@/lib/utils";
 interface Props {
   recs: RecommendationsResponse | null;
   aiPending: boolean;
-  onGenerate: (spec: ChartSpec) => Promise<void>;
+  /** priority of the recommendation currently shown in the preview panel */
+  selectedPriority: number | null;
+  /** render the recommendation into the preview panel (never the workspace) */
+  onPreview: (rec: Recommendation) => Promise<void>;
 }
 
 const SUPPORTED_BADGE: Record<Insight["supported"], { label: string; variant: BadgeVariant }> = {
@@ -82,21 +83,22 @@ function variables(spec: ChartSpec): string {
   return parts.join(" · ") || "—";
 }
 
-// columns follow the available width (the cards live in a half-width pane
-// since stage 15), not the viewport
-const CARD_GRID = "grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(250px,1fr))]";
+// columns follow the available width (the page shares the row with the
+// preview panel), not the viewport; the top tier gets wider cards
+const CARD_GRID = "grid gap-2 [grid-template-columns:repeat(auto-fill,minmax(250px,1fr))]";
+const TOP_GRID = "grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(320px,1fr))]";
 
-export function Recommendations({ recs, aiPending, onGenerate }: Props) {
+export function Recommendations({ recs, aiPending, selectedPriority, onPreview }: Props) {
   const [busyPriority, setBusyPriority] = useState<number | null>(null);
   const [error, setError] = useState<string[]>([]);
   const [exploratoryOpen, setExploratoryOpen] = useState(false);
   const [highlighted, setHighlighted] = useState<number | null>(null);
 
-  const generate = async (spec: ChartSpec) => {
-    setBusyPriority(spec.priority ?? -1);
+  const preview = async (rec: Recommendation) => {
+    setBusyPriority(rec.spec.priority ?? -1);
     setError([]);
     try {
-      await onGenerate(spec);
+      await onPreview(rec);
     } catch (e) {
       setError(e instanceof ApiError ? e.errors : [String(e)]);
     } finally {
@@ -114,29 +116,44 @@ export function Recommendations({ recs, aiPending, onGenerate }: Props) {
       setHighlighted(priority);
       setTimeout(() => setHighlighted((current) => (current === priority ? null : current)), 2000);
     }, 0);
+    // 16.2: "看圖" also previews the supporting chart
+    const rec = recs?.charts.find((c) => c.spec.priority === priority);
+    if (rec) void preview(rec);
   };
 
-  const card = (rec: Recommendation) => {
+  const card = (rec: Recommendation, tier: Tier) => {
     const priority = rec.spec.priority ?? 0;
+    const selected = selectedPriority === priority;
+    const top = tier === "top";
     return (
-      <Card
+      <div
         key={priority}
         id={`rec-card-${priority}`}
+        role="button"
+        tabIndex={0}
+        aria-pressed={selected}
+        data-tier={tier}
         className={cn(
-          "flex flex-col p-3 shadow-none transition-colors",
-          highlighted === priority && "border-primary bg-primary/10",
+          "group flex cursor-pointer flex-col rounded-md border border-subtle bg-surface text-left transition-colors hover:bg-accent/40 focus:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+          top ? "border-l-2 border-l-primary p-4" : "p-3",
+          (selected || highlighted === priority) && "border-primary/60 bg-primary/10",
         )}
+        onClick={() => void preview(rec)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            void preview(rec);
+          }
+        }}
       >
         <div className="mb-1 flex items-start justify-between gap-2">
-          <span className="text-sm font-medium">{rec.spec.title}</span>
+          <span className={cn("font-medium", top ? "text-base" : "text-sm")}>{rec.spec.title}</span>
           <span className="flex shrink-0 gap-1">
             <Badge variant="muted">{rec.spec.type}</Badge>
-            <Badge variant={rec.source === "llm" ? "accent" : "muted"}>
-              {rec.source === "llm" ? "AI" : "rules"}
-            </Badge>
+            {rec.source === "llm" && <Badge variant="accent">AI</Badge>}
           </span>
         </div>
-        <p className="mb-1 flex-1 text-xs text-muted-foreground">{rec.spec.reason}</p>
+        <p className={cn("mb-1 flex-1 text-muted-foreground", top ? "text-sm" : "text-xs")}>{rec.spec.reason}</p>
         {warningChips(rec.warnings)}
         <p className="mb-2 text-xs text-muted-foreground/80">
           {variables(rec.spec)}
@@ -152,14 +169,18 @@ export function Recommendations({ recs, aiPending, onGenerate }: Props) {
           )}
         </p>
         <Button
+          variant={selected ? "secondary" : "outline"}
           size="sm"
           className="h-7 self-start px-3 text-xs"
           disabled={busyPriority !== null}
-          onClick={() => void generate(rec.spec)}
+          onClick={(e) => {
+            e.stopPropagation();
+            void preview(rec);
+          }}
         >
-          {busyPriority === priority ? "生成中…" : "Generate"}
+          {busyPriority === priority ? "生成中…" : selected ? "預覽中" : "Preview"}
         </Button>
-      </Card>
+      </div>
     );
   };
 
@@ -188,20 +209,8 @@ export function Recommendations({ recs, aiPending, onGenerate }: Props) {
 
   const byTier = (tier: Tier) => (recs?.charts ?? []).filter((rec) => rec.tier === tier);
 
-  const title = (
-    <span className="flex items-center gap-2">
-      推薦圖表
-      {aiPending && (
-        <Badge variant="accent" className="animate-pulse font-normal">
-          <Sparkles className="mr-1 h-3 w-3" />
-          AI 分析中…
-        </Badge>
-      )}
-    </span>
-  );
-
   return (
-    <SectionCard title={title}>
+    <div data-recommendations data-ai-pending={aiPending ? "true" : "false"}>
       {recs?.message && (
         <Alert variant="warning" className="mb-3">
           <AlertDescription>{recs.message}</AlertDescription>
@@ -221,7 +230,7 @@ export function Recommendations({ recs, aiPending, onGenerate }: Props) {
       )}
 
       {recs && recs.insights.length > 0 && (
-        <ul className="mb-3 space-y-2 rounded-md border-l-2 border-primary bg-elevated p-3 text-sm">
+        <ul className="mb-4 space-y-2 rounded-md border-l-2 border-primary bg-elevated p-3 text-sm">
           {recs.insights.map(insightCard)}
         </ul>
       )}
@@ -245,7 +254,7 @@ export function Recommendations({ recs, aiPending, onGenerate }: Props) {
           // an empty top tier is a finding, not a rendering gap: say so
           if (tier === "top" && (recs?.charts.length ?? 0) > 0) {
             return (
-              <div key={tier} className="mt-4 first:mt-0">
+              <div key={tier} className="mt-5 first:mt-0">
                 <h3 className="mb-2 text-sm font-medium text-muted-foreground">{title}</h3>
                 <p className="text-sm text-muted-foreground/80">
                   沒有圖表在資料中展現足夠強的證據（定義性關係不算發現）——以下為次要與探索性建議。
@@ -257,7 +266,7 @@ export function Recommendations({ recs, aiPending, onGenerate }: Props) {
         }
         if (tier === "exploratory") {
           return (
-            <Collapsible key={tier} open={exploratoryOpen} onOpenChange={setExploratoryOpen} className="mt-4">
+            <Collapsible key={tier} open={exploratoryOpen} onOpenChange={setExploratoryOpen} className="mt-5">
               {/* h3 like the other tiers, with the toggle inside it */}
               <h3 className="mb-2 text-sm font-medium text-muted-foreground">
                 <CollapsibleTrigger asChild>
@@ -270,18 +279,20 @@ export function Recommendations({ recs, aiPending, onGenerate }: Props) {
                 </CollapsibleTrigger>
               </h3>
               <CollapsibleContent>
-                <div className={CARD_GRID}>{charts.map(card)}</div>
+                <div className={CARD_GRID}>{charts.map((rec) => card(rec, tier))}</div>
               </CollapsibleContent>
             </Collapsible>
           );
         }
         return (
-          <div key={tier} className="mt-4 first:mt-0">
-            <h3 className="mb-2 text-sm font-medium text-muted-foreground">{title}</h3>
-            <div className={CARD_GRID}>{charts.map(card)}</div>
+          <div key={tier} className="mt-5 first:mt-0">
+            <h3 className={cn("mb-2 text-sm font-medium", tier === "top" ? "text-foreground" : "text-muted-foreground")}>
+              {title}
+            </h3>
+            <div className={tier === "top" ? TOP_GRID : CARD_GRID}>{charts.map((rec) => card(rec, tier))}</div>
           </div>
         );
       })}
-    </SectionCard>
+    </div>
   );
 }

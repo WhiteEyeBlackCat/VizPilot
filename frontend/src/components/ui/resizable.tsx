@@ -53,4 +53,6 @@ const ResizableHandle = ({
   </ResizablePrimitive.Separator>
 );
 
+export type Layout = ResizablePrimitive.Layout;
+
 export { ResizablePanelGroup, ResizablePanel, ResizableHandle };
