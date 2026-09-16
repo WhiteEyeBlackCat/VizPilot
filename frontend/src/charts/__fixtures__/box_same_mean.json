@@ -1,0 +1,63 @@
+{
+  "spec": {
+    "title": "value by group",
+    "type": "box",
+    "x": "group",
+    "y": "value",
+    "group_by": null,
+    "aggregation": null,
+    "bins": null,
+    "time_granularity": null,
+    "top_n": null,
+    "sort": null,
+    "reason": "",
+    "priority": 100
+  },
+  "chart_data": {
+    "groups": [
+      {
+        "name": "a",
+        "q1": 48.81575,
+        "median": 50.184,
+        "q3": 51.3675,
+        "lower_fence": 44.988125000000004,
+        "upper_fence": 55.195125,
+        "outliers": [],
+        "mean": 50.0836875,
+        "count": 80
+      },
+      {
+        "name": "b",
+        "q1": 46.25,
+        "median": 48.462,
+        "q3": 52.90275,
+        "lower_fence": 36.270875000000004,
+        "upper_fence": 62.881874999999994,
+        "outliers": [
+          63.346,
+          64.005
+        ],
+        "mean": 49.47473749999999,
+        "count": 80
+      },
+      {
+        "name": "c",
+        "q1": 43.24125,
+        "median": 49.6965,
+        "q3": 56.8315,
+        "lower_fence": 22.855875000000005,
+        "upper_fence": 77.21687499999999,
+        "outliers": [
+          8.738,
+          21.976
+        ],
+        "mean": 49.1909,
+        "count": 80
+      }
+    ],
+    "y_label": "value"
+  },
+  "sampled": false,
+  "n_points": 19,
+  "display_range": null
+}

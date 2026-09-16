@@ -7,7 +7,7 @@
 //
 //   npm run capture-fixtures            (backend must be running on 8100)
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -93,7 +93,58 @@ const FIXTURES = {
     file: "e2e/data/sparse_groups.csv",
     spec: { title: "correlation heatmap", type: "heatmap" },
   },
+  // --- stage 19.1: committed, deterministic inputs (e2e/data/make_stage191.py) ---
+  // same mean / different dispersion: value by nominal group (sd 2 / 6 / 12)
+  raincloud_spread: {
+    file: "e2e/data/spread_groups.csv",
+    spec: { title: "value distribution by group", type: "raincloud", x: "group", y: "value" },
+  },
+  box_same_mean: {
+    file: "e2e/data/spread_groups.csv",
+    spec: { title: "value by group", type: "box", x: "group", y: "value" },
+  },
+  // ordered category (low < medium < high < very high): ridgeline, natural-order bar / line
+  ridgeline_ordered: {
+    file: "e2e/data/spread_groups.csv",
+    spec: { title: "amount distribution by level", type: "ridgeline", x: "level", y: "amount" },
+  },
+  bar_ordered_natural: {
+    file: "e2e/data/spread_groups.csv",
+    spec: { title: "mean amount by level", type: "bar", x: "level", y: "amount", aggregation: "mean", sort: "natural" },
+  },
+  line_ordered_category: {
+    file: "e2e/data/spread_groups.csv",
+    spec: { title: "mean amount across level", type: "line", x: "level", y: "amount", aggregation: "mean" },
+  },
+  // cyclic hour / month: polar line (mean), rose (sum / count), line over a cycle
+  polar_hour: {
+    file: "e2e/data/cycles.csv",
+    spec: { title: "mean rides around the day", type: "polar_line", x: "hr", y: "rides", aggregation: "mean" },
+  },
+  rose_hour_sum: {
+    // the Explore path: a rose is only ever a user's / LLM's choice, never a rule default
+    file: "e2e/data/cycles.csv",
+    spec: { title: "total rides by hour", type: "rose", x: "hr", y: "rides", aggregation: "sum" },
+  },
+  rose_month_count: {
+    file: "e2e/data/cycles.csv",
+    spec: { title: "records by month", type: "rose", x: "mnth", aggregation: "count" },
+  },
+  line_cyclic_month: {
+    file: "e2e/data/cycles.csv",
+    spec: { title: "mean temp across the year", type: "line", x: "mnth", y: "temp", aggregation: "mean" },
+  },
+  // dense XY: hexbin counts
+  hexbin_dense: {
+    file: "e2e/data/dense_xy.csv",
+    spec: { title: "y vs x", type: "hexbin", x: "x", y: "y" },
+  },
 };
+
+// `--only a,b,c` records a subset and merges it into the existing index.json
+// (the other fixtures keep their recorded snapshots)
+const onlyArg = process.argv.indexOf("--only");
+const only = onlyArg >= 0 ? new Set(process.argv[onlyArg + 1].split(",")) : null;
 
 async function upload(file) {
   // dataset/<file> (generated synthetic data) or a small committed file
@@ -127,8 +178,10 @@ async function render(id, spec) {
 }
 
 const ids = {};
-const index = {};
+const indexPath = join(outDir, "index.json");
+const index = only && existsSync(indexPath) ? JSON.parse(readFileSync(indexPath, "utf8")) : {};
 for (const [name, fx] of Object.entries(FIXTURES)) {
+  if (only && !only.has(name)) continue;
   if (!ids[fx.file]) {
     const meta = await upload(fx.file);
     ids[fx.file] = meta.dataset_id;

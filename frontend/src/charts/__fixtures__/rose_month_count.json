@@ -1,0 +1,56 @@
+{
+  "spec": {
+    "title": "records by month",
+    "type": "rose",
+    "x": "mnth",
+    "y": null,
+    "group_by": null,
+    "aggregation": "count",
+    "bins": null,
+    "time_granularity": null,
+    "top_n": null,
+    "sort": null,
+    "reason": "",
+    "priority": 100
+  },
+  "chart_data": {
+    "categories": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "series": [
+      {
+        "name": "count",
+        "values": [
+          40,
+          40,
+          40,
+          40,
+          40,
+          40,
+          40,
+          40,
+          40,
+          40,
+          40,
+          40
+        ]
+      }
+    ],
+    "truncated": false,
+    "y_label": "count"
+  },
+  "sampled": false,
+  "n_points": 12,
+  "display_range": null
+}

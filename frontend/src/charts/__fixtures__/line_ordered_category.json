@@ -1,0 +1,39 @@
+{
+  "spec": {
+    "title": "mean amount across level",
+    "type": "line",
+    "x": "level",
+    "y": "amount",
+    "group_by": null,
+    "aggregation": "mean",
+    "bins": null,
+    "time_granularity": null,
+    "top_n": null,
+    "sort": null,
+    "reason": "",
+    "priority": 100
+  },
+  "chart_data": {
+    "series": [
+      {
+        "name": "amount",
+        "x": [
+          "low",
+          "medium",
+          "high",
+          "very high"
+        ],
+        "y": [
+          19.778833333333335,
+          19.75415,
+          19.9968,
+          20.39241666666667
+        ]
+      }
+    ],
+    "y_label": "mean(amount)"
+  },
+  "sampled": false,
+  "n_points": 4,
+  "display_range": null
+}

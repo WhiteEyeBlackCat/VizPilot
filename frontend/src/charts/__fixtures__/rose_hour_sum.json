@@ -1,0 +1,80 @@
+{
+  "spec": {
+    "title": "total rides by hour",
+    "type": "rose",
+    "x": "hr",
+    "y": "rides",
+    "group_by": null,
+    "aggregation": "sum",
+    "bins": null,
+    "time_granularity": null,
+    "top_n": null,
+    "sort": null,
+    "reason": "",
+    "priority": 100
+  },
+  "chart_data": {
+    "categories": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23
+    ],
+    "series": [
+      {
+        "name": "rides",
+        "values": [
+          280,
+          272,
+          288,
+          294,
+          287,
+          372,
+          771,
+          1573,
+          2062,
+          1568,
+          748,
+          360,
+          291,
+          289,
+          322,
+          458,
+          935,
+          1689,
+          2076,
+          1673,
+          963,
+          468,
+          321,
+          287
+        ]
+      }
+    ],
+    "truncated": false,
+    "y_label": "sum(rides)"
+  },
+  "sampled": false,
+  "n_points": 24,
+  "display_range": null
+}

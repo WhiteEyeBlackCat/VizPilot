@@ -1,0 +1,55 @@
+{
+  "spec": {
+    "title": "mean temp across the year",
+    "type": "line",
+    "x": "mnth",
+    "y": "temp",
+    "group_by": null,
+    "aggregation": "mean",
+    "bins": null,
+    "time_granularity": null,
+    "top_n": null,
+    "sort": null,
+    "reason": "",
+    "priority": 100
+  },
+  "chart_data": {
+    "series": [
+      {
+        "name": "temp",
+        "x": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12
+        ],
+        "y": [
+          6.9565,
+          7.94375,
+          10.863249999999999,
+          15.10175,
+          19.330750000000002,
+          22.353,
+          23.024,
+          21.68975,
+          19.11475,
+          15.355,
+          10.87175,
+          7.78775
+        ]
+      }
+    ],
+    "y_label": "mean(temp)"
+  },
+  "sampled": false,
+  "n_points": 12,
+  "display_range": null
+}

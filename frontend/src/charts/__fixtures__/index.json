@@ -165,5 +165,101 @@
       "title": "correlation heatmap",
       "type": "heatmap"
     }
+  },
+  "raincloud_spread": {
+    "file": "e2e/data/spread_groups.csv",
+    "spec": {
+      "title": "value distribution by group",
+      "type": "raincloud",
+      "x": "group",
+      "y": "value"
+    }
+  },
+  "box_same_mean": {
+    "file": "e2e/data/spread_groups.csv",
+    "spec": {
+      "title": "value by group",
+      "type": "box",
+      "x": "group",
+      "y": "value"
+    }
+  },
+  "ridgeline_ordered": {
+    "file": "e2e/data/spread_groups.csv",
+    "spec": {
+      "title": "amount distribution by level",
+      "type": "ridgeline",
+      "x": "level",
+      "y": "amount"
+    }
+  },
+  "bar_ordered_natural": {
+    "file": "e2e/data/spread_groups.csv",
+    "spec": {
+      "title": "mean amount by level",
+      "type": "bar",
+      "x": "level",
+      "y": "amount",
+      "aggregation": "mean",
+      "sort": "natural"
+    }
+  },
+  "line_ordered_category": {
+    "file": "e2e/data/spread_groups.csv",
+    "spec": {
+      "title": "mean amount across level",
+      "type": "line",
+      "x": "level",
+      "y": "amount",
+      "aggregation": "mean"
+    }
+  },
+  "polar_hour": {
+    "file": "e2e/data/cycles.csv",
+    "spec": {
+      "title": "mean rides around the day",
+      "type": "polar_line",
+      "x": "hr",
+      "y": "rides",
+      "aggregation": "mean"
+    }
+  },
+  "rose_hour_sum": {
+    "file": "e2e/data/cycles.csv",
+    "spec": {
+      "title": "total rides by hour",
+      "type": "rose",
+      "x": "hr",
+      "y": "rides",
+      "aggregation": "sum"
+    }
+  },
+  "rose_month_count": {
+    "file": "e2e/data/cycles.csv",
+    "spec": {
+      "title": "records by month",
+      "type": "rose",
+      "x": "mnth",
+      "aggregation": "count"
+    }
+  },
+  "line_cyclic_month": {
+    "file": "e2e/data/cycles.csv",
+    "spec": {
+      "title": "mean temp across the year",
+      "type": "line",
+      "x": "mnth",
+      "y": "temp",
+      "aggregation": "mean"
+    }
+  },
+  "hexbin_dense": {
+    "file": "e2e/data/dense_xy.csv",
+    "spec": {
+      "title": "y vs x",
+      "type": "hexbin",
+      "x": "x",
+      "y": "y"
+    }
   }
 }

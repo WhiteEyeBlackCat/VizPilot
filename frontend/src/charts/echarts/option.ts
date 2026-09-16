@@ -887,15 +887,23 @@ export function hexbinOption(result: RenderResult): VizOption {
       const cx = api.value(0) as number;
       const cy = api.value(1) as number;
       const [px, py] = api.coord([cx, cy]);
-      // regular pointy-top hexagons tessellate when the circumradius is the
-      // horizontal centre spacing / √3 (verifier N5: half the spacing left gaps)
-      const [px2] = api.coord([cx + d.dx, cy]);
-      const r = Math.max((px2 - px) / Math.sqrt(3), 1.5);
-      const points: number[][] = [];
-      for (let k = 0; k < 6; k++) {
-        const angle = (Math.PI / 6) * (2 * k + 1); // pointy-top
-        points.push([px + r * Math.cos(angle), py - r * Math.sin(angle)]);
-      }
+      // stage 19.1: the backend's cells are regular only when the plot is
+      // square (dy is scaled by the data-range aspect). Measure both pitches
+      // in pixels and draw the affinely stretched pointy-top hexagon whose
+      // half-width is half the column spacing and whose vertical circumradius
+      // is half the cell height (row pitch = 0.75 · dy): neighbouring cells
+      // then share vertices at any aspect — no hairline gaps, no overlap.
+      const [px2, py2] = api.coord([cx + d.dx, cy + d.dy]);
+      const w = Math.max((px2 - px) / 2, 0.75);
+      const h = Math.max((py - py2) / 2, 0.75);
+      const points: number[][] = [
+        [px, py - h],
+        [px + w, py - h / 2],
+        [px + w, py + h / 2],
+        [px, py + h],
+        [px - w, py + h / 2],
+        [px - w, py - h / 2],
+      ];
       return { type: "polygon" as const, shape: { points }, style: { fill: api.visual("color") as string, opacity: 0.9 } };
     },
     encode: { x: 0, y: 1, tooltip: 2 },

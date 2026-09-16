@@ -1,0 +1,40 @@
+{
+  "spec": {
+    "title": "mean amount by level",
+    "type": "bar",
+    "x": "level",
+    "y": "amount",
+    "group_by": null,
+    "aggregation": "mean",
+    "bins": null,
+    "time_granularity": null,
+    "top_n": null,
+    "sort": "natural",
+    "reason": "",
+    "priority": 100
+  },
+  "chart_data": {
+    "categories": [
+      "low",
+      "medium",
+      "high",
+      "very high"
+    ],
+    "series": [
+      {
+        "name": "amount",
+        "values": [
+          19.778833333333335,
+          19.75415,
+          19.9968,
+          20.39241666666667
+        ]
+      }
+    ],
+    "truncated": false,
+    "y_label": "mean(amount)"
+  },
+  "sampled": false,
+  "n_points": 4,
+  "display_range": null
+}

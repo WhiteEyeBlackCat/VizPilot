@@ -1,0 +1,80 @@
+{
+  "spec": {
+    "title": "mean rides around the day",
+    "type": "polar_line",
+    "x": "hr",
+    "y": "rides",
+    "group_by": null,
+    "aggregation": "mean",
+    "bins": null,
+    "time_granularity": null,
+    "top_n": null,
+    "sort": null,
+    "reason": "",
+    "priority": 100
+  },
+  "chart_data": {
+    "categories": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23
+    ],
+    "series": [
+      {
+        "name": "rides",
+        "values": [
+          14,
+          13.6,
+          14.4,
+          14.7,
+          14.35,
+          18.6,
+          38.55,
+          78.65,
+          103.1,
+          78.4,
+          37.4,
+          18,
+          14.55,
+          14.45,
+          16.1,
+          22.9,
+          46.75,
+          84.45,
+          103.8,
+          83.65,
+          48.15,
+          23.4,
+          16.05,
+          14.35
+        ]
+      }
+    ],
+    "truncated": false,
+    "y_label": "mean(rides)"
+  },
+  "sampled": false,
+  "n_points": 24,
+  "display_range": null
+}
