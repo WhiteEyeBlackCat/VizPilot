@@ -18,6 +18,7 @@ generated_at: 2026-09-15
 | File | Domain | Function |
 |---|---|---|
 | `run.mjs` | E2E | Upload → overview → insights (Key Findings expand / keyboard / View chart via `checkKeyFindings`) → explore → workspace → month-order bar steps; screenshots per tag; stdout JSON summary `ok: true|false`. |
-| `capture-fixtures.mjs` | E2E | Calls `/api/charts/render` for each fixture spec and writes JSON. |
+| `capture-fixtures.mjs` | E2E | Calls `/api/charts/render` for each fixture spec and writes JSON; positional names re-record a subset (index.json merged). |
 | `README.md` | E2E | Requirements and coverage list. |
 | `data/sparse_groups.csv` | E2E | Committed input for null-gap fixtures. |
+| `data/seasonal_groups.csv` | E2E | Committed input for `line_grouped_gap` (24 monthly rows; each season occupies only part of each year). |

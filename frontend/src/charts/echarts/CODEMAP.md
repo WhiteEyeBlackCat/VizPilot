@@ -3,7 +3,7 @@ mode: learning
 generated_at: 2026-09-15
 ---
 
-> ECharts adapter: pure `buildOption(RenderResult) → VizOption` for the 16 chart types (six classic + the stage-19 family drawn with custom / bar / line / scatter series and a polar system), a single theme source, tree-shaken registration, and a 50-line React binding. Verified against 18 real-backend fixtures plus synthetic payloads.
+> ECharts adapter: pure `buildOption(RenderResult) → VizOption` for the 16 chart types (six classic + the stage-19 family drawn with custom / bar / line / scatter series and a polar system), a single theme source, tree-shaken registration, and a 50-line React binding. Verified against 19 real-backend fixtures plus synthetic payloads.
 
 ## Task Guide
 
@@ -11,6 +11,7 @@ generated_at: 2026-09-15
 |---|---|---|---|
 | Understand how a RenderResult becomes an ECharts option (per type) | Option | `option.ts` (`buildOption` dispatches to per-type builders; stage-19 builders `densityOption`, `dotIntervalOption`, `lollipopOption`, `dumbbellOption`, `slopegraphOption`, `hexbinOption`, `polarOption` at the end of the file) | `../__fixtures__/index.json`, `option.stage19.test.ts` |
 | Understand time-axis labels / histogram bins / box stats / heatmap cells | Option | `option.ts` (`timeLabelFormatter`, `histogramBins`, `heatmapCells`) | `option.test.ts` |
+| Understand why a grouped temporal line breaks (null point) across a group's absence | Option | `option.ts` ("grouped temporal gaps": `breakTemporalGaps`, `gapBreakThreshold`, `GAP_BREAK_FACTOR`) | `option.gaps.test.ts`, `../__fixtures__/line_grouped_gap.json` |
 | Understand colours, fonts, grid, tooltip, toolbox, dark theme | Theme | `theme.ts` | `theme.test.ts` (contrast) |
 | Understand the reading order of a category axis (hour/month/weekday/date vs ranked) and its note | Order | `order.ts` | `order.test.ts`, `../../components/ChartView.tsx` |
 | Understand which ECharts modules are registered | Registration | `echarts.ts` | — |
@@ -37,7 +38,7 @@ generated_at: 2026-09-15
 | `theme.ts` | Theme | `→ ../../components/PreviewPanel.tsx` | Palette, text styles, grid presets, tooltip/legend/toolbox/dataZoom factories. |
 | `echarts.ts` | Registration | — | `echarts/core` + used charts/components/renderers (incl. `PolarComponent`); `VizOption` composed type (+ `angleAxis` / `radiusAxis`). |
 | `EChartsView.tsx` | Binding | `→ ../../components/*` | Init/setOption/resize/dispose; exposes host element. |
-| `option.test.ts`, `option.ssr.test.ts`, `theme.test.ts`, `order.test.ts`, `option.stage19.test.ts` | Tests | `← ../__fixtures__/*.json` | vitest: option values, SSR render, contrast, display order + notes, stage-19 builders (payload → series, SSR smoke). |
+| `option.test.ts`, `option.ssr.test.ts`, `theme.test.ts`, `order.test.ts`, `option.stage19.test.ts`, `option.gaps.test.ts` | Tests | `← ../__fixtures__/*.json` | vitest: option values, SSR render, contrast, display order + notes, stage-19 builders (payload → series, SSR smoke), grouped temporal gap breaks (real fixture + synthetic guards). |
 
 ## File Dependencies
 

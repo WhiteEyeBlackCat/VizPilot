@@ -165,5 +165,17 @@
       "title": "correlation heatmap",
       "type": "heatmap"
     }
+  },
+  "line_grouped_gap": {
+    "file": "e2e/data/seasonal_groups.csv",
+    "spec": {
+      "title": "mean temp per month by season",
+      "type": "line",
+      "x": "dteday",
+      "y": "temp",
+      "group_by": "season",
+      "aggregation": "mean",
+      "time_granularity": "month"
+    }
   }
 }

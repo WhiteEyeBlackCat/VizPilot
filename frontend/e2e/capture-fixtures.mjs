@@ -6,8 +6,9 @@
 // change.
 //
 //   npm run capture-fixtures            (backend must be running on 8100)
+//   npm run capture-fixtures -- <name>… (re-record only these; index.json is merged)
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -26,6 +27,12 @@ const FIXTURES = {
   line_grouped: {
     file: "air_quality.csv",
     spec: { title: "mean temperature per day by station", type: "line", x: "timestamp", y: "temperature", group_by: "station", aggregation: "mean", time_granularity: "day" },
+  },
+  line_grouped_gap: {
+    // e2e/data/seasonal_groups.csv: each season covers only some months of
+    // each year, so a group's consecutive points can be many buckets apart
+    file: "e2e/data/seasonal_groups.csv",
+    spec: { title: "mean temp per month by season", type: "line", x: "dteday", y: "temp", group_by: "season", aggregation: "mean", time_granularity: "month" },
   },
   line_raw_time: {
     file: "air_quality.csv",
@@ -126,9 +133,13 @@ async function render(id, spec) {
   return { result: body };
 }
 
+// optional positional names: re-record only those and merge into index.json
+const only = new Set(process.argv.slice(2));
+const indexPath = join(outDir, "index.json");
 const ids = {};
-const index = {};
+const index = only.size && existsSync(indexPath) ? JSON.parse(readFileSync(indexPath, "utf8")) : {};
 for (const [name, fx] of Object.entries(FIXTURES)) {
+  if (only.size && !only.has(name)) continue;
   if (!ids[fx.file]) {
     const meta = await upload(fx.file);
     ids[fx.file] = meta.dataset_id;
@@ -167,5 +178,5 @@ for (const [name, fx] of Object.entries(FIXTURES)) {
       ("truncated" in r.chart_data ? ` truncated=${r.chart_data.truncated}` : ""),
   );
 }
-writeFileSync(join(outDir, "index.json"), JSON.stringify(index, null, 2) + "\n");
+writeFileSync(indexPath, JSON.stringify(index, null, 2) + "\n");
 console.log(`[fixtures] wrote ${Object.keys(index).length} fixtures to ${outDir}`);

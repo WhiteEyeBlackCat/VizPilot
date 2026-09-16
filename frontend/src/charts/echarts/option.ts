@@ -141,6 +141,89 @@ function baseOption(result: RenderResult, zoomable: boolean, legendShown: boolea
   };
 }
 
+// --- grouped temporal gaps --------------------------------------------------
+//
+// A grouped line over time (`temp over dteday by season`) has, per group,
+// only the buckets that group occupies: the backend (`render.py`
+// `_render_line`) emits no point for a month in which a season does not
+// occur, so ECharts joined the last 2011 summer point straight to the first
+// 2012 one across nine empty months. The fix is presentation-only and keeps
+// every backend (x, y) pair: where the step between two consecutive points
+// of a group exceeds GAP_BREAK_FACTOR × the group's normal sampling
+// interval, an invisible null point is inserted in the middle of the gap and
+// `connectNulls: false` draws the break.
+//
+// The normal interval reuses what the pipeline already knows. When the
+// backend bucketed the axis (spec.time_granularity day / week / month, the
+// usual case: it downgrades any series above 500 points), consecutive
+// buckets are one unit apart by construction, so the interval is the bucket
+// unit — or the group's median step when it samples more sparsely than the
+// bucket (quarterly rows in month buckets). For unbucketed timestamps it is
+// the median of the group's consecutive steps, the estimator the profiler's
+// `_infer_frequency` uses, and it is only trusted when the steps are mostly
+// regular (at least GAP_REGULAR_SHARE of them within GAP_REGULAR_BAND × the
+// median) so an event-like irregular series is never fragmented.
+//
+// GAP_BREAK_FACTOR = 3 (strict): one or two missing buckets (a step of 2–3
+// units) and a weekend in business-day data (3 days) stay connected; a
+// season absent for a quarter or more of the year, or three or more missing
+// buckets, break. A larger factor would keep, e.g., a group present eight
+// months a year joined across its four-month absence at month granularity;
+// a smaller one would break business-day series at every long weekend.
+// Only grouped series are touched: an ungrouped line keeps its behaviour.
+
+export const GAP_BREAK_FACTOR = 3;
+export const GAP_REGULAR_SHARE = 2 / 3;
+export const GAP_REGULAR_BAND: readonly [number, number] = [0.5, 2];
+const DAY_MS = 86_400_000;
+// the widest span a bucket unit can have (a month is at most 31 days)
+const BUCKET_UNIT_MS: Partial<Record<TimeGranularity, number>> = {
+  day: DAY_MS,
+  week: 7 * DAY_MS,
+  month: 31 * DAY_MS,
+};
+
+const median = (sorted: number[]): number =>
+  sorted.length % 2 ? sorted[(sorted.length - 1) / 2] : (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2;
+
+/** The step (ms) above which a group's line breaks, or null when nothing
+ *  can be inferred (too few points, or irregular unbucketed sampling). */
+export function gapBreakThreshold(steps: number[], granularity: TimeGranularity | null | undefined): number | null {
+  const unit = granularity ? BUCKET_UNIT_MS[granularity] : undefined;
+  const med = steps.length >= 2 ? median([...steps].sort((a, b) => a - b)) : null;
+  let normal: number | null;
+  if (unit !== undefined) {
+    normal = Math.max(unit, med ?? 0);
+  } else if (med === null || med <= 0) {
+    normal = null;
+  } else {
+    const regular = steps.filter((g) => g >= GAP_REGULAR_BAND[0] * med && g <= GAP_REGULAR_BAND[1] * med).length;
+    normal = regular >= GAP_REGULAR_SHARE * steps.length ? med : null;
+  }
+  return normal === null || normal <= 0 ? null : GAP_BREAK_FACTOR * normal;
+}
+
+/** `pairs()` for one temporal group with a null point inserted inside every
+ *  step longer than the group's break threshold; unchanged otherwise. */
+export function breakTemporalGaps(
+  x: (number | string | null)[],
+  y: (number | null)[],
+  granularity: TimeGranularity | null | undefined,
+): Pair[] {
+  const base = pairs(x, y);
+  const t = x.map((v) => (typeof v === "string" ? Date.parse(v) : NaN));
+  const steps: number[] = [];
+  for (let i = 1; i < t.length; i++) if (!Number.isNaN(t[i - 1]) && !Number.isNaN(t[i])) steps.push(t[i] - t[i - 1]);
+  const threshold = gapBreakThreshold(steps, granularity);
+  if (threshold === null) return base;
+  const out: Pair[] = [];
+  for (let i = 0; i < base.length; i++) {
+    if (i > 0 && t[i] - t[i - 1] > threshold) out.push([(t[i - 1] + t[i]) / 2, null]);
+    out.push(base[i]);
+  }
+  return out;
+}
+
 // --- line -------------------------------------------------------------------
 
 function lineOption(result: RenderResult): VizOption {
@@ -149,10 +232,14 @@ function lineOption(result: RenderResult): VizOption {
   const categorical = isCategoricalX(d);
   const categories = categorical ? Array.from(new Set(d.series.flatMap((s) => s.x.map(String)))) : [];
   const many = d.series.some((s) => s.x.length > LINE_SYMBOL_MAX_POINTS);
+  // grouped temporal series break where a group has no observations for a
+  // stretch of time (see "grouped temporal gaps" above); ungrouped lines and
+  // numeric / category axes are passed through as they are
+  const grouped = temporal && result.spec.group_by != null;
   const series: LineSeriesOption[] = d.series.map((s) => ({
     type: "line",
     name: s.name,
-    data: pairs(s.x, s.y),
+    data: grouped ? breakTemporalGaps(s.x, s.y, result.spec.time_granularity) : pairs(s.x, s.y),
     showSymbol: !many,
     symbolSize: 5,
     lineStyle: { width: 1.5 },
