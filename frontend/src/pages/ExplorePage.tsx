@@ -32,11 +32,17 @@ export function ExplorePage({ profile, form, onField, onGenerate, lastSpec }: Pr
     if (!profile) return null;
     const cols = profile.columns;
     const count = (pred: (c: (typeof cols)[number]) => boolean) => cols.filter(pred).length;
+    // stage 19.1: order semantics from the backend (column_roles) — a cyclic
+    // column can be drawn as a polar line / rose, an ordered category is read
+    // in its own order; absent on older payloads
+    const roles = profile.column_roles ?? [];
     return {
       numeric: count((c) => c.semantic_type === "numeric"),
       categorical: count((c) => c.semantic_type === "categorical" || c.semantic_type === "boolean"),
       datetime: count((c) => c.semantic_type === "datetime"),
       excluded: count((c) => c.semantic_type === "id" || c.semantic_type === "text" || c.semantic_type === "unknown"),
+      cyclic: roles.filter((r) => r.cyclic).map((r) => (r.period ? `${r.name} (${r.period})` : r.name)),
+      ordered: roles.filter((r) => r.role === "ordinal").map((r) => r.name),
     };
   }, [profile]);
 
@@ -73,6 +79,22 @@ export function ExplorePage({ profile, form, onField, onGenerate, lastSpec }: Pr
                 <dt className="inline">不作圖（id / 文字 / 未知）：</dt>
                 <dd className="inline tabular-nums" data-hint="excluded">
                   {hints.excluded}
+                </dd>
+              </div>
+            )}
+            {hints.cyclic.length > 0 && (
+              <div>
+                <dt className="inline">週期欄位（可作 polar / rose 的 X，括號為週期）：</dt>
+                <dd className="inline text-foreground" data-hint="cyclic">
+                  {hints.cyclic.join("、")}
+                </dd>
+              </div>
+            )}
+            {hints.ordered.length > 0 && (
+              <div>
+                <dt className="inline">有序類別（依自然順序顯示，可作 line 的 X）：</dt>
+                <dd className="inline text-foreground" data-hint="ordered">
+                  {hints.ordered.join("、")}
                 </dd>
               </div>
             )}

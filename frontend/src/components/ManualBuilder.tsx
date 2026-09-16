@@ -59,6 +59,14 @@ export function ManualBuilder({ profile, form, onField, onGenerate }: Props) {
       });
     const boxX = cats(2, 50);
     const twoState = cats(2, 2);
+    // stage 19.1: the backend states each column's order semantics on the
+    // profile response (column_roles); a polar / rose x must be cyclic. Older
+    // payloads without roles fall back to the stage-19 superset and the
+    // backend 422 explains.
+    const roles = profile.column_roles;
+    const polarX = roles
+      ? [...groupable, ...numeric].filter((c) => roles.some((r) => r.name === c.name && r.cyclic))
+      : [...groupable, ...numeric];
     // stage 19: the field matrix per type mirrors backend validate_spec; the
     // ordered / cyclic role of a category (line over month, rose over hour) is
     // the backend's call — its 422 message says so when a column has none
@@ -77,8 +85,8 @@ export function ManualBuilder({ profile, form, onField, onGenerate }: Props) {
       dumbbell: names(boxX),
       slopegraph: names(cats(2, 8)),
       hexbin: names(numeric),
-      polar_line: names([...groupable, ...numeric]),
-      rose: names([...groupable, ...numeric]),
+      polar_line: names(polarX),
+      rose: names(polarX),
     };
     const yByType: Record<ChartType, string[]> = {
       line: names(numericY),
@@ -100,7 +108,7 @@ export function ManualBuilder({ profile, form, onField, onGenerate }: Props) {
     };
     const groupChoices = type === "dumbbell" || type === "slopegraph" ? names(twoState) : GROUP_TYPES.includes(type) ? names(groupable) : [];
     return { x: xByType[type], y: yByType[type], group: groupChoices };
-  }, [cols, type]);
+  }, [cols, type, profile.column_roles]);
 
   const showAgg = AGG_TYPES.includes(type);
 

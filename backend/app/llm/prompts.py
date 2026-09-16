@@ -10,6 +10,7 @@ a few per category, series compressed to shapes), not dumped.
 import json
 from typing import Any
 
+from ..charts.roles import roles_for
 from ..charts.rules import (
     LINE_GROUP_INTERACTION_MIN,
     Recommendation,
@@ -75,7 +76,7 @@ Respond with a single JSON object, no prose, matching exactly:
       "evidence_available": true,
       "test_needed": "<probe type> or null",
       "columns": {"role": "column name"},
-      "chart": {"title": "string", "type": "line|bar|scatter|histogram|box|heatmap", "x": "column or null", \
+      "chart": {"title": "string", "type": "line|bar|scatter|histogram|box|heatmap|polar_line|rose|raincloud|ridgeline", "x": "column or null", \
 "y": "column or null", "group_by": "column or null", "aggregation": "mean|sum|count|median|min|max or null", \
 "reason": "why this chart shows it", "priority": 1},
       "reason": "why this changes how a user understands the dataset",
@@ -103,7 +104,12 @@ probe. Use only the listed columns, spelled exactly (case-sensitive).
 - importance: 5 = changes the whole reading of the dataset, 1 = minor. "chart" is optional: the \
 backend chooses the chart family from the evidence and the column roles; give a chart only for a \
 claim without test_needed (types: line, bar, scatter, histogram, box, heatmap — never pie; \
-aggregations: mean, sum, count, median, min, max; a line needs an aggregation). Set "chart": null otherwise.
+aggregations: mean, sum, count, median, min, max; a line needs an aggregation). Set "chart": null otherwise. \
+The "Column roles" section lists cyclic columns (hour of day, month, weekday, season, direction — \
+values that wrap around with a period) and ordered categories: for a claim about a cycle you may \
+suggest "polar_line" (mean around the cycle) or "rose" (a sum or count as sector size); for an \
+ordered category a "line" in its natural order; for a spread difference "raincloud" or \
+"ridgeline". These are hints — the backend keeps the type only when the data supports it.
 - "charts" (optional, may be empty): extra charts or re-ranking of the rule candidates, same \
 chart shape, lower priority number = more important.
 
@@ -170,6 +176,7 @@ def _user_content(
     if len(profile.columns) > MAX_COLUMNS:
         lines.append(f"(only the first {MAX_COLUMNS} of {len(profile.columns)} columns are listed)")
 
+    lines += _roles_section(columns)
     lines += _evidence_section(profile)
 
     if include_sample_rows and profile.sample_rows:
@@ -184,6 +191,46 @@ def _user_content(
 
     lines += ["", "Propose 0-5 hypotheses worth verifying, each with its supporting chart."]
     return "\n".join(lines)
+
+
+def _roles_section(columns: list[ColumnProfile]) -> list[str]:
+    """Stage 19.1: the order semantics the chart layer already derives from
+    the profile (charts/roles.py), stated for the LLM — cyclic fields with
+    their period and natural order, ordered categories with their scale,
+    two-state columns. Metadata only; nominal / plain numeric columns are
+    not listed (nothing to say)."""
+    lines: list[str] = []
+    for role in roles_for(columns).values():
+        if role.role == "cyclic":
+            order = f", order {' < '.join(role.order[:3])} … {role.order[-1]}" if role.order and len(role.order) > 3 else (
+                f", order {' < '.join(role.order)}" if role.order else ""
+            )
+            lines.append(f"- {role.name}: cyclic, period {role.period} (wraps around{order})")
+        elif role.role == "ordinal":
+            order = f" ({' < '.join(role.order)})" if role.order else " (ordered by value)"
+            lines.append(f"- {role.name}: ordered category{order}" + (" — two states" if role.two_state else ""))
+        elif role.two_state:
+            lines.append(f"- {role.name}: two states (before/after-style comparison)")
+    if not lines:
+        return []
+    return ["", "Column roles (order semantics; a cycle is never a ranking, an ordered category is never re-sorted by value):", *lines]
+
+
+def _dispersion_lines(profile: DatasetProfile) -> list[str]:
+    """Stage 19.1: spread differences (evidence.dispersion), independent of
+    the mean differences above — 'same average, different spread' is a
+    distribution finding, drawn as a raincloud / ridgeline."""
+    entries = sorted(profile.evidence.dispersion, key=lambda d: (d.strength != "strong", -d.spread_ratio, d.cat, d.num))
+    if not entries:
+        return []
+    lines = ["Spread differences (robust spread ratio widest/narrowest group; means may still be equal):"]
+    for d in entries[:MAX_ETA_PAIRS]:
+        lines.append(
+            f"- {d.cat} -> {d.num}: spread ratio {d.spread_ratio:.2f} ({d.widest_group} widest, "
+            f"{d.narrowest_group} narrowest), Brown-Forsythe eta={d.bf_eta_squared ** 0.5:.2f}, "
+            f"{d.strength} (n_min={d.n_min})"
+        )
+    return lines
 
 
 def _evidence_section(profile: DatasetProfile) -> list[str]:
@@ -237,6 +284,7 @@ def _evidence_section(profile: DatasetProfile) -> list[str]:
         lines.append("Slope heterogeneity hits (relationship differs across groups):")
         lines += [f"- {s.x} vs {s.y} by {s.group}: spread={s.spread:.2f}" for s in slopes]
 
+    lines += _dispersion_lines(profile)
     lines += _layer2_section(profile)
 
     derived = getattr(evidence, "derived_columns", [])

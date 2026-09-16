@@ -5,6 +5,7 @@ from fastapi import APIRouter, Body, HTTPException, Query, Request, UploadFile
 from pydantic import ValidationError
 
 from ..charts.render import RenderError, render_chart
+from ..charts.roles import roles_for
 from ..charts.spec import ChartSpec, validate_spec
 from ..config import Settings
 from ..serialization import df_to_records
@@ -100,7 +101,14 @@ def get_profile(dataset_id: str, request: Request) -> dict[str, Any]:
         df = _store(request).get_df(dataset_id)
     except DatasetNotFoundError:
         raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found") from None
-    return request.app.state.profiles.get(dataset_id, df).model_dump()
+    profile = request.app.state.profiles.get(dataset_id, df)
+    payload = profile.model_dump()
+    # stage 19.1 (additive, response only — the cached profile is untouched and
+    # the profiler never learns about charts): the order semantics the chart
+    # layer derives from the profile, so the Explore builder can offer a
+    # polar / rose only for a cyclic x and read an ordered category in order
+    payload["column_roles"] = [role.model_dump() for role in roles_for(profile.columns).values()]
+    return payload
 
 
 @router.get("/datasets/{dataset_id}/recommendations")

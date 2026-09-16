@@ -72,6 +72,22 @@ export interface DatasetProfile {
   profiled_rows?: number;
   /** measured evidence (stages 7-17); additive, the UI reads only the parts it shows */
   evidence?: Evidence;
+  /** stage 19.1 (additive, `/profile` response only): order semantics per column (backend charts/roles.py) */
+  column_roles?: ColumnRole[];
+}
+
+// backend charts/roles.py ColumnRole — how a column's values are ordered
+export type Role = "numeric" | "datetime" | "boolean" | "nominal" | "ordinal" | "cyclic";
+
+export interface ColumnRole {
+  name: string;
+  role: Role;
+  ordered: boolean; // ordinal / cyclic / datetime / numeric
+  cyclic: boolean;
+  period: number | null; // cyclic only
+  order: string[] | null; // display order of the categories when known
+  n_categories: number | null;
+  two_state: boolean; // exactly two categories
 }
 
 // the six original types plus the stage-19 family (backend charts/spec.py)
