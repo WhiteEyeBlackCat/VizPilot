@@ -3,7 +3,7 @@
 Source of truth: backend Pydantic models. `frontend/src/types.ts` mirrors them and must change in lockstep. All changes are additive; removals need a user decision.
 
 ## DatasetProfile — `profiling/models.py` L:413
-- Producer: `profile_dataset` (`profiling/profiler.py`), cached by `ProfileService`, keyed by dataset id, invalidated when `PROFILE_VERSION` (now 10) changes.
+- Producer: `profile_dataset` (`profiling/profiler.py`), cached by `ProfileService`, keyed by dataset id, invalidated when `PROFILE_VERSION` (now 14) changes.
 - Consumers: `charts/rules.py`, `charts/render.py`, `charts/spec.py` (validation), `llm/*`, `probes/*`, router `/profile`, frontend Overview/Explore.
 - Fields: `profile_version, dataset_id, n_rows, n_cols, sampled, profiled_rows, columns[ColumnProfile], correlations, evidence, sample_rows(≤5)`.
 - `ColumnProfile.categories` (stage 19.2, `PROFILE_VERSION` 14, optional): every distinct label as str, sorted, when a categorical / boolean column has ≤ `CATEGORY_LABELS_MAX` 13 categories — the input of semantic-role detection (`charts/roles.py`), so twelve month names are a cycle although `top_values` keeps the 10 most frequent; None above the cap.

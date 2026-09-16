@@ -21,18 +21,18 @@ generated_at: 2026-09-15
 
 | Symbol | Source | Line |
 |---|---|---|
-| `DatasetProfile`, `ColumnProfile`, `Evidence`, `EvidenceLayer2` | `models.py` | L:448, L:79, L:433, L:423 |
-| `DispersionEffect` (stage 19.1) | `models.py` | L:214 |
+| `DatasetProfile`, `ColumnProfile`, `Evidence`, `EvidenceLayer2` | `models.py` | L:489, L:82, L:474, L:464 |
+| `DispersionEffect` (stage 19.1 / 19.2) | `models.py` | L:228 |
 | `PROFILE_VERSION` (14) | `models.py` | L:7 |
-| `CATEGORY_LABELS_MAX`, `ColumnProfile.categories` (stage 19.2 role-detection labels) | `models.py` | L:26, L:105 |
-| `ProfileService` (cache + per-dataset lock + atomic json) | `profiler.py` | L:182 |
-| `profile_dataset` | `profiler.py` | L:33 |
-| `apply_semantic_casts`, `apply_casts`, `SAMPLE_SEED` | `types.py` | L:312, L:301 |
+| `CATEGORY_LABELS_MAX`, `ColumnProfile.categories` (stage 19.2 role-detection labels) | `models.py` | L:26, L:112 |
+| `ProfileService` (cache + per-dataset lock + atomic json) | `profiler.py` | L:187 |
+| `profile_dataset` | `profiler.py` | L:34 |
+| `apply_semantic_casts`, `apply_casts`, `SAMPLE_SEED` | `types.py` | L:312, L:301, L:15 |
 | `infer_column`, `infer_semantic_type` | `types.py` | L:167, L:162 |
-| `compute_evidence`, `adjusted_eta_squared`, `span_bucket` | `evidence.py` | L:90, L:121, L:316 |
-| `DISPERSION_MIN_ETA` … `DISPERSION_WEAK_ALPHA`, `BUCKET_*`, `_dispersion_effects` → `(effects, buckets)` (stage 19.1 / 19.2) | `evidence.py` | L:81, L:465 |
-| `f_survival`, `regularized_incomplete_beta` (F-test p-value, no scipy), `_brown_forsythe`, `_is_bucket` (stage 19.2) | `evidence.py` | L:300, L:340, L:395, L:420 |
-| `MAX_CAT_CATEGORIES` | `evidence.py` | L:31 |
+| `compute_evidence`, `adjusted_eta_squared`, `span_bucket` | `evidence.py` | L:135, L:172, L:613 |
+| `DISPERSION_MIN_ETA` … `DISPERSION_WEAK_ALPHA`, `BUCKET_*`, `_dispersion_entry`, `_dispersion_effects` → `(effects, buckets)` (stage 19.1 / 19.2) | `evidence.py` | L:81, L:125, L:418, L:474 |
+| `f_survival`, `regularized_incomplete_beta` (F-test p-value, no scipy), `_brown_forsythe`, `_is_bucket` (stage 19.2) | `evidence.py` | L:325, L:311, L:359, L:382 |
+| `MAX_CAT_CATEGORIES` | `evidence.py` | L:32 |
 | `compute_layer2` | `layer2.py` | L:128 |
 | `robust_quality` | `quality.py` | L:52 |
 | `pairwise_pearson` | `pairwise.py` | L:19 |

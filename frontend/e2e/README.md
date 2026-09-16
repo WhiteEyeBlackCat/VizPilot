@@ -24,6 +24,9 @@ JSON summary is printed on stdout (`[e2e] SUMMARY …`, `ok: true|false`).
   ```
 
 - `dataset/hour_like.csv` (generate with `backend/.venv/bin/python dataset/syn/hour_like.py`)
+  — note that `dataset/` inputs are git-ignored: in a fresh worktree they must be present or
+  symlinked from the main checkout, otherwise this run fails at the upload step and six
+  backend pytest tests (the `dataset/`-backed ones) skip.
   and the other synthetic CSVs from `dataset/syn/`.
 
 ## What the run covers (stage 16.3 layout)
