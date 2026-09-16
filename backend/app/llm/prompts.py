@@ -225,11 +225,20 @@ def _dispersion_lines(profile: DatasetProfile) -> list[str]:
         return []
     lines = ["Spread differences (robust spread ratio widest/narrowest group; means may still be equal):"]
     for d in entries[:MAX_ETA_PAIRS]:
-        lines.append(
+        line = (
             f"- {d.cat} -> {d.num}: spread ratio {d.spread_ratio:.2f} ({d.widest_group} widest, "
             f"{d.narrowest_group} narrowest), Brown-Forsythe eta={d.bf_eta_squared ** 0.5:.2f}, "
             f"{d.strength} (n_min={d.n_min})"
         )
+        # stage 19.2: which groups the comparison rests on, and whether the
+        # pair merely restates a definition (then it is not a discovery)
+        excluded = getattr(d, "excluded_groups", None) or {}
+        if excluded:
+            small = ", ".join(f"{label} (n={n})" for label, n in excluded.items())
+            line += f"; compared {', '.join(d.compared_groups)} only — too small: {small}"
+        if getattr(d, "definitional", False):
+            line += f" — DEFINITIONAL ({d.definition}): NOT a discovery, never present it as an insight"
+        lines.append(line)
     return lines
 
 

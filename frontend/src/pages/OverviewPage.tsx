@@ -39,6 +39,7 @@ const KIND_LABEL: Record<DerivedColumn["kind"], string> = {
   difference: "差",
   ratio: "比值",
   near_copy: "近似複製",
+  bucket: "區間分箱",
 };
 
 const dateTime = new Intl.DateTimeFormat("zh-Hant", { dateStyle: "medium", timeStyle: "short" });

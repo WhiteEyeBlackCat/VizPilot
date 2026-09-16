@@ -398,7 +398,7 @@ export interface ColumnQuality {
   robust_range: RobustRange | null;
 }
 
-export type DerivedKind = "product" | "product_discount" | "sum" | "difference" | "ratio" | "near_copy";
+export type DerivedKind = "product" | "product_discount" | "sum" | "difference" | "ratio" | "near_copy" | "bucket";
 
 /** A column that is (almost) a deterministic function of others (stage 13). */
 export interface DerivedColumn {

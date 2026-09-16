@@ -78,10 +78,51 @@ _NAME_MIN_SUBSTRING = 4  # one normalised name inside the other
 # outliers) is scored as an adjusted eta-squared so it is df-corrected like
 # the mean-difference evidence; the robust spread ratio (IQR, else MAD, else
 # std) must agree so a single heavy tail in one group cannot flag a pair.
-DISPERSION_MIN_ETA = 0.02  # adjusted eta-squared of |x − group median| over the groups
+DISPERSION_MIN_ETA = 0.02  # adjusted eta-squared of |x − group median| over the compared groups
 DISPERSION_MIN_RATIO = 1.5  # widest / narrowest per-group robust spread
-DISPERSION_STRONG_MIN_N = 30  # rows in EVERY group for a strong entry (density guards agree)
-DISPERSION_WEAK_MIN_N = 10  # below this a pair is not listed at all
+# Stage 19.2 sample-size semantics: a group is SUPPORTED with >= STRONG_MIN_N
+# rows and takes part in a strong comparison; a group below WEAK_MIN_N never
+# takes part at all. With >= 2 supported groups the comparison runs over
+# exactly those (smaller groups are excluded and listed, they no longer
+# cancel the evidence of the well-supported groups); otherwise every group
+# >= WEAK_MIN_N is compared and the entry can only be weak. 30 is the same
+# per-group floor the density charts (raincloud / ridgeline) need.
+DISPERSION_STRONG_MIN_N = 30
+DISPERSION_WEAK_MIN_N = 10
+# Stage 19.2 calibration: the effect-size gates alone (eta >= 0.02 ~ F 2.2
+# at n=60, p ~ 0.14) let ~8-12 % of equal-spread pairs through at 30 rows
+# per group. A strong entry now also needs the Brown–Forsythe F test
+# (deviations from the group median, Brown & Forsythe 1974) to reject at the
+# conventional alpha = 0.05 — the null strong rate is bounded by alpha by
+# construction and the ratio gate keeps it lower (measured ~1-3 % at N=30,
+# tests/test_dispersion_calibration.py), while sd 1 vs 2 at 100 rows per
+# group is still found in > 90 % of replicates.
+DISPERSION_ALPHA = 0.05
+# Stage 19.2 bucket detection (`band = bucket(num)`, see _is_bucket): the
+# per-group ranges must be disjoint in one consistent order, every group
+# must hold >= DISPERSION_WEAK_MIN_N rows, every boundary gap must be small
+# against the neighbours' mean spacing — gap <= max(BUCKET_GAP_FACTOR ×
+# width / n of either neighbour, BUCKET_RESOLUTION_SLACK × the column's
+# smallest step: an integer partition has a gap of exactly one step) — and
+# at least one side of the boundary must be dense (the BUCKET_EDGE_SHARE
+# slice of the group's width adjacent to the boundary holds >=
+# BUCKET_EDGE_MIN_ROWS rows and >= BUCKET_EDGE_MIN_SHARE of the group).
+# Independent clusters have sparse tails on both sides of a gap and wide
+# gaps against their spacing, so they are not flagged; a partition of a
+# continuous column has a sharp, dense edge on at least one side of every
+# cut. Calibration (seeded scratch simulation, 150-200 replicates; the
+# regression tests in test_dispersion.py cover the clear cases): true
+# partitions of uniform / lognormal / integer columns are flagged in 72-100 %
+# of replicates at 25-33 rows per bin and >= 85 % at 100 per bin; independent
+# Gaussian, exponential and integer clusters at any separation are flagged
+# in <= 2 % of replicates at 30 rows per group and 0 % at >= 100 rows (only
+# chance disjointness with dense tails passes). A gap factor of 10 would
+# raise the cluster rate to ~7 %, an edge share of 0.12 would halve recall.
+BUCKET_GAP_FACTOR = 5.0
+BUCKET_RESOLUTION_SLACK = 1.5
+BUCKET_EDGE_SHARE = 0.1
+BUCKET_EDGE_MIN_SHARE = 0.08
+BUCKET_EDGE_MIN_ROWS = 2
 
 _BUCKET_TRUNC: dict[TimeBucket, str] = {"day": "1d", "month": "1mo", "year": "1y"}
 _COARSER: dict[TimeBucket, TimeBucket | None] = {"day": "month", "month": "year", "year": None}
@@ -98,15 +139,21 @@ def compute_evidence(
     best_eta = _best_eta_by_column(cat_num)
     spearman = _spearman_matrix(df, correlations)
     derived = derived_columns(df, columns, correlations, spearman)
+    near_dups = near_duplicate_groups(spearman, derived, columns)
+    # stage 19.2: the dispersion pass also detects `cat = bucket(num)`
+    # bandings (a DerivedColumn of kind bucket, appended to the identities so
+    # the derived caps, layer 2 and the probes treat them like any identity)
+    # and flags entries that restate an identity / near copy / banding
+    dispersion, buckets = _dispersion_effects(df, cats, nums, derived)
     return Evidence(
         cat_num=cat_num,
         time_effects=_time_effects(df, dts, nums),
         num_num_spearman=spearman,
         interactions=_interactions(df, cats, nums, dts, correlations, best_eta),
         slope_heterogeneity=_slope_heterogeneity(df, correlations, cats, best_eta),
-        derived_columns=derived,
-        near_duplicate_groups=near_duplicate_groups(spearman, derived, columns),
-        dispersion=_dispersion_effects(df, cats, nums),
+        derived_columns=derived + buckets,
+        near_duplicate_groups=near_dups,
+        dispersion=dispersion,
     )
 
 
@@ -222,92 +269,276 @@ def _best_eta_by_column(effects: list[CatNumEffect]) -> dict[str, float]:
     return best
 
 
-# --- dispersion (stage 19.1) --------------------------------------------------
+# --- dispersion (stage 19.1 / 19.2) -------------------------------------------
+
+
+def _betacf(a: float, b: float, x: float) -> float:
+    """Continued fraction for the incomplete beta function (Numerical Recipes
+    3rd ed. §6.4, modified Lentz's method)."""
+    tiny = 1e-300
+    qab, qap, qam = a + b, a + 1.0, a - 1.0
+    c = 1.0
+    d = 1.0 - qab * x / qap
+    d = tiny if abs(d) < tiny else d
+    d = 1.0 / d
+    h = d
+    for m in range(1, 300):
+        m2 = 2 * m
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        d = tiny if abs(d) < tiny else d
+        c = 1.0 + aa / c
+        c = tiny if abs(c) < tiny else c
+        d = 1.0 / d
+        h *= d * c
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        d = tiny if abs(d) < tiny else d
+        c = 1.0 + aa / c
+        c = tiny if abs(c) < tiny else c
+        d = 1.0 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < 1e-14:
+            break
+    return h
+
+
+def regularized_incomplete_beta(a: float, b: float, x: float) -> float:
+    """I_x(a, b) for a, b > 0 and 0 <= x <= 1 (Numerical Recipes betai)."""
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    front = math.exp(
+        math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b) + a * math.log(x) + b * math.log1p(-x)
+    )
+    if x < (a + 1.0) / (a + b + 2.0):
+        return front * _betacf(a, b, x) / a
+    return 1.0 - front * _betacf(b, a, 1.0 - x) / b
+
+
+def f_survival(f: float, d1: int, d2: int) -> float:
+    """P(F(d1, d2) > f): the F-distribution survival function as the
+    regularised incomplete beta I_x(d2/2, d1/2) with x = d2 / (d2 + d1·f)
+    (Abramowitz & Stegun 26.6.2). Pure Python and deterministic (no scipy);
+    accurate to ~1e-12 for the degrees of freedom seen here — checked
+    against the tabulated 5 % critical values in test_dispersion_calibration."""
+    if not math.isfinite(f):
+        return 0.0
+    if f <= 0.0:
+        return 1.0
+    x = d2 / (d2 + d1 * f)
+    return min(1.0, max(0.0, regularized_incomplete_beta(d2 / 2.0, d1 / 2.0, x)))
+
+
+class _GroupStat(NamedTuple):
+    label: str
+    n: int
+    std: float | None
+    iqr: float | None
+    mad: float | None
+    lo: float | None
+    hi: float | None
+    dev_sum: float | None
+    dev_ssw: float | None
+    top_edge: int  # rows in the BUCKET_EDGE_SHARE slice below the group's max
+    bottom_edge: int  # rows in the slice above the group's min
+
+
+class _BrownForsythe(NamedTuple):
+    eta_squared: float  # adjusted, clipped at 0
+    f: float
+    p_value: float
+
+
+def _brown_forsythe(groups: list[_GroupStat]) -> _BrownForsythe | None:
+    """One-way ANOVA of |x − group median| from the per-group aggregates of
+    the compared groups: SS_between from the group means, SS_within summed.
+    Returns None when undefined (< 2 groups, no within df, no variance)."""
+    k = len(groups)
+    n = sum(g.n for g in groups)
+    if k < 2 or n - k < 2:
+        return None
+    if any(g.dev_sum is None or g.dev_ssw is None for g in groups):
+        return None
+    grand = sum(g.dev_sum for g in groups) / n  # type: ignore[misc]
+    ss_between = sum(g.n * (g.dev_sum / g.n - grand) ** 2 for g in groups)  # type: ignore[operator]
+    ss_within = sum(g.dev_ssw for g in groups)  # type: ignore[misc]
+    ss_total = ss_between + ss_within
+    if ss_total <= 0 or not math.isfinite(ss_total):
+        return None
+    eta = max(1.0 - (ss_within / (n - k)) / (ss_total / (n - 1)), 0.0)
+    if ss_within <= 0:
+        return _BrownForsythe(float(eta), math.inf, 0.0)
+    f = (ss_between / (k - 1)) / (ss_within / (n - k))
+    return _BrownForsythe(float(eta), float(f), f_survival(f, k - 1, n - k))
+
+
+def _is_bucket(groups: list[_GroupStat], resolution: float | None) -> bool:
+    """Is the categorical a banding of the numeric (`band = bucket(num)`)?
+    Rule (stage 19.2, conservative — a false flag demotes a real finding):
+    >= 2 non-empty groups, every group >= DISPERSION_WEAK_MIN_N rows, the
+    per-group [min, max] ranges pairwise disjoint in one consistent order,
+    every boundary gap <= max(BUCKET_GAP_FACTOR × mean spacing of either
+    neighbour, BUCKET_RESOLUTION_SLACK × column resolution) and dense on at
+    least one side (see the BUCKET_* constants). Independent groups whose ranges are merely
+    separated fail the gap and edge-density conditions."""
+    if len(groups) < 2 or any(g.n < DISPERSION_WEAK_MIN_N for g in groups):
+        return False
+    if any(g.lo is None or g.hi is None for g in groups):
+        return False
+    ordered = sorted(groups, key=lambda g: (g.lo, g.hi, g.label))  # type: ignore[arg-type]
+    floor = resolution if resolution is not None and resolution > 0 else 0.0
+    for below, above in zip(ordered, ordered[1:]):
+        gap = above.lo - below.hi  # type: ignore[operator]
+        if gap <= 0:
+            return False  # overlapping (or touching) ranges
+        spacing = max((below.hi - below.lo) / below.n, (above.hi - above.lo) / above.n)  # type: ignore[operator]
+        if gap > max(BUCKET_GAP_FACTOR * spacing, BUCKET_RESOLUTION_SLACK * floor):
+            return False
+        dense_below = below.top_edge >= max(BUCKET_EDGE_MIN_ROWS, BUCKET_EDGE_MIN_SHARE * below.n)
+        dense_above = above.bottom_edge >= max(BUCKET_EDGE_MIN_ROWS, BUCKET_EDGE_MIN_SHARE * above.n)
+        if not (dense_below or dense_above):
+            return False
+    return True
+
+
+def _finite_col(name: str, df: pl.DataFrame) -> pl.Expr:
+    col = pl.col(name)
+    if df.schema[name].is_float():
+        col = pl.when(col.is_finite()).then(col).otherwise(None)
+    return col.alias(name)
 
 
 def _dispersion_effects(
-    df: pl.DataFrame, cats: list[ColumnProfile], nums: list[ColumnProfile]
-) -> list[DispersionEffect]:
+    df: pl.DataFrame, cats: list[ColumnProfile], nums: list[ColumnProfile], derived: list[DerivedColumn]
+) -> tuple[list[DispersionEffect], list[DerivedColumn]]:
     """Spread differences of every num across every eligible cat, decoupled
     from the mean difference: the Brown–Forsythe deviations |num − group
-    median| scored as an adjusted eta-squared (equal spreads → 0), plus the
-    widest / narrowest per-group std, IQR and MAD. Row set per num = cat
-    non-null and num finite, like the layer-1 eta-squared; one group_by plus
-    one eta pass per cat, all nums batched. Only pairs that clear the gates
-    are listed (see the constants above)."""
+    median| as an adjusted eta-squared (equal spreads → 0) plus the F test
+    p-value, and the widest / narrowest per-group std, IQR and MAD. Row set
+    per num = cat non-null and num finite, like the layer-1 eta-squared; one
+    group_by per cat with all nums batched, the per-group aggregates are
+    combined in Python (<= 20 groups). Only pairs that clear the gates are
+    listed (see the constants above); the comparison runs over the
+    supported groups only (DispersionEffect docstring).
+
+    Also returns the `cat = bucket(num)` bandings found on the way (every
+    pair, listed or not) as DerivedColumn(kind="bucket"); listed entries
+    that restate an identity, near copy or banding carry definitional=True."""
     if not cats or not nums:
-        return []
+        return [], []
     names = [n.name for n in nums]
+    identities: dict[frozenset[str], DerivedColumn] = {}
+    for d in derived:
+        for component in d.components:
+            identities.setdefault(frozenset((d.target, component)), d)
+    # smallest positive step of each num (its resolution: 1 for counts, 0.01
+    # for prices) — the floor for the bucket gap tolerance
+    steps = df.select(*(_finite_col(n, df) for n in names))
+    res_exprs = []
+    for n in names:
+        diff = pl.col(n).drop_nulls().unique().sort().diff()
+        res_exprs.append(diff.filter(diff > 0).min().alias(n))
+    resolution = steps.select(res_exprs).row(0, named=True) if len(steps) else {n: None for n in names}
     effects: list[DispersionEffect] = []
+    buckets: list[DerivedColumn] = []
     for cat in cats:
         key = cat.name
-        finite = []
-        for name in names:
-            col = pl.col(name)
-            if df.schema[name].is_float():
-                col = pl.when(col.is_finite()).then(col).otherwise(None)
-            finite.append(col.alias(name))
-        data = df.filter(pl.col(key).is_not_null()).select(pl.col(key), *finite)
+        data = df.filter(pl.col(key).is_not_null()).select(pl.col(key), *(_finite_col(n, df) for n in names))
         both = data.with_columns(
             [(pl.col(n) - pl.col(n).median().over(key)).abs().alias(f"dev:{n}") for n in names]
         )
-        etas = adjusted_eta_squared_many(both, key, [f"dev:{n}" for n in names])
         aggs: list[pl.Expr] = []
         for n in names:
             col = pl.col(n)
+            dev = pl.col(f"dev:{n}")
+            width = col.max() - col.min()
             aggs += [
                 col.count().alias(f"n:{n}"),
                 col.std().alias(f"std:{n}"),
                 (
                     col.quantile(0.75, interpolation="linear") - col.quantile(0.25, interpolation="linear")
                 ).alias(f"iqr:{n}"),
-                pl.col(f"dev:{n}").median().alias(f"mad:{n}"),
+                dev.median().alias(f"mad:{n}"),
+                col.min().alias(f"lo:{n}"),
+                col.max().alias(f"hi:{n}"),
+                dev.sum().alias(f"dsum:{n}"),
+                ((dev - dev.mean()) ** 2).sum().alias(f"dssw:{n}"),
+                (col >= col.max() - BUCKET_EDGE_SHARE * width).sum().alias(f"top:{n}"),
+                (col <= col.min() + BUCKET_EDGE_SHARE * width).sum().alias(f"bottom:{n}"),
             ]
         groups = both.group_by(key, maintain_order=True).agg(aggs)
         rows = sorted(groups.iter_rows(named=True), key=lambda r: str(r[key]))
         for n in names:
-            eta = etas[f"dev:{n}"]
-            if eta is None or eta.eta_squared < DISPERSION_MIN_ETA:
-                continue
             stats = [
-                (str(r[key]), int(r[f"n:{n}"]), r[f"std:{n}"], r[f"iqr:{n}"], r[f"mad:{n}"])
+                _GroupStat(
+                    str(r[key]), int(r[f"n:{n}"]), r[f"std:{n}"], r[f"iqr:{n}"], r[f"mad:{n}"],
+                    r[f"lo:{n}"], r[f"hi:{n}"], r[f"dsum:{n}"], r[f"dssw:{n}"],
+                    int(r[f"top:{n}"] or 0), int(r[f"bottom:{n}"] or 0),
+                )
                 for r in rows
                 if r[f"n:{n}"]
             ]
-            if len(stats) < 2:
+            definition = identities.get(frozenset((key, n)))
+            if definition is None and _is_bucket(stats, resolution[n]):
+                definition = DerivedColumn(
+                    target=key,
+                    components=[n],
+                    formula=f"bucket({n})",
+                    kind="bucket",
+                    match_ratio=1.0,
+                    n=sum(s.n for s in stats),
+                )
+                buckets.append(definition)
+            supported = [s for s in stats if s.n >= DISPERSION_STRONG_MIN_N]
+            if len(supported) >= 2:
+                compared, may_be_strong = supported, True
+            else:
+                compared, may_be_strong = [s for s in stats if s.n >= DISPERSION_WEAK_MIN_N], False
+            if len(compared) < 2:
                 continue
-            n_min = min(s[1] for s in stats)
-            if n_min < DISPERSION_WEAK_MIN_N:
+            bf = _brown_forsythe(compared)
+            if bf is None or bf.eta_squared < DISPERSION_MIN_ETA:
                 continue
             ratios: dict[str, tuple[float, str, str] | None] = {}
-            for idx, label in ((2, "std"), (3, "iqr"), (4, "mad")):
-                values = [(s[idx], s[0]) for s in stats]
+            for attr in ("std", "iqr", "mad"):
+                values = [(getattr(s, attr), s.label) for s in compared]
                 if any(v is None or not math.isfinite(v) or v <= 0 for v, _ in values):
-                    ratios[label] = None  # a constant group: no ratio
+                    ratios[attr] = None  # a constant group: no ratio
                     continue
                 widest, narrowest = max(values), min(values)  # ties broken by the group label
-                ratios[label] = (widest[0] / narrowest[0], widest[1], narrowest[1])
+                ratios[attr] = (widest[0] / narrowest[0], widest[1], narrowest[1])
             robust = ratios["iqr"] or ratios["mad"] or ratios["std"]
             if robust is None or robust[0] < DISPERSION_MIN_RATIO:
                 continue
+            compared_labels = {s.label for s in compared}
             effects.append(
                 DispersionEffect(
                     cat=key,
                     num=n,
-                    n_total=sum(s[1] for s in stats),
-                    n_groups=len(stats),
-                    n_min=n_min,
-                    bf_eta_squared=round(eta.eta_squared, 6),
+                    n_total=sum(s.n for s in compared),
+                    n_groups=len(compared),
+                    n_min=min(s.n for s in compared),
+                    bf_eta_squared=round(bf.eta_squared, 6),
+                    bf_f=round(bf.f, 6) if math.isfinite(bf.f) else None,
+                    bf_p_value=round(bf.p_value, 6),
                     std_ratio=round(ratios["std"][0], 6) if ratios["std"] else None,
                     iqr_ratio=round(ratios["iqr"][0], 6) if ratios["iqr"] else None,
                     mad_ratio=round(ratios["mad"][0], 6) if ratios["mad"] else None,
                     spread_ratio=round(robust[0], 6),
                     widest_group=robust[1],
                     narrowest_group=robust[2],
-                    strength="strong" if n_min >= DISPERSION_STRONG_MIN_N else "weak",
+                    strength="strong" if may_be_strong and bf.p_value <= DISPERSION_ALPHA else "weak",
+                    compared_groups=[s.label for s in compared],
+                    excluded_groups={s.label: s.n for s in stats if s.label not in compared_labels},
+                    definitional=definition is not None,
+                    definitional_kind=None if definition is None else definition.kind,
+                    definition=None if definition is None else f"{definition.target} = {definition.formula}",
                 )
             )
-    return effects
+    return effects, buckets
 
 
 # --- time effects -----------------------------------------------------------

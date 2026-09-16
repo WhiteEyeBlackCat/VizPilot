@@ -166,6 +166,11 @@ def _definitional_reason(derived: DerivedColumn, reason: str | None) -> str:
             f"{derived.target} is nearly a transformed copy of {derived.components[0]} "
             f"(rank correlation {derived.match_ratio:.2f}); the relationship is likely definitional."
         )
+    elif derived.kind == "bucket":
+        note = (
+            f"{derived.target} is a banding of {derived.components[0]} (its groups are ordered, "
+            "disjoint ranges of that column); this relationship is definitional, not a finding."
+        )
     else:
         note = (
             f"{derived.target} is computed as {derived.formula}; "
@@ -291,10 +296,15 @@ class _EvidenceIndex:
         # from the eta-squared gate of the L2 group summaries: equal means
         # with different spreads count. Only a strong entry (every group
         # >= 30 rows) moves a finding to the distribution family — the same
-        # floor the density charts need.
+        # floor the density charts need. Stage 19.2: an entry flagged
+        # definitional (num derived from cat, or cat = bucket(num)) is kept
+        # as evidence but never promotes a headline distribution chart —
+        # "price spread differs across price_band" restates the banding.
         self.dispersion = {(d.cat, d.num): d for d in getattr(evidence, "dispersion", [])}
         self.spread_differs: dict[tuple[str, str], bool] = {
-            key: True for key, d in self.dispersion.items() if d.strength == "strong"
+            key: True
+            for key, d in self.dispersion.items()
+            if d.strength == "strong" and not getattr(d, "definitional", False)
         }
         # stage 19: (x, y) -> binned eta-squared of the L2 non-linear scan (numeric cycles)
         self.binned_eta2 = {

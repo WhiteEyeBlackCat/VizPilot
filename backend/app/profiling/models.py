@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 # Bump whenever the profile schema or inference rules change: cached
 # {id}.profile.json files with a different version are recomputed.
-PROFILE_VERSION = 12  # v12: dispersion evidence (stage 19.1); v11: layer-2 shapes/strength (stage 17.1b); v10: evidence layer 2 (stage 17.1)
+PROFILE_VERSION = 13  # v13: dispersion compared groups / F-test p-value / definitional flag, bucket derived kind (stage 19.2); v12: dispersion evidence (stage 19.1); v11: layer-2 shapes/strength (stage 17.1b); v10: evidence layer 2 (stage 17.1)
 
 SemanticType = Literal["numeric", "categorical", "datetime", "boolean", "text", "id", "unknown"]
 Frequency = Literal["daily", "weekly", "monthly", "irregular", "unknown"]
@@ -172,7 +172,7 @@ class SlopeHet(BaseModel):
     n_min: int  # rows in the smallest contributing group (for dynamic thresholds)
 
 
-DerivedKind = Literal["product", "product_discount", "sum", "difference", "ratio", "near_copy"]
+DerivedKind = Literal["product", "product_discount", "sum", "difference", "ratio", "near_copy", "bucket"]
 
 
 class DerivedColumn(BaseModel):
@@ -185,7 +185,12 @@ class DerivedColumn(BaseModel):
     rounding tolerance on >= 99% of the rows where every column is finite.
     kind == near_copy: a near-duplicate (stage 14 NearDuplicateGroup member)
     of its single component, the group's representative. Disclosed; the
-    duplicate itself is suppressed from candidate generation."""
+    duplicate itself is suppressed from candidate generation.
+    kind == bucket (stage 19.2): a categorical `target` whose groups are
+    ordered, disjoint, contiguous intervals of its numeric single component
+    (`price_band = bucket(price)`): the per-group ranges tile the column and
+    every shared boundary is dense on at least one side (see
+    evidence._is_bucket). formula is `bucket(<component>)`, match_ratio 1.0."""
 
     target: str
     components: list[str]
@@ -216,20 +221,35 @@ class DispersionEffect(BaseModel):
     19.1)? Independent of the mean difference (CatNumEffect): two groups with
     the same mean and a different spread have eta-squared ~0 and a strong
     entry here. bf_eta_squared is the adjusted eta-squared of |num − group
-    median| over the groups — the Brown–Forsythe statistic as an effect size,
-    0 when the spreads are equal; std_ratio / iqr_ratio / mad_ratio are the
-    widest / narrowest per-group spread (None when a group's spread is 0);
-    spread_ratio is the robust one the rule engine reads (IQR, MAD when an
-    IQR is 0, std last). Only pairs whose spreads differ are listed:
-    `strong` needs every group to hold at least DISPERSION_STRONG_MIN_N rows,
-    `weak` DISPERSION_WEAK_MIN_N — a small sample never makes a strong
-    entry."""
+    median| over the compared groups — the Brown–Forsythe statistic as an
+    effect size, 0 when the spreads are equal; bf_f / bf_p_value are the
+    Brown–Forsythe F statistic and its F-distribution p-value (stage 19.2);
+    std_ratio / iqr_ratio / mad_ratio are the widest / narrowest per-group
+    spread (None when a group's spread is 0); spread_ratio is the robust one
+    the rule engine reads (IQR, MAD when an IQR is 0, std last).
+
+    Sample sizes (stage 19.2): the comparison runs over the groups listed in
+    compared_groups; a group too small to support it is EXCLUDED and listed
+    in excluded_groups (label -> rows) instead of cancelling the comparison
+    for the well-supported groups. When at least two groups hold
+    DISPERSION_STRONG_MIN_N rows the comparison is over exactly those groups
+    and may be `strong` (bf_p_value <= DISPERSION_ALPHA, effect gates met);
+    otherwise it falls back to every group with DISPERSION_WEAK_MIN_N rows
+    and is `weak`. n_groups / n_total / n_min describe the compared groups
+    only. A small group never contributes to strong evidence.
+
+    definitional (stage 19.2): the pair merely restates a definition —
+    `num` is derived from `cat` (or vice versa: an identity or near copy in
+    derived_columns) or `cat` is a banding of `num` (kind bucket). The
+    evidence is kept and flagged; the rules never promote a flagged entry to
+    a headline distribution chart and the LLM is told it is not a
+    discovery."""
 
     cat: str
     num: str
-    n_total: int
-    n_groups: int
-    n_min: int  # rows in the smallest group
+    n_total: int  # rows in the compared groups
+    n_groups: int  # compared groups
+    n_min: int  # rows in the smallest compared group
     bf_eta_squared: float
     std_ratio: float | None
     iqr_ratio: float | None
@@ -238,6 +258,14 @@ class DispersionEffect(BaseModel):
     widest_group: str  # str(group value), like CatNumEffect.group_counts keys
     narrowest_group: str
     strength: DispersionStrength
+    # stage 19.2, additive
+    bf_f: float | None = None
+    bf_p_value: float | None = None
+    compared_groups: list[str] = []  # labels that took part, sorted
+    excluded_groups: dict[str, int] = {}  # label -> rows, too small to take part
+    definitional: bool = False
+    definitional_kind: DerivedKind | None = None
+    definition: str | None = None  # e.g. "sales = unit_price × quantity", "price_band = bucket(price)"
 
 
 # --- evidence layer 2 (stage 17.1) ------------------------------------------
