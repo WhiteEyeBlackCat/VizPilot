@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 # Bump whenever the profile schema or inference rules change: cached
 # {id}.profile.json files with a different version are recomputed.
-PROFILE_VERSION = 11  # v11: layer-2 shapes/strength (stage 17.1b); v10: evidence layer 2 (stage 17.1); v9: near-duplicate groups (stage 14)
+PROFILE_VERSION = 12  # v12: dispersion evidence (stage 19.1); v11: layer-2 shapes/strength (stage 17.1b); v10: evidence layer 2 (stage 17.1)
 
 SemanticType = Literal["numeric", "categorical", "datetime", "boolean", "text", "id", "unknown"]
 Frequency = Literal["daily", "weekly", "monthly", "irregular", "unknown"]
@@ -208,6 +208,38 @@ class NearDuplicateGroup(BaseModel):
     n: int  # shared rows behind the weakest duplicate/representative pair
 
 
+DispersionStrength = Literal["strong", "weak"]
+
+
+class DispersionEffect(BaseModel):
+    """Do the *spreads* of `num` differ across the groups of `cat` (stage
+    19.1)? Independent of the mean difference (CatNumEffect): two groups with
+    the same mean and a different spread have eta-squared ~0 and a strong
+    entry here. bf_eta_squared is the adjusted eta-squared of |num − group
+    median| over the groups — the Brown–Forsythe statistic as an effect size,
+    0 when the spreads are equal; std_ratio / iqr_ratio / mad_ratio are the
+    widest / narrowest per-group spread (None when a group's spread is 0);
+    spread_ratio is the robust one the rule engine reads (IQR, MAD when an
+    IQR is 0, std last). Only pairs whose spreads differ are listed:
+    `strong` needs every group to hold at least DISPERSION_STRONG_MIN_N rows,
+    `weak` DISPERSION_WEAK_MIN_N — a small sample never makes a strong
+    entry."""
+
+    cat: str
+    num: str
+    n_total: int
+    n_groups: int
+    n_min: int  # rows in the smallest group
+    bf_eta_squared: float
+    std_ratio: float | None
+    iqr_ratio: float | None
+    mad_ratio: float | None
+    spread_ratio: float
+    widest_group: str  # str(group value), like CatNumEffect.group_counts keys
+    narrowest_group: str
+    strength: DispersionStrength
+
+
 # --- evidence layer 2 (stage 17.1) ------------------------------------------
 #
 # Bounded, deterministic summaries that let the LLM reason about distribution
@@ -407,6 +439,9 @@ class Evidence(BaseModel):
     slope_heterogeneity: list[SlopeHet] = []
     derived_columns: list[DerivedColumn] = []  # stage 13, additive
     near_duplicate_groups: list[NearDuplicateGroup] = []  # stage 14, additive
+    # stage 19.1, additive: spread differences across groups, decoupled from
+    # the mean-difference evidence in cat_num (read by the rules and the LLM)
+    dispersion: list[DispersionEffect] = []
     layer2: EvidenceLayer2 = EvidenceLayer2()  # stage 17.1, additive; LLM-only
 
 

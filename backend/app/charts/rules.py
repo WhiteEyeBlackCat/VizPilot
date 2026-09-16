@@ -32,6 +32,20 @@ MAX_CHARTS = 12
 MAX_PER_TYPE = 3  # diversity cap (stage3 blocking #1)
 MAX_PER_X = 2  # within a type, one x column may fill at most 2 slots
 MAX_PER_Y = 3  # stage 14: one column as y in at most 3 bar/box/line charts
+# stage 19.1: diminishing returns instead of a bare raw-type cap. A slot's
+# value is the chart's score discounted by what the list already shows: each
+# kept chart of the same analytical question — (intent, x, group_by): "how
+# does <measure> move over the hours", "how does <measure> trend over time"
+# with the measure varying — discounts the next answer to that question
+# (three trend lines over the same date column answer one question three
+# times), and beyond TYPE_FREE_SLOTS charts drawn with the same raw type a
+# milder discount applies across questions (a cyclic line and a trend line
+# are different findings, so they are never eliminated for looking alike —
+# only nudged). Scores and tiers are untouched: this only decides which
+# candidates take the MAX_CHARTS slots.
+QUESTION_DECAY = 0.8
+TYPE_DECAY = 0.85
+TYPE_FREE_SLOTS = 2
 # MAX_MISSING_RATIO lives in confidence.py (stage 9) and is re-exported here
 MAX_GRANULARITY_POINTS = 500
 SCATTER_MIN_CORR = 0.3
@@ -40,9 +54,9 @@ GROUP_CATEGORIES_RANGE = (2, 8)
 NONLINEAR_CORR_GAP = 0.15  # |spearman| - |pearson| above this -> non-linear note
 LINE_GROUP_INTERACTION_MIN = 0.05
 LINE_GROUP_MAIN_EFFECT_MIN = 0.1  # eta-squared(group, y): main-effect grouping still earns a split
-# stage 19: group spreads (std) differing by this factor make the finding a
-# distribution difference (raincloud / ridgeline / box), not a mean comparison
-DISTRIBUTION_SPREAD_RATIO = 1.5
+# stage 19.1: a finding is a distribution difference (raincloud / ridgeline /
+# box) when evidence.dispersion carries a STRONG entry for the pair — the
+# thresholds live in profiling/evidence.py (DISPERSION_*)
 TWO_STATE_INTERACTION_MIN = 0.05  # interaction share for a category × two-state chart
 # types sharing the bar's per-x cap and the per-y cap (stage 19 family)
 _X_CAPPED_TYPES = frozenset({"bar", "lollipop", "box", "violin", "raincloud", "ridgeline", "dot_interval", "polar_line", "rose", "line"})
@@ -272,10 +286,16 @@ class _EvidenceIndex:
                 self.interaction[(a, b, e.num)] = max(self.interaction.get((a, b, e.num), 0.0), e.strength)
         # stage 19: (cat, num) -> smallest group and whether the group spreads differ
         self.n_min = {(e.cat, e.num): e.n_min for e in evidence.cat_num}
-        self.spread_differs: dict[tuple[str, str], bool] = {}
-        for g in getattr(getattr(evidence, "layer2", None), "group_summaries", []) or []:
-            stds = [s.std for s in g.groups if s.std is not None and s.std > 0]
-            self.spread_differs[(g.cat, g.num)] = len(stds) >= 2 and max(stds) / min(stds) >= DISTRIBUTION_SPREAD_RATIO
+        # stage 19.1: the spread evidence is layer 1's own (Brown–Forsythe
+        # eta-squared + robust spread ratio, evidence.dispersion), decoupled
+        # from the eta-squared gate of the L2 group summaries: equal means
+        # with different spreads count. Only a strong entry (every group
+        # >= 30 rows) moves a finding to the distribution family — the same
+        # floor the density charts need.
+        self.dispersion = {(d.cat, d.num): d for d in getattr(evidence, "dispersion", [])}
+        self.spread_differs: dict[tuple[str, str], bool] = {
+            key: True for key, d in self.dispersion.items() if d.strength == "strong"
+        }
         # stage 19: (x, y) -> binned eta-squared of the L2 non-linear scan (numeric cycles)
         self.binned_eta2 = {
             (n.x, n.y): n.binned_eta2 for n in getattr(getattr(evidence, "layer2", None), "nonlinear", []) or []
@@ -1065,33 +1085,74 @@ def apply_diversity_caps(recs: list[Recommendation]) -> list[Recommendation]:
       slots (stage7 review: quantity took all three bar slots on sales_basic)
     - per y (bar/box/line, stage 14): one measure must not fill the list
       from every angle (temp took 5 of 12 slots on the bike-sharing hours)
+    - stage 19.1, diminishing returns: slots are filled one at a time by the
+      highest *slot value* = score × QUESTION_DECAY^(kept answers to the same
+      (intent, x, group_by) question) × TYPE_DECAY^(kept charts of the same
+      raw type beyond TYPE_FREE_SLOTS), so a third trend line over the same
+      date column competes against the best histogram at a discount instead
+      of winning on raw score. Deterministic: ties fall back to the score
+      order. Membership is decided here; the returned list is score-ordered
+      as before and scores / tiers are unchanged.
     """
     kept: list[Recommendation] = []
     per_type: dict[str, int] = {}
+    per_question: dict[tuple[str, str, str], int] = {}
+    per_raw_type: dict[str, int] = {}
     per_x: dict[tuple[str, str], int] = {}
     per_y: dict[str, int] = {}
-    for rec in sorted(recs, key=_sort_key):
+    pool = sorted(recs, key=_sort_key)
+
+    def _question(rec: Recommendation) -> tuple[str, str, str]:
+        return (rec.intent or rec.spec.type, rec.spec.x or "", rec.spec.group_by or "")
+
+    def _admissible(rec: Recommendation) -> bool:
         chart_type = rec.spec.type
         # stage 19: the type cap counts chart families (the intent) — a cyclic
         # line and a trend line are different findings, two bars of the same
         # intent are not more diverse for being bars
-        family = rec.intent or chart_type
-        if per_type.get(family, 0) >= MAX_PER_TYPE:
-            continue
-        x_key = (chart_type, rec.spec.x or "")
+        if per_type.get(rec.intent or chart_type, 0) >= MAX_PER_TYPE:
+            return False
         # trend lines all share the dataset's datetime column: the per-x cap
         # applies to lines over a cycle only
-        x_capped = chart_type in _X_CAPPED_TYPES and (chart_type != "line" or rec.intent == "cyclic_pattern")
-        if x_capped and per_x.get(x_key, 0) >= MAX_PER_X:
-            continue
-        y = rec.spec.y
-        counts_y = chart_type in _Y_CAPPED_TYPES and y is not None
-        if counts_y and per_y.get(y, 0) >= MAX_PER_Y:
-            continue
-        kept.append(rec)
+        if _x_capped(rec) and per_x.get((chart_type, rec.spec.x or ""), 0) >= MAX_PER_X:
+            return False
+        if _y_capped(rec) and per_y.get(rec.spec.y or "", 0) >= MAX_PER_Y:
+            return False
+        return True
+
+    def _slot_value(rec: Recommendation) -> float:
+        answers = per_question.get(_question(rec), 0)
+        raw = max(0, per_raw_type.get(rec.spec.type, 0) - TYPE_FREE_SLOTS)
+        return rec.score * QUESTION_DECAY**answers * TYPE_DECAY**raw
+
+    while pool and len(kept) < MAX_CHARTS:
+        best: Recommendation | None = None
+        best_value = -1.0
+        for rec in pool:
+            if not _admissible(rec):
+                continue
+            value = _slot_value(rec)
+            if value > best_value + 1e-12:  # strict: the first (score-ordered) candidate wins ties
+                best, best_value = rec, value
+        if best is None:
+            break
+        pool.remove(best)
+        kept.append(best)
+        family = best.intent or best.spec.type
         per_type[family] = per_type.get(family, 0) + 1
-        if x_capped:
-            per_x[x_key] = per_x.get(x_key, 0) + 1
-        if counts_y:
-            per_y[y] = per_y.get(y, 0) + 1
-    return sorted(kept, key=_sort_key)[:MAX_CHARTS]
+        per_question[_question(best)] = per_question.get(_question(best), 0) + 1
+        per_raw_type[best.spec.type] = per_raw_type.get(best.spec.type, 0) + 1
+        if _x_capped(best):
+            key = (best.spec.type, best.spec.x or "")
+            per_x[key] = per_x.get(key, 0) + 1
+        if _y_capped(best):
+            per_y[best.spec.y or ""] = per_y.get(best.spec.y or "", 0) + 1
+    return sorted(kept, key=_sort_key)
+
+
+def _x_capped(rec: Recommendation) -> bool:
+    return rec.spec.type in _X_CAPPED_TYPES and (rec.spec.type != "line" or rec.intent == "cyclic_pattern")
+
+
+def _y_capped(rec: Recommendation) -> bool:
+    return rec.spec.type in _Y_CAPPED_TYPES and rec.spec.y is not None

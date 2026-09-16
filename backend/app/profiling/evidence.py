@@ -19,6 +19,7 @@ from .models import (
     Correlations,
     DerivedColumn,
     DerivedKind,
+    DispersionEffect,
     Evidence,
     InteractionEffect,
     NearDuplicateGroup,
@@ -71,6 +72,17 @@ _CAMEL_RE = re.compile(r"(?<=[a-z])(?=[A-Z])")
 _NAME_MIN_TOKEN = 3  # shared token length that counts as related
 _NAME_MIN_SUBSTRING = 4  # one normalised name inside the other
 
+# --- dispersion (stage 19.1) ---
+# A spread difference is evidence on its own, whatever the means do. The
+# Brown–Forsythe form (deviations from the group MEDIAN, robust to skew and
+# outliers) is scored as an adjusted eta-squared so it is df-corrected like
+# the mean-difference evidence; the robust spread ratio (IQR, else MAD, else
+# std) must agree so a single heavy tail in one group cannot flag a pair.
+DISPERSION_MIN_ETA = 0.02  # adjusted eta-squared of |x − group median| over the groups
+DISPERSION_MIN_RATIO = 1.5  # widest / narrowest per-group robust spread
+DISPERSION_STRONG_MIN_N = 30  # rows in EVERY group for a strong entry (density guards agree)
+DISPERSION_WEAK_MIN_N = 10  # below this a pair is not listed at all
+
 _BUCKET_TRUNC: dict[TimeBucket, str] = {"day": "1d", "month": "1mo", "year": "1y"}
 _COARSER: dict[TimeBucket, TimeBucket | None] = {"day": "month", "month": "year", "year": None}
 
@@ -94,6 +106,7 @@ def compute_evidence(
         slope_heterogeneity=_slope_heterogeneity(df, correlations, cats, best_eta),
         derived_columns=derived,
         near_duplicate_groups=near_duplicate_groups(spearman, derived, columns),
+        dispersion=_dispersion_effects(df, cats, nums),
     )
 
 
@@ -207,6 +220,94 @@ def _best_eta_by_column(effects: list[CatNumEffect]) -> dict[str, float]:
         best[e.cat] = max(best.get(e.cat, 0.0), e.eta_squared)
         best[e.num] = max(best.get(e.num, 0.0), e.eta_squared)
     return best
+
+
+# --- dispersion (stage 19.1) --------------------------------------------------
+
+
+def _dispersion_effects(
+    df: pl.DataFrame, cats: list[ColumnProfile], nums: list[ColumnProfile]
+) -> list[DispersionEffect]:
+    """Spread differences of every num across every eligible cat, decoupled
+    from the mean difference: the Brown–Forsythe deviations |num − group
+    median| scored as an adjusted eta-squared (equal spreads → 0), plus the
+    widest / narrowest per-group std, IQR and MAD. Row set per num = cat
+    non-null and num finite, like the layer-1 eta-squared; one group_by plus
+    one eta pass per cat, all nums batched. Only pairs that clear the gates
+    are listed (see the constants above)."""
+    if not cats or not nums:
+        return []
+    names = [n.name for n in nums]
+    effects: list[DispersionEffect] = []
+    for cat in cats:
+        key = cat.name
+        finite = []
+        for name in names:
+            col = pl.col(name)
+            if df.schema[name].is_float():
+                col = pl.when(col.is_finite()).then(col).otherwise(None)
+            finite.append(col.alias(name))
+        data = df.filter(pl.col(key).is_not_null()).select(pl.col(key), *finite)
+        both = data.with_columns(
+            [(pl.col(n) - pl.col(n).median().over(key)).abs().alias(f"dev:{n}") for n in names]
+        )
+        etas = adjusted_eta_squared_many(both, key, [f"dev:{n}" for n in names])
+        aggs: list[pl.Expr] = []
+        for n in names:
+            col = pl.col(n)
+            aggs += [
+                col.count().alias(f"n:{n}"),
+                col.std().alias(f"std:{n}"),
+                (
+                    col.quantile(0.75, interpolation="linear") - col.quantile(0.25, interpolation="linear")
+                ).alias(f"iqr:{n}"),
+                pl.col(f"dev:{n}").median().alias(f"mad:{n}"),
+            ]
+        groups = both.group_by(key, maintain_order=True).agg(aggs)
+        rows = sorted(groups.iter_rows(named=True), key=lambda r: str(r[key]))
+        for n in names:
+            eta = etas[f"dev:{n}"]
+            if eta is None or eta.eta_squared < DISPERSION_MIN_ETA:
+                continue
+            stats = [
+                (str(r[key]), int(r[f"n:{n}"]), r[f"std:{n}"], r[f"iqr:{n}"], r[f"mad:{n}"])
+                for r in rows
+                if r[f"n:{n}"]
+            ]
+            if len(stats) < 2:
+                continue
+            n_min = min(s[1] for s in stats)
+            if n_min < DISPERSION_WEAK_MIN_N:
+                continue
+            ratios: dict[str, tuple[float, str, str] | None] = {}
+            for idx, label in ((2, "std"), (3, "iqr"), (4, "mad")):
+                values = [(s[idx], s[0]) for s in stats]
+                if any(v is None or not math.isfinite(v) or v <= 0 for v, _ in values):
+                    ratios[label] = None  # a constant group: no ratio
+                    continue
+                widest, narrowest = max(values), min(values)  # ties broken by the group label
+                ratios[label] = (widest[0] / narrowest[0], widest[1], narrowest[1])
+            robust = ratios["iqr"] or ratios["mad"] or ratios["std"]
+            if robust is None or robust[0] < DISPERSION_MIN_RATIO:
+                continue
+            effects.append(
+                DispersionEffect(
+                    cat=key,
+                    num=n,
+                    n_total=sum(s[1] for s in stats),
+                    n_groups=len(stats),
+                    n_min=n_min,
+                    bf_eta_squared=round(eta.eta_squared, 6),
+                    std_ratio=round(ratios["std"][0], 6) if ratios["std"] else None,
+                    iqr_ratio=round(ratios["iqr"][0], 6) if ratios["iqr"] else None,
+                    mad_ratio=round(ratios["mad"][0], 6) if ratios["mad"] else None,
+                    spread_ratio=round(robust[0], 6),
+                    widest_group=robust[1],
+                    narrowest_group=robust[2],
+                    strength="strong" if n_min >= DISPERSION_STRONG_MIN_N else "weak",
+                )
+            )
+    return effects
 
 
 # --- time effects -----------------------------------------------------------
