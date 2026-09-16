@@ -3,7 +3,7 @@ mode: learning
 generated_at: 2026-09-15
 ---
 
-> ECharts adapter: pure `buildOption(RenderResult) → VizOption` for the 16 chart types (six classic + the stage-19 family drawn with custom / bar / line / scatter series and a polar system), a single theme source, tree-shaken registration, and a 50-line React binding. Verified against 18 real-backend fixtures plus synthetic payloads.
+> ECharts adapter: pure `buildOption(RenderResult) → VizOption` for the 16 chart types (six classic + the stage-19 family drawn with custom / bar / line / scatter series and a polar system), a single theme source, tree-shaken registration, and a 50-line React binding. Verified against 28 real-backend fixtures (18 classic + 10 stage-19.1) plus synthetic payloads.
 
 ## Task Guide
 
@@ -37,7 +37,7 @@ generated_at: 2026-09-15
 | `theme.ts` | Theme | `→ ../../components/PreviewPanel.tsx` | Palette, text styles, grid presets, tooltip/legend/toolbox/dataZoom factories. |
 | `echarts.ts` | Registration | — | `echarts/core` + used charts/components/renderers (incl. `PolarComponent`); `VizOption` composed type (+ `angleAxis` / `radiusAxis`). |
 | `EChartsView.tsx` | Binding | `→ ../../components/*` | Init/setOption/resize/dispose; exposes host element. |
-| `option.test.ts`, `option.ssr.test.ts`, `theme.test.ts`, `order.test.ts`, `option.stage19.test.ts` | Tests | `← ../__fixtures__/*.json` | vitest: option values, SSR render, contrast, display order + notes, stage-19 builders (payload → series, SSR smoke). |
+| `option.test.ts`, `option.ssr.test.ts`, `theme.test.ts`, `order.test.ts`, `option.stage19.test.ts`, `option.stage191.test.ts` | Tests | `← ../__fixtures__/*.json` | vitest: option values, SSR render, contrast, display order + notes, stage-19 builders (payload → series, SSR smoke), stage-19.1 real-backend fixtures (raincloud / box same-mean, ridgeline + natural-order bar / line, polar_line, rose, hexbin — incl. a `renderItem` tessellation check at unequal axis scales). |
 
 ## File Dependencies
 

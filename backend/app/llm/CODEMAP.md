@@ -27,7 +27,8 @@ generated_at: 2026-09-16
 | `quotable_numbers` | `service.py` | L:913 |
 | `check_coverage`, `CoverageHit`, `ValidatedHypothesis` | `coverage.py` | L:87, L:38, L:49 |
 | `apply_confidence_cap`, `corroborated`, `infer_probe`, `suggest_chart`, `required_roles`, `definitional_conflict` | `coverage.py` | L:298, L:334, L:393, L:419, L:451, L:456 |
-| `build_hypothesis_messages`, `build_final_messages`, `PROBE_TYPE_GUIDE` | `prompts.py` | L:145, L:400, L:43 |
+| `build_hypothesis_messages`, `build_final_messages`, `PROBE_TYPE_GUIDE` | `prompts.py` | L:154, L:451, L:44 |
+| `_roles_section`, `_dispersion_lines` (stage 19.1 metadata for LLM #1) | `prompts.py` | L:196, L:219 |
 | `LLMProvider`, `DisabledProvider`, `OpenAICompatProvider`, `LLMError` | `provider.py` | L:35, L:45, L:57, L:29 |
 | `Hypothesis`, `HypothesisResponse`, `FinalInsight`, `FinalResponse`, `LLMChartSuggestion`, `LLMUsage` | `schemas.py` | L:32, L:50, L:59, L:72, L:17, L:77 |
 
@@ -37,7 +38,7 @@ generated_at: 2026-09-16
 |---|---|---|---|
 | `service.py` | Service / Workflow | `← charts/rules.py, charts/confidence.py, charts/spec.py, probes/*, profiling/models.py, coverage, provider, schemas \| → main.py, datasets/router.py` | `get(profile, use_llm, df, include_debug)` → `{charts, insights, message, warnings, debug?}`. `_Workflow`: cap 5 hypotheses → gate (columns exist, probe type known, roles typed, no definitional/near-dup claim, unknown snake_case tokens) → dedupe (test, columns) → coverage hit or probe (≤5, cached, n≥30) → LLM #2 once iff a probe validated something or ≥2 validated → wording gate (only backend numbers/dates quotable, else template/neutral) → `_Merger` integrates backend or LLM charts through the same caps/tiers as rules. `_Trace` = `debug` payload. |
 | `coverage.py` | Coverage | `← charts/confidence.py, charts/rules.py, charts/spec.py, probes/engine.py, probes/schemas.py, profiling/models.py` | `check_coverage(test, columns, profile)` looks a claim up in evidence L1 (η², correlation, slope spread, interaction, time buckets) and L2 (nonlinear, directed `(x, y)`; conditional; change points; distributions) and returns a `CoverageHit` with the probe thresholds' verdict; confidence cap for tiny n; `corroborated` for slope_difference; `infer_probe` maps a chart-only suggestion to a test; `suggest_chart` builds the backend chart for a validated claim. |
-| `prompts.py` | Prompt | `← charts/rules.py, probes/engine.py, profiling/models.py, coverage` | Hypothesis prompt: user rules, probe-type guide with roles, column briefs, evidence L1 top-k, selected L2 signals (bounded, no series dumps), ≤5 sample rows. Final prompt: only validated facts with backend numbers and the columns involved. |
+| `prompts.py` | Prompt | `← charts/roles.py, charts/rules.py, probes/engine.py, profiling/models.py, coverage` | Hypothesis prompt: user rules, probe-type guide with roles, column briefs, "Column roles" (cyclic period / order, ordered scales, two-state; stage 19.1) and "Spread differences" (`evidence.dispersion`) sections, evidence L1 top-k, selected L2 signals (bounded, no series dumps), ≤5 sample rows; chart hints may name polar_line / rose / raincloud / ridgeline. Final prompt: only validated facts with backend numbers and the columns involved. |
 | `provider.py` | Provider | `← charts/rules.py, profiling/models.py, coverage, prompts, schemas` | `LLMProvider` protocol (`generate_hypotheses`, `finalize_insights`); OpenAI-compatible HTTP client (base_url/model from Settings, per-call `LLMUsage`); disabled stub. |
 | `schemas.py` | Schema | — | Loose Pydantic models for both calls; `validate_spec` remains the chart gate; probe requests are re-validated by `probes/schemas.py` (`extra="forbid"`). |
 

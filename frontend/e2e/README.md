@@ -71,5 +71,17 @@ panel (`[data-preview-panel]`), Save as the only way into the workspace:
     order with a `[data-order-note]`. With the LLM off the step records
     `insights: 0` and passes.
 
+14. stage 19.1 (hour_like): the Explore builder reads the profile's
+    `column_roles` — with type `rose` the X list is the cyclic columns only
+    (`season, mnth, hr`, never `weathersit`) and the page lists the cyclic /
+    ordered columns (`[data-hint=cyclic]`, `[data-hint=ordered]`); the
+    backend's "must be cyclic" 422 stays for hand-written specs but is no
+    longer reachable from the builder, so the stage-19 nominal-rose step is
+    replaced by `explore.rose-x-cyclic-only`.
+
 `capture-fixtures.mjs` records real `RenderResult`s for the option-builder
-unit tests (`npm run capture-fixtures`, backend on 8100).
+unit tests (`npm run capture-fixtures`, backend on 8100). Stage 19.1 added
+`--only a,b` (records a subset, merges into `index.json`) and the committed
+inputs `e2e/data/{spread_groups,cycles,dense_xy}.csv` from
+`e2e/data/make_stage191.py`; `backend/tests/test_fixture_regression.py`
+re-renders every fixture whose input lives under `e2e/data/`.

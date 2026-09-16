@@ -30,11 +30,12 @@ generated_at: 2026-09-15
 | `ColumnRole`, `column_role`, `roles_for`, `category_key` | `roles.py` | L:69, L:141, L:196, L:216 |
 | `Intent`, `IntentContext`, `ChartChoice`, `classify_intent`, `eligible_charts`, `select_chart` | `intent.py` | L:19, L:48, L:64, L:77, L:120, L:178 |
 | `select_for_spec` | `rules.py` | `rg "def select_for_spec" backend/app/charts/rules.py` |
-| `Recommendation` | `rules.py` | L:54 |
-| `recommend_charts`, `assign_tiers`, `apply_diversity_caps` | `rules.py` | L:284, L:321, L:762 |
-| `evaluate_llm_spec`, `canonicalize_spec`, `dedup_equivalent` | `rules.py` | L:583, L:666, L:717 |
-| `apply_confidence`, `apply_derived_caps`, `derived_column_warnings` | `rules.py` | L:77, L:92, L:157 |
-| `slope_spread_threshold`, `choose_time_granularity` | `rules.py` | L:211, L:193 |
+| `Recommendation` | `rules.py` | L:90 |
+| `recommend_charts`, `assign_tiers`, `apply_diversity_caps` | `rules.py` | L:347, L:393, L:1077 |
+| `QUESTION_DECAY`, `TYPE_DECAY`, `TYPE_FREE_SLOTS` (stage 19.1 slot value) | `rules.py` | L:46 |
+| `evaluate_llm_spec`, `canonicalize_spec`, `dedup_equivalent` | `rules.py` | L:877, L:981, L:1032 |
+| `apply_confidence`, `apply_derived_caps`, `derived_column_warnings` | `rules.py` | L:117, L:132, L:197 |
+| `slope_spread_threshold`, `choose_time_granularity` | `rules.py` | L:251, L:233 |
 | `Confidence`, `Warning`, `assess`, `TOP_CONFIDENCE_FLOOR`, `MAX_MISSING_RATIO` | `confidence.py` | L:129, L:122, L:377, L:45, L:52 |
 | `with_caution`, `excluded_column_warnings`, `has_suspected_sentinels`, `sentinel_summary` | `confidence.py` | L:682, L:692, L:552, L:563 |
 | `render_chart`, `RenderError`, `CastedFrameCache` | `render.py` | L:50, L:27, L:31 |
@@ -47,7 +48,7 @@ generated_at: 2026-09-15
 | `roles.py` | Roles | `← profiling/models.py \| → spec.py, intent.py, rules.py, render.py` | Deterministic `ColumnRole` from a ColumnProfile (name hints + value range for cycles, label scales / integer codes for ordinals); `category_key` for render-time order. |
 | `intent.py` | Intent | `← roles.py, spec.py \| → rules.py` | Intent literal, guards (`DENSITY_MIN_N`, `HEXBIN_MIN_N`, …), `classify_intent`, `eligible_charts`, `select_chart` (hint promotes only eligible charts). |
 | `confidence.py` | Confidence | `← profiling/models.py \| → rules.py, render.py, llm/service.py, probes/*` | Confidence factors (1/√n curves, missingness, sentinel/extreme robustness), `Warning`, tier caps, reason `Caution:` suffix. |
-| `rules.py` | Recommendation | `← profiling/models.py, roles.py, intent.py \| → llm/*, probes/engine.py, datasets/router.py` | Rule engine: one candidate per finding (`_category_charts`, `_cyclic_numeric_charts`, `_two_state_charts`, `_matrix_charts`, lines, scatter/hexbin, histogram, heatmap) → evidence score → derived/near-dup caps → diversity caps (per family ≤3, per-x ≤2, per-y ≤3) → tiers; `Recommendation.intent/alternatives`; `select_for_spec` + `evaluate_llm_spec` (family scoring) for LLM charts. |
+| `rules.py` | Recommendation | `← profiling/models.py, roles.py, intent.py \| → llm/*, probes/engine.py, datasets/router.py` | Rule engine: one candidate per finding (`_category_charts`, `_cyclic_numeric_charts`, `_two_state_charts`, `_matrix_charts`, lines, scatter/hexbin, histogram, heatmap) → evidence score → derived/near-dup caps → diversity caps (per family ≤3, per-x ≤2, per-y ≤3; stage 19.1: slots filled by slot value = score × `QUESTION_DECAY`^same-question × `TYPE_DECAY`^same-raw-type-beyond-2, list stays score-ordered) → tiers; `Recommendation.intent/alternatives`; `distribution_by_group` reads `evidence.dispersion` (strong) via `_EvidenceIndex.spread_differs`; `select_for_spec` + `evaluate_llm_spec` (family scoring) for LLM charts. |
 | `render.py` | Render | `← profiling/types.py, serialization.py, roles.py \| → datasets/router.py, main.py` | Per-type aggregation into `{spec, chart_data, sampled, n_points, display_range}`; natural category order for ordered roles; density (binned Gaussian KDE), dot interval, two-state, hexbin, matrix heatmap; `HARD_MAX_POINTS`; sentinel-aware histogram range. |
 
 ## File Dependencies

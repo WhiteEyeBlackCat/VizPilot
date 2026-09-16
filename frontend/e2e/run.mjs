@@ -950,15 +950,19 @@ try {
         if (rose.coord !== "polar" || rose.n !== 24) fail(`rose over hr did not render 24 sectors on a polar system: ${JSON.stringify(rose)}`);
       }
       {
+        // stage 19.1: the builder reads the backend's column_roles — a rose /
+        // polar x is offered only for cyclic columns (hr, mnth, season); the
+        // nominal weathersit is never offered, so the backend's "must be
+        // cyclic" 422 (still there for hand-written specs) is never reached
         await gotoPage("Explore");
         await pick("圖表類型", "rose");
-        await pick("X 軸", "weathersit");
-        await pick("Y 軸", "cnt");
-        await page.getByRole("button", { name: "生成圖表" }).click();
-        await page.waitForTimeout(600);
-        const errors = await page.locator("[data-manual-builder] li").allTextContents();
-        step("explore.rose-nominal-rejected", { errors });
-        if (!errors.some((e) => /must be cyclic/.test(e))) fail(`nominal rose was not rejected: ${JSON.stringify(errors)}`);
+        const roseX = await labelledOptions("X 軸");
+        const cyclicHint = (await page.locator("[data-explore-hints] [data-hint=cyclic]").first().textContent())?.trim() ?? "";
+        const orderedHint = (await page.locator("[data-explore-hints] [data-hint=ordered]").first().textContent())?.trim() ?? "";
+        step("explore.rose-x-cyclic-only", { roseX, cyclicHint, orderedHint });
+        if (!roseX.includes("hr") || !roseX.includes("mnth") || roseX.includes("weathersit")) fail(`rose x options are not the cyclic columns: ${JSON.stringify(roseX)}`);
+        if (!/hr \(24\)/.test(cyclicHint) || !/mnth \(12\)/.test(cyclicHint)) fail(`cyclic hint missing: ${cyclicHint}`);
+        if (!/weathersit/.test(orderedHint)) fail(`ordered hint missing weathersit: ${orderedHint}`);
       }
     }
 

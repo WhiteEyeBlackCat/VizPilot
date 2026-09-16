@@ -1,6 +1,6 @@
 # CURRENT_STATE.md — VizPilot (update after each major stage)
 
-Updated: 2026-09-16 · main = stage 19 merge (see git log) · detailed stage notes in `.claude/docs/stages/` (local, git-ignored)
+Updated: 2026-09-16 · main = stage 19 (`513eae6`); stage 19.1 = four commits on branch `worktree-agent-a1829e14be0efb30a` (not yet merged) · detailed stage notes in `.claude/docs/stages/` (local, git-ignored)
 
 ## Completed
 - Stages 1–8: upload → profiler → rule engine → ECharts render → LLM → manual builder; evidence L1 + tier system + insight/chart contract.
@@ -17,22 +17,28 @@ Updated: 2026-09-16 · main = stage 19 merge (see git log) · detailed stage not
 
 - **19 Visualization Intent → Chart Selection → Renderer** — verifier round 2 MERGE (round 1 DO NOT MERGE: violin/ridgeline axis extent, duplicate hr finding; both fixed): `charts/roles.py` (semantic roles: nominal / ordinal / cyclic / datetime / numeric / boolean, deterministic from the profile), `charts/intent.py` (11 intents, guards, `classify_intent` → `select_chart` → preferred + alternatives), `ChartSpec` 16 types + `sort`, 10 new renderers (violin, raincloud, ridgeline, dot_interval, lollipop, dumbbell, slopegraph, hexbin, polar_line, rose) backend + ECharts, matrix heatmap, line over ordered categories, natural category order in the backend, one recommendation per finding (`Recommendation.intent/alternatives`), LLM chart optional (`select_for_spec` re-selects suggested types). Notes: `stage19.md`.
 
+- **19.1 evidence quality + recommendation diversity + regression fixtures** (branch `worktree-agent-a1829e14be0efb30a`, commits `691e738` tasks 1–2, `03f4cb7` task 3, `48021bb` task 4, + docs): (1) `evidence.dispersion` (`PROFILE_VERSION` 12) — Brown–Forsythe adjusted η² of |x − group median| + std / IQR / MAD ratios per cat×num, decoupled from the η² gate; strong = every group ≥ 30 rows, weak ≥ 10; `distribution_by_group` (raincloud / ridgeline / box) now reads a strong entry, so "same mean, different spread" is found; (2) `apply_diversity_caps` fills slots by slot value = score × 0.8^(same (intent, x, group_by) question) × 0.85^(same raw type beyond 2) under the unchanged hard caps — hour_like 5 lines → 4, one per question; (3) LLM #1 prompt gets "Column roles" (cyclic period / order, ordered scales, two-state) and "Spread differences", chart hints name polar_line / rose / raincloud / ridgeline; `GET /profile` adds response-only `column_roles`, the Explore builder offers polar / rose x only for cyclic columns and lists cyclic / ordered columns; (4) ten real-backend fixtures on committed `frontend/e2e/data/` inputs (`make_stage191.py`; `capture-fixtures.mjs --only`), backend `test_fixture_regression` (float-tolerant re-render) + vitest `option.stage191.test.ts`; hexbin hairline gaps fixed (stretched hexagon from both pixel pitches, `renderItem` tessellation test). No Sankey.
+
 ## Architecture state
 Pipeline as in `.claude/ARCHITECTURE.md`. Charts (stage 19): evidence + roles → intent → eligible family → preferred `ChartSpec` (+ alternatives) → `RenderResult` → ECharts adapter; the LLM never sees the chart inventory. LLM side: LLM #1 hypotheses → hallucination gate → coverage against evidence L1/L2 → typed probes (≤5, cached, n ≥ 30) for uncovered claims → LLM #2 wording only when a probe validated or ≥2 validated → wording gate (only backend numbers / change-point dates quotable; else template or neutral sentence) → merge with rules. `use_llm=False` takes the pre-17.3 path (byte-identical on 16 datasets). Frontend (stage 18) renders `insights[].headline/text/why_it_matters/effect/validation` in Key Findings and the analysis panel; the `debug` trace is not shown.
 
+Stage 19.1: rules read L1 `dispersion` (strong) for the distribution family and never L2 group summaries; slot filling is a deterministic greedy over slot value (question / raw-type diminishing returns) inside the family / per-x / per-y caps; `/profile` carries `column_roles` (response-only) for the Explore builder; the LLM sees roles + spread differences as metadata and may hint polar / rose / raincloud / ridgeline (guards still decide).
+
 ## In progress
-- Nothing mid-flight; stage 19 merged.
+- Nothing mid-flight; stage 19.1 complete on its worktree branch, awaiting merge into main.
 
 ## Recent decisions
 - Definitional / near-duplicate / trivial relationships are not findings; 0 insights is legitimate.
 - LLM does hypothesis + wording only; every claim gated by backend statistics; LLM-stated numbers ignored; LLM #1 `reason` and LLM #2 text pass the same wording gate.
-- `?llm=false` output must stay byte-identical across LLM-side changes (16 dataset snapshots incl. `hour.parquet`, `noise.csv`, `planted_probe.csv`). Stage 19 changed the rules on purpose: new snapshot md5 `6cc5e2a27cbfd8842d2163b8e6614933` (stage 18: `d7e09d2b1820a5238fe94101286ad771`).
+- `?llm=false` output must stay byte-identical across LLM-side changes (16 dataset snapshots incl. `hour.parquet`, `noise.csv`, `planted_probe.csv`). Stage 19 changed the rules on purpose: new snapshot md5 `6cc5e2a27cbfd8842d2163b8e6614933` (stage 18: `d7e09d2b1820a5238fe94101286ad771`). Stage 19.1 changed the rules on purpose (tasks 1–2 only; task 3 is LLM/UI-side and leaves rules output unchanged): on the 14 `dataset/` files only `hour_like` (hr×cnt second cycle line + dteday×hum trend out; season×temp cycle, casual×registered scatter, cnt histogram in), `large_dataset` (two exploratory bars swapped) and `sales_basic` (a demoted definitional ridgeline `sales` by `quantity` in, one trend + one lollipop out) differ; the stage-19 md5 script is not in the repo — the 19.1 snapshot over those 14 files (json, sort_keys) is `7fdbcdc8f0f53d14ec4b2c0152cbe1f1` (same script before 19.1: `43931a010b81d33a92cf59909c56f11e`).
+- Stage 19.1: dispersion is layer-1 evidence with its own thresholds (`DISPERSION_*` in `evidence.py`); only a strong entry moves a chart; weak entries are reported to the LLM only. Diversity is diminishing returns per analytical question, never a bare raw-type cap; rose stays an Explore / LLM choice (rules offer it only as an alternative for sum / count cycles).
 - Stage 19: chart types are never core/advanced in product logic; every type has a named guard in `intent.py`; only the `ranking` intent sorts by value; a nominal column is never a rose / polar; composition / flow intents exist as contract only (no generator, no renderer).
 - Multi-agent work uses separate git worktrees; no Claude co-author trailer in commits; independent verifier subagent for statistics/LLM-gate changes.
 
 ## Known blockers / risks (carry-forward from verifier round 4, non-blocking)
 - main is unpushed since 16.3 (17.x + 18 commits). Push needs the user's credentials (VS Code askpass).
-- Stage 19 limitations (verifier): family-based diversity cap can give 5–6 charts of one raw type (hour.parquet: 3 cyclic + 3 trend lines); `distribution_by_group` spread evidence is gated by the L2 group-summary η² threshold (a spread-only difference with equal means stays a bar); `rose` is Explore-only in practice (rules offer it only for sum/count cycles); hexbin rows show hairline gaps (pixel radius vs data row pitch); `composition` / `flow` intents have no generator or renderer yet.
+- Stage 19 limitations after 19.1: diversity and spread evidence addressed (see Completed); hexbin gaps fixed; `rose` remains an Explore / LLM choice by design; `composition` / `flow` intents still have no generator or renderer (no Sankey).
+- Stage 19.1 trade-offs to review: on hour_like the second answer to the hr question (`cnt` across `hr`, raw score 0.85) loses its slot to the `cnt` histogram (0.50) by 0.01 — `TYPE_DECAY` 0.9 instead of 0.85 would keep it and give 5 lines again; dispersion evidence does not skip definitional pairs (sales_basic: `sales` by `quantity` ridgeline, demoted to exploratory by the derived caps like every definitional chart); the last float digit of render aggregation can differ between runs (fixture regression compares with rel 1e-6); `hour.parquet` (UCI) is not in the repo — `hour_like.csv` is the deterministic stand-in.
 - Stage 18 non-blocking (verifier): recommendation cards are `div onClick` (keyboard reaches only the inner buttons; pre-existing); bar categories are still value-ranked by the backend — the frontend re-orders natural sequences for display (stage 19 moves ordering into the spec via intents).
 - Column names containing digits (`pm25`) make the number gate reject the whole sentence → neutral wording and `why_it_matters = null` more often (air_quality).
 - Group labels can pass the number gate by coincidence (`n_groups`, per-group q25); `value*100` percentage rule is wide; natural-language mappings (month names, weekday names) are unchecked.
@@ -42,11 +48,11 @@ Pipeline as in `.claude/ARCHITECTURE.md`. Charts (stage 19): evidence + roles �
 - Running backend on 8100 may be stale; restart after backend changes. Leading zeros lost on CSV load; `pct` mixed scales; no histogram range opt-out.
 - pytest rewrites `backend/tests/data/basic.xlsx`; `git checkout -- backend/tests/data/basic.xlsx` before committing.
 
-## Test status (stage 19, main)
-- backend: 649 pytest passed (new: `test_roles` 6, `test_intent` 22, `test_intent_pipeline` 13, `test_render_stage19` 13); rules-only snapshot md5 `6cc5e2a27cbfd8842d2163b8e6614933`.
-- frontend: tsc 0 errors, vitest 64 (`option.stage19.test.ts` 14), build green; e2e `ok: true` (60 steps incl. cyclic intent → polar alternative, rose guard) against a throw-away LLM backend on 8118; verifier reports `stage19-verify1.md` / `stage19-verify2.md`.
+## Test status (stage 19.1, worktree branch)
+- backend: 690 pytest passed, 0 skipped with the 14 `dataset/` files present (new: `test_dispersion` 12, `test_diversity` 6, `test_stage191_explore` 9, `test_fixture_regression` 14); stage 19 baseline was 649.
+- frontend: tsc 0 errors, vitest 74 (`option.stage191.test.ts` 10), build green; e2e `ok: true` (59 steps) against a throw-away worktree backend on 8123 (`E2E_BASE_URL`, LLM disabled) — the stage-19 "nominal rose → 422" step became `explore.rose-x-cyclic-only` (rose x options = `season, mnth, hr`; hints `season (4)、mnth (12)、hr (24)` / `weathersit`) because the builder now withholds non-cyclic columns.
 
 ## Next planned task
-1. Stage 19 follow-ups: composition / flow renderers (Sankey) once a dataset shape calls for it; Explore UI hints for cyclic / ordered roles (today the backend 422 explains); record real-backend fixtures for the new chart types (`capture-fixtures.mjs`).
+1. Merge the stage 19.1 branch into main (review the two trade-offs above: `TYPE_DECAY`, definitional pairs in dispersion). Then: composition / flow renderers (Sankey) once a dataset shape calls for it; re-record the 18 classic fixtures only if a render change demands it (`capture-fixtures.mjs --only …` keeps the rest).
 2. Optional LLM quality follow-ups: mask column-name tokens before the number scan; trim un-quotable numbers from the LLM #2 prompt; lowercase-preserving `_neutral()`.
 3. Push main to origin (user).
