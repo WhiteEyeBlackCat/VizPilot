@@ -136,3 +136,23 @@ def test_rules_only_output_ignores_the_llm_side_metadata() -> None:
     assert all(c["source"] == "rules" for c in rules["charts"])
     assert not any(c["spec"]["type"] == "rose" for c in rules["charts"])  # rose stays an Explore / LLM choice
     assert math.isfinite(rules["charts"][0]["score"])
+
+
+# --- stage 19.2 (A5): month names reach the Explore builder as a cycle -----------------
+
+
+def test_profile_response_marks_month_names_cyclic_for_the_builder(client: TestClient) -> None:
+    """The Explore builder offers rose / polar x only for `column_roles`
+    entries with cyclic=True (ManualBuilder.tsx); twelve month names exceed
+    the 10 top_values, so the role must come from the full label set."""
+    months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    rows = ["month,day,rides"] + [f"{months[i % 12]},{'Mon Tue Wed Thu Fri Sat Sun'.split()[i % 7]},{(i * 37) % 100}" for i in range(360)]
+    resp = client.post("/api/datasets", files={"file": ("months.csv", "\n".join(rows).encode())})
+    assert resp.status_code == 200, resp.text
+    payload = client.get(f"/api/datasets/{resp.json()['dataset_id']}/profile").json()
+    roles = {r["name"]: r for r in payload["column_roles"]}
+    assert roles["month"]["cyclic"] and roles["month"]["period"] == 12 and roles["month"]["order"] == months
+    assert roles["day"]["cyclic"] and roles["day"]["period"] == 7
+    assert not roles["rides"]["cyclic"]
+    column = next(c for c in payload["columns"] if c["name"] == "month")
+    assert len(column["top_values"]) == 10 and sorted(column["categories"]) == sorted(months)

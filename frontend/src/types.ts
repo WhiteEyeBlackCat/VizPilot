@@ -48,6 +48,8 @@ export interface ColumnProfile {
   skewness: number | null;
   top_values: TopValue[] | null;
   n_categories: number | null;
+  /** stage 19.2: every distinct label (sorted) when the column has <= 13 categories; role detection input */
+  categories?: string[] | null;
   inferred_frequency: string | null;
   avg_length: number | null;
   max_length: number | null;
@@ -418,6 +420,35 @@ export interface NearDuplicateGroup {
   n: number;
 }
 
+export type DispersionStrength = "strong" | "weak";
+
+/** Spread difference of `num` across the groups of `cat` (stage 19.1 / 19.2), mirroring
+ *  backend `DispersionEffect`: Brown–Forsythe eta² / F / p-value over the compared groups,
+ *  robust spread ratios, which groups took part, and the definitional flag. */
+export interface DispersionEffect {
+  cat: string;
+  num: string;
+  n_total: number; // rows in the compared groups
+  n_groups: number; // compared groups
+  n_min: number; // rows in the smallest compared group
+  bf_eta_squared: number;
+  std_ratio: number | null;
+  iqr_ratio: number | null;
+  mad_ratio: number | null;
+  spread_ratio: number;
+  widest_group: string;
+  narrowest_group: string;
+  strength: DispersionStrength;
+  // stage 19.2, additive
+  bf_f?: number | null;
+  bf_p_value?: number | null;
+  compared_groups?: string[];
+  excluded_groups?: Record<string, number>; // label -> rows, too small to take part
+  definitional?: boolean;
+  definitional_kind?: DerivedKind | null;
+  definition?: string | null; // e.g. "price_band = bucket(price)"
+}
+
 /** Only the evidence the UI shows is typed; the statistical layers stay opaque. */
 export interface Evidence {
   cat_num?: unknown[];
@@ -427,5 +458,6 @@ export interface Evidence {
   slope_heterogeneity?: unknown[];
   derived_columns?: DerivedColumn[];
   near_duplicate_groups?: NearDuplicateGroup[];
+  dispersion?: DispersionEffect[]; // stage 19.1, additive
   layer2?: unknown;
 }

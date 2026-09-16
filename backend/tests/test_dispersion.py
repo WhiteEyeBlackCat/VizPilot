@@ -145,7 +145,7 @@ def test_dispersion_is_deterministic_and_round_trips() -> None:
     df = _groups({"a": 0, "b": 0, "c": 0}, {"a": 0.5, "b": 1.5, "c": 3.0}, 100)
     first, second = _profile(df), _profile(df)
     assert first.evidence.dispersion == second.evidence.dispersion
-    assert first.profile_version == PROFILE_VERSION == 13
+    assert first.profile_version == PROFILE_VERSION == 14
     payload = first.model_dump()
     assert payload["evidence"]["dispersion"][0]["strength"] == "strong"
     assert DatasetProfile.model_validate(payload).evidence.dispersion == first.evidence.dispersion
@@ -324,3 +324,44 @@ def test_f5_a_bucket_of_a_sparse_tail_column_and_integer_bins() -> None:
     }
     found = {(d.target, d.components[0]) for d in profile.evidence.derived_columns if d.kind == "bucket"}
     assert found == {("price_band", "price"), ("age_bin", "age")}
+
+
+# --- G. checkpoint B follow-ups: fallback comparison, near-copy chain, empty groups ---
+
+
+def test_g1_a_wild_group_just_below_the_floor_still_makes_weak_evidence() -> None:
+    # a(30, sd 1), b(30, sd 1) agree; c(29, sd 20) carries the evidence: the
+    # supported comparison lists nothing, the wider one is weak over all three
+    df = _sized({"a": 30, "b": 30, "c": 29}, {"a": 1.0, "b": 1.0, "c": 20.0})
+    d = _dispersion(_profile(df))
+    assert d is not None and d.strength == "weak"
+    assert d.compared_groups == ["a", "b", "c"] and d.excluded_groups == {}
+    assert d.n_groups == 3 and d.n_min == 29 and d.widest_group == "c"
+
+
+def test_g2_near_copy_of_a_derived_column_is_definitional_through_the_chain() -> None:
+    rng = random.Random(41)
+    n = 400
+    price = [round(rng.uniform(50, 5000), 2) for _ in range(n)]
+    qty = [rng.randrange(1, 6) for _ in range(n)]
+    total = [p * q for p, q in zip(price, qty)]
+    df = pl.DataFrame({"unit_price": price, "quantity": qty, "total": total, "total_k": [t / 1000 for t in total]})
+    profile = _profile(df)
+    kinds = {(d.target, d.kind) for d in profile.evidence.derived_columns}
+    assert ("total", "product") in kinds and ("total_k", "near_copy") in kinds
+    direct = _dispersion(profile, cat="quantity", num="total")
+    chained = _dispersion(profile, cat="quantity", num="total_k")
+    assert direct is not None and direct.definitional and direct.definitional_kind == "product"
+    assert chained is not None and chained.definitional and chained.definitional_kind == "near_copy"
+    assert chained.definition == "total_k = near copy of total; total = unit_price × quantity"
+    for rec in recommend_charts(profile):
+        if rec.spec.x == "quantity" and rec.spec.y in ("total", "total_k"):
+            assert rec.intent != "distribution_by_group"
+
+
+def test_g3_a_group_without_any_value_is_traced_as_excluded_with_zero_rows() -> None:
+    df = _sized({"a": 200, "b": 200}, {"a": 1.0, "b": 4.0})
+    hole = pl.DataFrame({"g": ["c"] * 40, "y": [None] * 40}, schema={"g": pl.String, "y": pl.Float64})
+    d = _dispersion(_profile(pl.concat([df, hole])))
+    assert d is not None and d.strength == "strong"
+    assert d.compared_groups == ["a", "b"] and d.excluded_groups == {"c": 0}

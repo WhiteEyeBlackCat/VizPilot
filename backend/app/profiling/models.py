@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 # Bump whenever the profile schema or inference rules change: cached
 # {id}.profile.json files with a different version are recomputed.
-PROFILE_VERSION = 13  # v13: dispersion compared groups / F-test p-value / definitional flag, bucket derived kind (stage 19.2); v12: dispersion evidence (stage 19.1); v11: layer-2 shapes/strength (stage 17.1b); v10: evidence layer 2 (stage 17.1)
+PROFILE_VERSION = 14  # v14: ColumnProfile.categories (full label set of small categoricals for role detection, stage 19.2); v13: dispersion compared groups / F-test p-value / definitional flag, bucket derived kind (stage 19.2); v12: dispersion evidence (stage 19.1); v11: layer-2 shapes/strength (stage 17.1b); v10: evidence layer 2 (stage 17.1)
 
 SemanticType = Literal["numeric", "categorical", "datetime", "boolean", "text", "id", "unknown"]
 Frequency = Literal["daily", "weekly", "monthly", "irregular", "unknown"]
@@ -21,6 +21,9 @@ class CastParams(BaseModel):
     currency: bool = False
     # '%' is stripped but the value is kept as-is (45% -> 45.0), per stage2 brief
     percent: bool = False
+
+
+CATEGORY_LABELS_MAX = 13  # stage 19.2: full label set kept for role detection up to this many categories
 
 
 class TopValue(BaseModel):
@@ -101,6 +104,12 @@ class ColumnProfile(BaseModel):
     # categorical / boolean
     top_values: list[TopValue] | None = None
     n_categories: int | None = None
+    # stage 19.2: every distinct label (as str, sorted by value) when the
+    # column has at most CATEGORY_LABELS_MAX categories — the input of
+    # semantic-role detection (charts/roles.py: month / weekday names, label
+    # scales), which top_values (10 most frequent) cannot serve for 11-13
+    # categories such as the twelve month names. None otherwise.
+    categories: list[str] | None = None
     # datetime
     inferred_frequency: Frequency | None = None
     # text
@@ -234,13 +243,17 @@ class DispersionEffect(BaseModel):
     for the well-supported groups. When at least two groups hold
     DISPERSION_STRONG_MIN_N rows the comparison is over exactly those groups
     and may be `strong` (bf_p_value <= DISPERSION_ALPHA, effect gates met);
-    otherwise it falls back to every group with DISPERSION_WEAK_MIN_N rows
-    and is `weak`. n_groups / n_total / n_min describe the compared groups
-    only. A small group never contributes to strong evidence.
+    when that lists nothing (or fewer than two groups are supported) the
+    comparison falls back to every group with DISPERSION_WEAK_MIN_N rows and
+    is at most `weak`. n_groups / n_total / n_min describe the compared
+    groups only. A small group never contributes to strong evidence. A
+    group of `cat` without any value of `num` is excluded with 0 rows.
 
     definitional (stage 19.2): the pair merely restates a definition —
     `num` is derived from `cat` (or vice versa: an identity or near copy in
-    derived_columns) or `cat` is a banding of `num` (kind bucket). The
+    derived_columns, also through a chain — `num` a near copy of a column
+    derived from `cat`, kind near_copy with the chain in `definition`) or
+    `cat` is a banding of `num` (kind bucket). The
     evidence is kept and flagged; the rules never promote a flagged entry to
     a headline distribution chart and the LLM is told it is not a
     discovery."""
@@ -262,7 +275,7 @@ class DispersionEffect(BaseModel):
     bf_f: float | None = None
     bf_p_value: float | None = None
     compared_groups: list[str] = []  # labels that took part, sorted
-    excluded_groups: dict[str, int] = {}  # label -> rows, too small to take part
+    excluded_groups: dict[str, int] = {}  # label -> valid rows of num (0: no value at all), not compared
     definitional: bool = False
     definitional_kind: DerivedKind | None = None
     definition: str | None = None  # e.g. "sales = unit_price × quantity", "price_band = bucket(price)"

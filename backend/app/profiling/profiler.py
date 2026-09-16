@@ -13,6 +13,7 @@ from ..serialization import df_to_records
 from .evidence import compute_evidence
 from .layer2 import compute_layer2
 from .models import (
+    CATEGORY_LABELS_MAX,
     PROFILE_VERSION,
     CastParams,
     ColumnProfile,
@@ -100,6 +101,10 @@ def _column_profile(
         counts = non_null.value_counts(sort=True).head(10)
         profile.top_values = [TopValue(value=v, count=c) for v, c in counts.rows()]
         profile.n_categories = non_null.n_unique()
+        if profile.n_categories <= CATEGORY_LABELS_MAX:
+            # stage 19.2: the complete label set for role detection (months,
+            # weekdays, scales); top_values stays the 10 most frequent
+            profile.categories = [str(v) for v in non_null.unique().sort().to_list()]
     elif semantic_type == "datetime":
         profile.min = non_null.min().isoformat() if len(non_null) else None
         profile.max = non_null.max().isoformat() if len(non_null) else None

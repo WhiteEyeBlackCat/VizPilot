@@ -98,6 +98,10 @@ DISPERSION_WEAK_MIN_N = 10
 # tests/test_dispersion_calibration.py), while sd 1 vs 2 at 100 rows per
 # group is still found in > 90 % of replicates.
 DISPERSION_ALPHA = 0.05
+# A weak entry (LLM-only, labelled weak) needs the same test at a looser
+# alpha so an equal-spread pair of 10-29-row groups is not listed 10-15 % of
+# the time on the effect gates alone (checkpoint B, concern 1).
+DISPERSION_WEAK_ALPHA = 0.10
 # Stage 19.2 bucket detection (`band = bucket(num)`, see _is_bucket): the
 # per-group ranges must be disjoint in one consistent order, every group
 # must hold >= DISPERSION_WEAK_MIN_N rows, every boundary gap must be small
@@ -411,6 +415,62 @@ def _finite_col(name: str, df: pl.DataFrame) -> pl.Expr:
     return col.alias(name)
 
 
+def _dispersion_entry(
+    cat: str,
+    num: str,
+    stats: list[_GroupStat],
+    compared: list[_GroupStat],
+    may_be_strong: bool,
+    empty: dict[str, int],
+    definition: DerivedColumn | None,
+) -> DispersionEffect | None:
+    """One comparison over `compared` (a subset of `stats`): None when a gate
+    fails, else the entry with every other group of `stats` (and the groups
+    without any value, `empty`) listed as excluded."""
+    bf = _brown_forsythe(compared)
+    if bf is None or bf.eta_squared < DISPERSION_MIN_ETA:
+        return None
+    strong = may_be_strong and bf.p_value <= DISPERSION_ALPHA
+    if not strong and bf.p_value > DISPERSION_WEAK_ALPHA:
+        return None
+    ratios: dict[str, tuple[float, str, str] | None] = {}
+    for attr in ("std", "iqr", "mad"):
+        values = [(getattr(g, attr), g.label) for g in compared]
+        if any(v is None or not math.isfinite(v) or v <= 0 for v, _ in values):
+            ratios[attr] = None  # a constant group: no ratio
+            continue
+        widest, narrowest = max(values), min(values)  # ties broken by the group label
+        ratios[attr] = (widest[0] / narrowest[0], widest[1], narrowest[1])
+    robust = ratios["iqr"] or ratios["mad"] or ratios["std"]
+    if robust is None or robust[0] < DISPERSION_MIN_RATIO:
+        return None
+    compared_labels = {g.label for g in compared}
+    excluded = {g.label: g.n for g in stats if g.label not in compared_labels}
+    excluded.update(empty)
+    return DispersionEffect(
+        cat=cat,
+        num=num,
+        n_total=sum(g.n for g in compared),
+        n_groups=len(compared),
+        n_min=min(g.n for g in compared),
+        bf_eta_squared=round(bf.eta_squared, 6),
+        bf_f=round(bf.f, 6) if math.isfinite(bf.f) else None,
+        bf_p_value=round(bf.p_value, 6),
+        std_ratio=round(ratios["std"][0], 6) if ratios["std"] else None,
+        iqr_ratio=round(ratios["iqr"][0], 6) if ratios["iqr"] else None,
+        mad_ratio=round(ratios["mad"][0], 6) if ratios["mad"] else None,
+        spread_ratio=round(robust[0], 6),
+        widest_group=robust[1],
+        narrowest_group=robust[2],
+        strength="strong" if strong else "weak",
+        compared_groups=[g.label for g in compared],
+        excluded_groups=dict(sorted(excluded.items())),
+        definitional=definition is not None,
+        definitional_kind=None if definition is None else definition.kind,
+        definition=None if definition is None else f"{definition.target} = {definition.formula}",
+    )
+
+
 def _dispersion_effects(
     df: pl.DataFrame, cats: list[ColumnProfile], nums: list[ColumnProfile], derived: list[DerivedColumn]
 ) -> tuple[list[DispersionEffect], list[DerivedColumn]]:
@@ -422,7 +482,8 @@ def _dispersion_effects(
     group_by per cat with all nums batched, the per-group aggregates are
     combined in Python (<= 20 groups). Only pairs that clear the gates are
     listed (see the constants above); the comparison runs over the
-    supported groups only (DispersionEffect docstring).
+    supported groups first and falls back to every group >= WEAK_MIN_N at
+    most weak (DispersionEffect docstring).
 
     Also returns the `cat = bucket(num)` bandings found on the way (every
     pair, listed or not) as DerivedColumn(kind="bucket"); listed entries
@@ -431,9 +492,41 @@ def _dispersion_effects(
         return [], []
     names = [n.name for n in nums]
     identities: dict[frozenset[str], DerivedColumn] = {}
+    copies: dict[str, set[str]] = {}  # near-copy adjacency (duplicate <-> representative)
     for d in derived:
         for component in d.components:
             identities.setdefault(frozenset((d.target, component)), d)
+        if d.kind == "near_copy":
+            copies.setdefault(d.target, set()).add(d.components[0])
+            copies.setdefault(d.components[0], set()).add(d.target)
+
+    def definition_of(cat: str, num: str) -> DerivedColumn | None:
+        """The identity a (cat, num) pair restates: directly, or through a
+        near copy — when num is (transitively) a near copy of a column that
+        is definitionally related to cat, the pair is definitional too
+        (checkpoint B follow-up 2: quantity -> total_k with total_k ≈ total
+        = unit_price × quantity)."""
+        direct = identities.get(frozenset((cat, num)))
+        if direct is not None:
+            return direct
+        seen, queue = {num}, sorted(copies.get(num, ()))
+        while queue:
+            twin = queue.pop(0)
+            if twin in seen:
+                continue
+            seen.add(twin)
+            base = identities.get(frozenset((cat, twin)))
+            if base is not None and base.kind != "near_copy":
+                return DerivedColumn(
+                    target=num,
+                    components=[twin],
+                    formula=f"near copy of {twin}; {base.target} = {base.formula}",
+                    kind="near_copy",
+                    match_ratio=base.match_ratio,
+                    n=base.n,
+                )
+            queue.extend(sorted(copies.get(twin, ()) - seen))
+        return None
     # smallest positive step of each num (its resolution: 1 for counts, 0.01
     # for prices) — the floor for the bucket gap tolerance
     steps = df.select(*(_finite_col(n, df) for n in names))
@@ -481,7 +574,9 @@ def _dispersion_effects(
                 for r in rows
                 if r[f"n:{n}"]
             ]
-            definition = identities.get(frozenset((key, n)))
+            # groups of cat with no value of num at all: excluded, traced with 0 rows
+            empty = {str(r[key]): 0 for r in rows if not r[f"n:{n}"]}
+            definition = definition_of(key, n)
             if definition is None and _is_bucket(stats, resolution[n]):
                 definition = DerivedColumn(
                     target=key,
@@ -492,52 +587,23 @@ def _dispersion_effects(
                     n=sum(s.n for s in stats),
                 )
                 buckets.append(definition)
-            supported = [s for s in stats if s.n >= DISPERSION_STRONG_MIN_N]
+            # the supported comparison first (>= 2 groups of >= STRONG_MIN_N
+            # rows, may be strong); when it lists nothing, the wider
+            # comparison over every group >= WEAK_MIN_N (at most weak) —
+            # follow-up 1: a supported subset must not hide evidence that
+            # the smaller groups carry
+            supported = [g for g in stats if g.n >= DISPERSION_STRONG_MIN_N]
+            wider = [g for g in stats if g.n >= DISPERSION_WEAK_MIN_N]
+            attempts: list[tuple[list[_GroupStat], bool]] = []
             if len(supported) >= 2:
-                compared, may_be_strong = supported, True
-            else:
-                compared, may_be_strong = [s for s in stats if s.n >= DISPERSION_WEAK_MIN_N], False
-            if len(compared) < 2:
-                continue
-            bf = _brown_forsythe(compared)
-            if bf is None or bf.eta_squared < DISPERSION_MIN_ETA:
-                continue
-            ratios: dict[str, tuple[float, str, str] | None] = {}
-            for attr in ("std", "iqr", "mad"):
-                values = [(getattr(s, attr), s.label) for s in compared]
-                if any(v is None or not math.isfinite(v) or v <= 0 for v, _ in values):
-                    ratios[attr] = None  # a constant group: no ratio
-                    continue
-                widest, narrowest = max(values), min(values)  # ties broken by the group label
-                ratios[attr] = (widest[0] / narrowest[0], widest[1], narrowest[1])
-            robust = ratios["iqr"] or ratios["mad"] or ratios["std"]
-            if robust is None or robust[0] < DISPERSION_MIN_RATIO:
-                continue
-            compared_labels = {s.label for s in compared}
-            effects.append(
-                DispersionEffect(
-                    cat=key,
-                    num=n,
-                    n_total=sum(s.n for s in compared),
-                    n_groups=len(compared),
-                    n_min=min(s.n for s in compared),
-                    bf_eta_squared=round(bf.eta_squared, 6),
-                    bf_f=round(bf.f, 6) if math.isfinite(bf.f) else None,
-                    bf_p_value=round(bf.p_value, 6),
-                    std_ratio=round(ratios["std"][0], 6) if ratios["std"] else None,
-                    iqr_ratio=round(ratios["iqr"][0], 6) if ratios["iqr"] else None,
-                    mad_ratio=round(ratios["mad"][0], 6) if ratios["mad"] else None,
-                    spread_ratio=round(robust[0], 6),
-                    widest_group=robust[1],
-                    narrowest_group=robust[2],
-                    strength="strong" if may_be_strong and bf.p_value <= DISPERSION_ALPHA else "weak",
-                    compared_groups=[s.label for s in compared],
-                    excluded_groups={s.label: s.n for s in stats if s.label not in compared_labels},
-                    definitional=definition is not None,
-                    definitional_kind=None if definition is None else definition.kind,
-                    definition=None if definition is None else f"{definition.target} = {definition.formula}",
-                )
-            )
+                attempts.append((supported, True))
+            if len(wider) >= 2 and len(wider) > len(supported):
+                attempts.append((wider, False))
+            for compared, may_be_strong in attempts:
+                entry = _dispersion_entry(key, n, stats, compared, may_be_strong, empty, definition)
+                if entry is not None:
+                    effects.append(entry)
+                    break
     return effects, buckets
 
 

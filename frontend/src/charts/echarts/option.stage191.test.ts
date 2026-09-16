@@ -34,8 +34,14 @@ const series = (r: RenderResult) => {
 };
 const axis = (a: unknown) => (Array.isArray(a) ? a[0] : a) as { type?: string; data?: unknown[] };
 
-function renderSvg(r: RenderResult): string {
-  const chart = echarts.init(null, undefined, { renderer: "svg", ssr: true, width: 640, height: 360 });
+/** A recorded statistic the fixture must carry (box quartiles are null only for empty groups). */
+function present(value: number | null, what: string): number {
+  if (value === null) throw new Error(`fixture is missing ${what}`);
+  return value;
+}
+
+function renderSvg(r: RenderResult, width = 640, height = 360): string {
+  const chart = echarts.init(null, undefined, { renderer: "svg", ssr: true, width, height });
   chart.setOption(buildOption(r));
   const svg = chart.renderToSVGString();
   chart.dispose();
@@ -56,8 +62,8 @@ describe("same mean, different dispersion", () => {
   });
   it("the medians agree while the boxes widen: the finding is the spread, not the level", () => {
     const box = (boxSameMean as RenderResult).chart_data as BoxChartData;
-    const medians = box.groups.map((g) => g.median);
-    const iqr = box.groups.map((g) => g.q3 - g.q1);
+    const medians = box.groups.map((g) => present(g.median, `median of ${g.name}`));
+    const iqr = box.groups.map((g) => present(g.q3, `q3 of ${g.name}`) - present(g.q1, `q1 of ${g.name}`));
     expect(Math.max(...medians) - Math.min(...medians)).toBeLessThan(3);
     expect(iqr[2] / iqr[0]).toBeGreaterThan(3);
     expect(axis(buildOption(boxSameMean as RenderResult).xAxis).data).toEqual(["a", "b", "c"]);
@@ -160,5 +166,87 @@ describe("hexbin", () => {
     expect(a[0]).toEqual(c[4]); // a's top is c's lower-left
     expect(a[1]).toEqual(c[3]); // a's upper-right is c's bottom
     expect(b[0]).toEqual(c[2]); // b's top is c's lower-right
+  });
+
+  // Stage 19.2 (A9) regression: the recorded dense hexbin at three plot
+  // aspects — wide, tall, very wide. The backend cells are untouched (the
+  // fixture is re-rendered against the backend in test_fixture_regression);
+  // here every cell polygon is computed at the pixel scale of each size and
+  // the lattice must be seamless (each neighbour pair shares exactly two
+  // vertices) and overlap-free (no vertex of one cell inside another).
+  describe.each([
+    [800, 400],
+    [400, 800],
+    [1200, 300],
+  ])("stretched hexagons tessellate at %i × %i", (width, height) => {
+    const r = hexbinDense as RenderResult;
+    const d = r.chart_data as HexbinChartData;
+    const s = series(r)[0] as CustomSeriesOption;
+    const sx = width / (d.x_range[1] - d.x_range[0]);
+    const sy = height / (d.y_range[1] - d.y_range[0]);
+    const api = (datum: number[]) => ({
+      value: (i: number) => datum[i],
+      coord: ([x, y]: number[]) => [(x - d.x_range[0]) * sx, height - (y - d.y_range[0]) * sy],
+      visual: () => "#000",
+    });
+    const render = s.renderItem as (p: unknown, a: unknown) => { shape: { points: number[][] } };
+    const polygons = (s.data as number[][]).map((datum) =>
+      render({}, api(datum)).shape.points.map(([x, y]) => [Math.round(x * 1e6) / 1e6, Math.round(y * 1e6) / 1e6]),
+    );
+    const same = (a: number[], b: number[]) => Math.abs(a[0] - b[0]) < 1e-6 && Math.abs(a[1] - b[1]) < 1e-6;
+    const shared = (a: number[][], b: number[][]) => a.filter((v) => b.some((w) => same(v, w))).length;
+    const inside = (pt: number[], poly: number[][]) => {
+      // strict point-in-polygon (ray casting); points on an edge do not count
+      let hit = false;
+      for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const [xi, yi] = poly[i];
+        const [xj, yj] = poly[j];
+        const onEdge =
+          Math.abs((xj - xi) * (pt[1] - yi) - (yj - yi) * (pt[0] - xi)) < 1e-6 &&
+          pt[0] >= Math.min(xi, xj) - 1e-6 &&
+          pt[0] <= Math.max(xi, xj) + 1e-6 &&
+          pt[1] >= Math.min(yi, yj) - 1e-6 &&
+          pt[1] <= Math.max(yi, yj) + 1e-6;
+        if (onEdge) return false;
+        if (yi > pt[1] !== yj > pt[1] && pt[0] < ((xj - xi) * (pt[1] - yi)) / (yj - yi) + xi) hit = !hit;
+      }
+      return hit;
+    };
+    it("every cell is a hexagon stretched to the pixel pitches, not a regular one", () => {
+      expect(polygons).toHaveLength(d.cells.length);
+      for (const poly of polygons) expect(poly).toHaveLength(6);
+      const xs = polygons[0].map((p) => p[0]);
+      const ys = polygons[0].map((p) => p[1]);
+      // pointy-top hexagon of the pixel pitches: width = dx·sx (column pitch),
+      // height = dy·sy (vertex to vertex; rows are spaced 3/4 of it) — the
+      // two extents follow the two axes independently, hence "stretched"
+      expect(Math.max(...xs) - Math.min(...xs)).toBeCloseTo(d.dx * sx, 3);
+      expect(Math.max(...ys) - Math.min(...ys)).toBeCloseTo(d.dy * sy, 3);
+      expect((Math.max(...xs) - Math.min(...xs)) / (Math.max(...ys) - Math.min(...ys))).not.toBeCloseTo(Math.sqrt(3) / 2, 2);
+    });
+    it("neighbours share exactly two vertices and no cell overlaps another", () => {
+      const centre = (poly: number[][]) => [poly.reduce((a, p) => a + p[0], 0) / 6, poly.reduce((a, p) => a + p[1], 0) / 6];
+      const centres = polygons.map(centre);
+      const reach = 2 * Math.max(d.dx * sx, d.dy * sy); // farther apart than this, two cells cannot touch
+      let neighbours = 0;
+      const gaps: number[][] = []; // pairs touching at a single vertex (a hairline gap)
+      const overlaps: number[][] = []; // pairs sharing 3+ vertices or a vertex inside the other
+      for (let i = 0; i < polygons.length; i++) {
+        for (let j = i + 1; j < polygons.length; j++) {
+          if (Math.abs(centres[i][0] - centres[j][0]) > reach || Math.abs(centres[i][1] - centres[j][1]) > reach) continue;
+          const n = shared(polygons[i], polygons[j]);
+          if (n === 2) neighbours++;
+          else if (n === 1) gaps.push([i, j]);
+          else if (n > 2) overlaps.push([i, j]);
+          if (polygons[i].some((v) => inside(v, polygons[j])) || polygons[j].some((v) => inside(v, polygons[i]))) overlaps.push([i, j]);
+        }
+      }
+      expect(gaps).toEqual([]);
+      expect(overlaps).toEqual([]);
+      expect(neighbours).toBeGreaterThan(polygons.length); // a dense lattice, not isolated cells
+    });
+    it("renders one polygon per cell at this size", () => {
+      expect((renderSvg(r, width, height).match(/<polygon/g) ?? []).length).toBeGreaterThanOrEqual(d.cells.length);
+    });
   });
 });

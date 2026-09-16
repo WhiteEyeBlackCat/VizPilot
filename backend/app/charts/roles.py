@@ -37,8 +37,10 @@ _MONTH_NAMES = [
     "july", "august", "september", "october", "november", "december",
 ]
 _MONTH_ABBR = [m[:3] for m in _MONTH_NAMES]
+_MONTH_ALT = {"sept": "sep"}  # other common spellings, lower-cased and dot-free
 _WEEKDAY_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 _WEEKDAY_ABBR = [d[:3] for d in _WEEKDAY_NAMES]
+_WEEKDAY_ALT = {"tues": "tue", "weds": "wed", "thur": "thu", "thurs": "thu"}
 _SEASON_NAMES = ["winter", "spring", "summer", "autumn"]
 _SEASON_ALT = {"fall": "autumn"}
 
@@ -89,12 +91,23 @@ class ColumnRole(BaseModel):
 
 
 def _category_labels(col: ColumnProfile) -> list[str] | None:
-    """Every category as a string, when the profile carries them all."""
+    """Every category as a string, when the profile carries them all: the
+    stage 19.2 `categories` field (complete up to CATEGORY_LABELS_MAX, so
+    twelve month names qualify), else top_values when nothing is cut off
+    (profiles from before PROFILE_VERSION 14, hand-built profiles)."""
+    categories = getattr(col, "categories", None)
+    if categories is not None and col.n_categories is not None and len(categories) >= col.n_categories:
+        return list(categories)
     if col.top_values is None or col.n_categories is None:
         return None
     if len(col.top_values) < col.n_categories:
         return None
     return [str(tv.value) for tv in col.top_values]
+
+
+def _label_key(value: str) -> str:
+    """Case-insensitive, trailing-dot-free label ("Sept." -> "sept")."""
+    return value.strip().lower().rstrip(".").strip()
 
 
 def _int_bounds(col: ColumnProfile) -> tuple[int, int] | None:
@@ -142,12 +155,21 @@ def _cyclic_by_labels(col: ColumnProfile) -> tuple[int, list[str]] | None:
     labels = _category_labels(col)
     if not labels or len(labels) < 2:
         return None
-    lowered = [v.strip().lower() for v in labels]
-    for names, abbr, period in ((_MONTH_NAMES, _MONTH_ABBR, 12), (_WEEKDAY_NAMES, _WEEKDAY_ABBR, 7)):
-        if all(v in names or v in abbr for v in lowered):
+    lowered = [_label_key(v) for v in labels]
+    for names, abbr, alt, period in (
+        (_MONTH_NAMES, _MONTH_ABBR, _MONTH_ALT, 12),
+        (_WEEKDAY_NAMES, _WEEKDAY_ABBR, _WEEKDAY_ALT, 7),
+    ):
+        keys = [alt.get(v, v) for v in lowered]
+        # every label a month / weekday, and no two labels the same one
+        # (Jan + January would be two spellings, not a cycle of twelve)
+        if all(v in names or v in abbr for v in keys):
             rank = {v: i for i, v in enumerate(names)}
             rank.update({v: i for i, v in enumerate(abbr)})
-            return period, [label for _, label in sorted(zip((rank[v] for v in lowered), labels))]
+            ranks = [rank[v] for v in keys]
+            if len(set(ranks)) != len(ranks):
+                return None
+            return period, [label for _, label in sorted(zip(ranks, labels))]
     normalised = [_SEASON_ALT.get(v, v) for v in lowered]
     if all(v in _SEASON_NAMES for v in normalised):
         rank = {v: i for i, v in enumerate(_SEASON_NAMES)}
