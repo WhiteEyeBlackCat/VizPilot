@@ -145,80 +145,64 @@ function baseOption(result: RenderResult, zoomable: boolean, legendShown: boolea
 //
 // A grouped line over time (`temp over dteday by season`) has, per group,
 // only the buckets that group occupies: the backend (`render.py`
-// `_render_line`) emits no point for a month in which a season does not
-// occur, so ECharts joined the last 2011 summer point straight to the first
-// 2012 one across nine empty months. The fix is presentation-only and keeps
-// every backend (x, y) pair: where the step between two consecutive points
-// of a group exceeds GAP_BREAK_FACTOR × the group's normal sampling
-// interval, an invisible null point is inserted in the middle of the gap and
-// `connectNulls: false` draws the break.
+// `_render_line`) emits a point for every (x, group) bucket that occurs and
+// none for a month in which a season does not occur, so ECharts joined the
+// last 2011 summer point straight to the first 2012 one across nine months
+// that other seasons occupy. The fix is presentation-only and keeps every
+// backend (x, y) pair in order.
 //
-// The normal interval reuses what the pipeline already knows. When the
-// backend bucketed the axis (spec.time_granularity day / week / month, the
-// usual case: it downgrades any series above 500 points), consecutive
-// buckets are one unit apart by construction, so the interval is the bucket
-// unit — or the group's median step when it samples more sparsely than the
-// bucket (quarterly rows in month buckets). For unbucketed timestamps it is
-// the median of the group's consecutive steps, the estimator the profiler's
-// `_infer_frequency` uses, and it is only trusted when the steps are mostly
-// regular (at least GAP_REGULAR_SHARE of them within GAP_REGULAR_BAND × the
-// median) so an event-like irregular series is never fragmented.
-//
-// GAP_BREAK_FACTOR = 3 (strict): one or two missing buckets (a step of 2–3
-// units) and a weekend in business-day data (3 days) stay connected; a
-// season absent for a quarter or more of the year, or three or more missing
-// buckets, break. A larger factor would keep, e.g., a group present eight
-// months a year joined across its four-month absence at month granularity;
-// a smaller one would break business-day series at every long weekend.
-// Only grouped series are touched: an ungrouped line keeps its behaviour.
+// Rule (chart semantics, no calendar): the chart's temporal buckets are the
+// x values that actually exist in any series (union across groups, deduped
+// on their parsed timestamp). A group's line breaks between two consecutive
+// observations iff at least one such bucket lies between them — i.e. the
+// group is absent from a bucket where the chart has data. Where that holds
+// an invisible null point is inserted at the midpoint and
+// `connectNulls: false` draws the break. Nothing is generated: a weekend in
+// business-day data, a holiday, or an overnight stretch in hourly data is no
+// bucket of the chart when no group has a point there, so the line stays
+// connected across it; a season absent from months that other seasons
+// occupy breaks. Only grouped temporal lines are touched.
 
-export const GAP_BREAK_FACTOR = 3;
-export const GAP_REGULAR_SHARE = 2 / 3;
-export const GAP_REGULAR_BAND: readonly [number, number] = [0.5, 2];
-const DAY_MS = 86_400_000;
-// the widest span a bucket unit can have (a month is at most 31 days)
-const BUCKET_UNIT_MS: Partial<Record<TimeGranularity, number>> = {
-  day: DAY_MS,
-  week: 7 * DAY_MS,
-  month: 31 * DAY_MS,
+// Parsed timestamp (ms) of an x value, the bucket's canonical key. Date-only
+// strings are read as local midnight, the way ECharts' time axis reads them
+// (`Date.parse` alone would take "2011-01-01" as UTC but
+// "2011-01-01T00:00:00" as local, splitting one bucket in two).
+const temporalKey = (v: number | string | null): number => {
+  if (typeof v !== "string") return NaN;
+  if (/^\d{4}-\d{2}$/.test(v)) return Date.parse(`${v}-01T00:00:00`);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return Date.parse(`${v}T00:00:00`);
+  return Date.parse(v.replace(/^(\d{4}-\d{2}-\d{2}) /, "$1T"));
 };
 
-const median = (sorted: number[]): number =>
-  sorted.length % 2 ? sorted[(sorted.length - 1) / 2] : (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2;
-
-/** The step (ms) above which a group's line breaks, or null when nothing
- *  can be inferred (too few points, or irregular unbucketed sampling). */
-export function gapBreakThreshold(steps: number[], granularity: TimeGranularity | null | undefined): number | null {
-  const unit = granularity ? BUCKET_UNIT_MS[granularity] : undefined;
-  const med = steps.length >= 2 ? median([...steps].sort((a, b) => a - b)) : null;
-  let normal: number | null;
-  if (unit !== undefined) {
-    normal = Math.max(unit, med ?? 0);
-  } else if (med === null || med <= 0) {
-    normal = null;
-  } else {
-    const regular = steps.filter((g) => g >= GAP_REGULAR_BAND[0] * med && g <= GAP_REGULAR_BAND[1] * med).length;
-    normal = regular >= GAP_REGULAR_SHARE * steps.length ? med : null;
+/** The chart's temporal buckets: parsed x (ms) → global index in sorted
+ *  order, over every series. Unparsable / null x values take no part. */
+export function temporalBuckets(data: LineChartData): Map<number, number> {
+  const keys = new Set<number>();
+  for (const s of data.series) for (const v of s.x) {
+    const k = temporalKey(v);
+    if (!Number.isNaN(k)) keys.add(k);
   }
-  return normal === null || normal <= 0 ? null : GAP_BREAK_FACTOR * normal;
+  return new Map(Array.from(keys).sort((a, b) => a - b).map((k, i) => [k, i]));
 }
 
-/** `pairs()` for one temporal group with a null point inserted inside every
- *  step longer than the group's break threshold; unchanged otherwise. */
-export function breakTemporalGaps(
+/** `pairs()` for one group with a null point inserted between two
+ *  consecutive observations whenever another existing bucket of the chart
+ *  lies between them (the group is absent there); unchanged otherwise. */
+export function breakAbsentBuckets(
   x: (number | string | null)[],
   y: (number | null)[],
-  granularity: TimeGranularity | null | undefined,
+  buckets: Map<number, number>,
 ): Pair[] {
   const base = pairs(x, y);
-  const t = x.map((v) => (typeof v === "string" ? Date.parse(v) : NaN));
-  const steps: number[] = [];
-  for (let i = 1; i < t.length; i++) if (!Number.isNaN(t[i - 1]) && !Number.isNaN(t[i])) steps.push(t[i] - t[i - 1]);
-  const threshold = gapBreakThreshold(steps, granularity);
-  if (threshold === null) return base;
   const out: Pair[] = [];
   for (let i = 0; i < base.length; i++) {
-    if (i > 0 && t[i] - t[i - 1] > threshold) out.push([(t[i - 1] + t[i]) / 2, null]);
+    if (i > 0) {
+      const prev = temporalKey(x[i - 1]);
+      const cur = temporalKey(x[i]);
+      const gp = buckets.get(prev);
+      const gc = buckets.get(cur);
+      if (gp !== undefined && gc !== undefined && Math.abs(gc - gp) > 1) out.push([(prev + cur) / 2, null]);
+    }
     out.push(base[i]);
   }
   return out;
@@ -232,14 +216,14 @@ function lineOption(result: RenderResult): VizOption {
   const categorical = isCategoricalX(d);
   const categories = categorical ? Array.from(new Set(d.series.flatMap((s) => s.x.map(String)))) : [];
   const many = d.series.some((s) => s.x.length > LINE_SYMBOL_MAX_POINTS);
-  // grouped temporal series break where a group has no observations for a
-  // stretch of time (see "grouped temporal gaps" above); ungrouped lines and
+  // grouped temporal series break where a group is absent from a bucket other
+  // groups occupy (see "grouped temporal gaps" above); ungrouped lines and
   // numeric / category axes are passed through as they are
-  const grouped = temporal && result.spec.group_by != null;
+  const buckets = temporal && result.spec.group_by != null ? temporalBuckets(d) : null;
   const series: LineSeriesOption[] = d.series.map((s) => ({
     type: "line",
     name: s.name,
-    data: grouped ? breakTemporalGaps(s.x, s.y, result.spec.time_granularity) : pairs(s.x, s.y),
+    data: buckets ? breakAbsentBuckets(s.x, s.y, buckets) : pairs(s.x, s.y),
     showSymbol: !many,
     symbolSize: 5,
     lineStyle: { width: 1.5 },

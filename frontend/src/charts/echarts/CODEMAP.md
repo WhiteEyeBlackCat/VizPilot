@@ -11,7 +11,7 @@ generated_at: 2026-09-15
 |---|---|---|---|
 | Understand how a RenderResult becomes an ECharts option (per type) | Option | `option.ts` (`buildOption` dispatches to per-type builders; stage-19 builders `densityOption`, `dotIntervalOption`, `lollipopOption`, `dumbbellOption`, `slopegraphOption`, `hexbinOption`, `polarOption` at the end of the file) | `../__fixtures__/index.json`, `option.stage19.test.ts` |
 | Understand time-axis labels / histogram bins / box stats / heatmap cells | Option | `option.ts` (`timeLabelFormatter`, `histogramBins`, `heatmapCells`) | `option.test.ts` |
-| Understand why a grouped temporal line breaks (null point) across a group's absence | Option | `option.ts` ("grouped temporal gaps": `breakTemporalGaps`, `gapBreakThreshold`, `GAP_BREAK_FACTOR`) | `option.gaps.test.ts`, `../__fixtures__/line_grouped_gap.json` |
+| Understand why a grouped temporal line breaks (null point) where a group is absent from a bucket other groups occupy | Option | `option.ts` ("grouped temporal gaps": `temporalBuckets` = union of existing x across groups, `breakAbsentBuckets` = null point where consecutive global indices differ by > 1; no calendar, nothing generated) | `option.gaps.test.ts`, `../__fixtures__/line_grouped_gap.json` |
 | Understand colours, fonts, grid, tooltip, toolbox, dark theme | Theme | `theme.ts` | `theme.test.ts` (contrast) |
 | Understand the reading order of a category axis (hour/month/weekday/date vs ranked) and its note | Order | `order.ts` | `order.test.ts`, `../../components/ChartView.tsx` |
 | Understand which ECharts modules are registered | Registration | `echarts.ts` | — |
