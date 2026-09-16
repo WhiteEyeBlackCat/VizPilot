@@ -55,8 +55,14 @@ def mixed_recs():
 
 
 def test_covers_all_chart_types(mixed_recs) -> None:
+    # stage 19: one chart per finding — the (city, value) pair is drawn once
+    # (bar, with box as an alternative), so the classic set minus the box;
+    # the intents behind the charts are all present
     _, recs = mixed_recs
-    assert {r.spec.type for r in recs} == {"line", "bar", "box", "scatter", "histogram", "heatmap"}
+    assert {r.spec.type for r in recs} == {"line", "bar", "scatter", "histogram", "heatmap"}
+    assert {r.intent for r in recs} >= {"trend", "group_comparison", "numeric_relationship", "distribution"}
+    bar = next(r for r in recs if r.spec.type == "bar" and r.spec.y == "value")
+    assert {a.type for a in bar.alternatives} >= {"box"} and all(a.x == "city" for a in bar.alternatives)
 
 
 def test_all_outputs_pass_validation(mixed_recs) -> None:
@@ -195,10 +201,10 @@ def test_long_series_gets_coarse_granularity_with_mean() -> None:
 
 def test_diversity_and_overall_cap() -> None:
     recs = recommend_charts(_profile(_wide_df()))
-    assert len(recs) == 12  # 16 type-capped candidates -> overall cap
-    by_type = Counter(r.spec.type for r in recs)
-    assert all(count <= 3 for count in by_type.values())
-    assert len(by_type) >= 4  # a wide dataset must not collapse into one type
+    assert len(recs) == 12  # family-capped candidates -> overall cap
+    by_family = Counter(r.intent or r.spec.type for r in recs)
+    assert all(count <= 3 for count in by_family.values())
+    assert len(by_family) >= 4  # a wide dataset must not collapse into one family
 
 
 def test_empty_recommendations_for_unusable_dataset() -> None:
@@ -261,7 +267,7 @@ def test_recommendations_endpoint_shape(client: TestClient) -> None:
     assert body["insights"] == [] and body["message"] is None and body["warnings"] == []
     assert len(body["charts"]) >= 3
     first = body["charts"][0]
-    assert set(first) == {"spec", "score", "source", "tier", "confidence", "warnings"}
+    assert set(first) == {"spec", "score", "source", "tier", "confidence", "warnings", "intent", "alternatives"}
     assert first["confidence"]["n_source"] in ("exact", "estimated")
     assert "tier_cap" not in first
     assert first["source"] == "rules"
@@ -521,6 +527,9 @@ def test_per_y_cap_frees_slots_for_other_measures() -> None:
         }
     )
     recs = recommend_charts(_profile(df))
-    strong_y = [r for r in recs if r.spec.y == "strong" and r.spec.type in ("bar", "box", "line")]
-    assert len(strong_y) == MAX_PER_Y
-    assert any(r.spec.y in ("m1", "m2") for r in recs if r.spec.type in ("bar", "box", "line"))
+    family = ("bar", "box", "line", "lollipop", "dot_interval", "violin", "raincloud", "ridgeline")
+    strong_y = [r for r in recs if r.spec.y == "strong" and r.spec.type in family]
+    # stage 19: bar + box of the same pair collapsed into one finding, so the
+    # cap is reached only through distinct findings (cat, cat2, ts)
+    assert 2 <= len(strong_y) <= MAX_PER_Y
+    assert any(r.spec.y in ("m1", "m2") for r in recs if r.spec.type in family)

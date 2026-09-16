@@ -24,7 +24,9 @@ from .confidence import (
     has_suspected_sentinels,
     with_caution,
 )
-from .spec import ChartSpec, TimeGranularity, validate_spec
+from .intent import HEXBIN_MIN_N, ChartChoice, Intent, IntentContext, classify_intent, select_chart
+from .roles import ColumnRole, roles_for
+from .spec import CATEGORY_AXIS_TYPES, ChartSpec, ChartType, TimeGranularity, validate_spec
 
 MAX_CHARTS = 12
 MAX_PER_TYPE = 3  # diversity cap (stage3 blocking #1)
@@ -38,11 +40,31 @@ GROUP_CATEGORIES_RANGE = (2, 8)
 NONLINEAR_CORR_GAP = 0.15  # |spearman| - |pearson| above this -> non-linear note
 LINE_GROUP_INTERACTION_MIN = 0.05
 LINE_GROUP_MAIN_EFFECT_MIN = 0.1  # eta-squared(group, y): main-effect grouping still earns a split
+# stage 19: group spreads (std) differing by this factor make the finding a
+# distribution difference (raincloud / ridgeline / box), not a mean comparison
+DISTRIBUTION_SPREAD_RATIO = 1.5
+TWO_STATE_INTERACTION_MIN = 0.05  # interaction share for a category × two-state chart
+# types sharing the bar's per-x cap and the per-y cap (stage 19 family)
+_X_CAPPED_TYPES = frozenset({"bar", "lollipop", "box", "violin", "raincloud", "ridgeline", "dot_interval", "polar_line", "rose", "line"})
+_Y_CAPPED_TYPES = _X_CAPPED_TYPES | frozenset({"dumbbell", "slopegraph"})
 
 Tier = Literal["top", "secondary", "exploratory"]
 
 # verification level of an LLM-suggested chart against the evidence table
 VerificationLevel = Literal["strong", "weak", "unverified", "neutral"]
+# stage 19: evidence family of each chart type (how evaluate_llm_spec scores it)
+_FAMILY: dict[str, str] = {
+    "lollipop": "bar",
+    "polar_line": "bar",
+    "rose": "bar",
+    "dumbbell": "bar",
+    "slopegraph": "bar",
+    "violin": "box",
+    "raincloud": "box",
+    "ridgeline": "box",
+    "dot_interval": "box",
+    "hexbin": "scatter",
+}
 TOP_SCORE_FLOOR = 0.68
 UNVERIFIED_SCORE = 0.5  # combinations outside the evidence scan
 # stage 13: a chart of a derived column against one of its components draws
@@ -60,6 +82,10 @@ class Recommendation(BaseModel):
     tier: Tier = "exploratory"
     confidence: Confidence | None = None  # stage 9, additive
     warnings: list[Warning] = []  # stage 9, additive
+    # stage 19 (additive): why this chart family was chosen, and the other
+    # eligible charts of the same finding (the UI shows the preferred one)
+    intent: Intent | None = None
+    alternatives: list[ChartSpec] = []
     # tier ceiling ("secondary"/"exploratory") from LLM verification and/or
     # the confidence layer; internal only — applied by assign_tiers and never
     # serialized into the API response
@@ -237,6 +263,23 @@ class _EvidenceIndex:
                     self.time_interaction[key] = max(
                         self.time_interaction.get(key, 0.0), e.strength
                     )
+        # stage 19: (cat_a, cat_b, num) -> interaction share, both orders (no time markers)
+        self.interaction: dict[tuple[str, str, str], float] = {}
+        for e in evidence.interactions:
+            if "@" in e.cat1 or "@" in e.cat2:
+                continue
+            for a, b in ((e.cat1, e.cat2), (e.cat2, e.cat1)):
+                self.interaction[(a, b, e.num)] = max(self.interaction.get((a, b, e.num), 0.0), e.strength)
+        # stage 19: (cat, num) -> smallest group and whether the group spreads differ
+        self.n_min = {(e.cat, e.num): e.n_min for e in evidence.cat_num}
+        self.spread_differs: dict[tuple[str, str], bool] = {}
+        for g in getattr(getattr(evidence, "layer2", None), "group_summaries", []) or []:
+            stds = [s.std for s in g.groups if s.std is not None and s.std > 0]
+            self.spread_differs[(g.cat, g.num)] = len(stds) >= 2 and max(stds) / min(stds) >= DISTRIBUTION_SPREAD_RATIO
+        # stage 19: (x, y) -> binned eta-squared of the L2 non-linear scan (numeric cycles)
+        self.binned_eta2 = {
+            (n.x, n.y): n.binned_eta2 for n in getattr(getattr(evidence, "layer2", None), "nonlinear", []) or []
+        }
         # (x, y, group) -> (spread, n_min), both axis orders
         self.slope: dict[tuple[str, str, str], tuple[float, int]] = {}
         for s in evidence.slope_heterogeneity:
@@ -298,13 +341,22 @@ def recommend_charts(profile: DatasetProfile) -> list[Recommendation]:
     cat_cols = [c for c in usable if c.semantic_type in ("categorical", "boolean")]
     lo, hi = GROUP_CATEGORIES_RANGE
     group_cols = [c.name for c in cat_cols if lo <= (c.n_categories or 0) <= hi]
+    roles = roles_for(profile.columns)
+    # a cyclic numeric (hour 0..23) is a category axis for the cycle charts
+    # and stays a numeric for scatter / histogram / heatmap
+    cyclic_numeric = [c for c in numeric_cols if roles[c.name].cyclic]
+    measures = [c for c in numeric_cols if not roles[c.name].cyclic]
 
     candidates: list[Recommendation] = []
-    candidates += _line_charts(profile, datetime_cols, numeric_cols, group_cols, index)
-    candidates += _bar_charts(cat_cols, numeric_cols, index)
-    candidates += _box_charts(cat_cols, numeric_cols, index)
-    candidates += _scatter_charts(profile, numeric_cols, group_cols, index)
-    candidates += _histogram_charts(numeric_cols)
+    candidates += _line_charts(profile, datetime_cols, measures, group_cols, index)
+    candidates += _category_charts(profile, cat_cols, measures, index, roles)
+    candidates += _cyclic_numeric_charts(profile, cyclic_numeric, measures, index, roles)
+    candidates += _count_chart(profile, cat_cols, roles)
+    candidates += _two_state_charts(profile, cat_cols, measures, index, roles)
+    candidates += _matrix_charts(profile, cat_cols, measures, index, roles)
+    # a cycle (hour) is drawn once, by the cyclic line: never also as a scatter / hexbin
+    candidates += _scatter_charts(profile, measures, group_cols, index)
+    candidates += _histogram_charts(profile, numeric_cols)
     candidates += _heatmap_chart(all_numeric)
 
     valid = _dedup(r for r in candidates if not validate_spec(r.spec, profile))
@@ -384,6 +436,7 @@ def _line_charts(
                         reason=f"Shows how {num.name} changes over time{suffix}.",
                     ),
                     score=score,
+                    intent="trend",
                 )
             )
     return recs
@@ -409,62 +462,237 @@ def _span_days(dt: ColumnProfile) -> float:
     return (datetime.fromisoformat(dt.max) - datetime.fromisoformat(dt.min)).total_seconds() / 86400
 
 
-def _bar_charts(
-    cat_cols: list[ColumnProfile], numeric_cols: list[ColumnProfile], index: _EvidenceIndex
+def _variant(spec: ChartSpec, chart_type: ChartType, choice: ChartChoice) -> ChartSpec:
+    """The same finding drawn as another eligible chart: the fields each
+    type accepts, the type-specific ones dropped, the order carried over.
+    The spec's own type comes back unchanged (only the order is filled in)."""
+    sort = choice.sort if chart_type in CATEGORY_AXIS_TYPES else None
+    if chart_type == spec.type:
+        return spec if spec.sort is not None or sort is None else spec.model_copy(update={"sort": sort})
+    update: dict = {"type": chart_type, "sort": sort, "top_n": None}
+    if chart_type in ("box", "violin", "raincloud", "ridgeline", "dot_interval"):
+        update.update(aggregation=None, group_by=None)
+    elif chart_type in ("bar", "lollipop", "polar_line", "rose"):
+        update.update(aggregation=spec.aggregation or ("count" if spec.y is None else "mean"))
+        if chart_type in ("polar_line", "rose"):
+            update.update(group_by=None)
+    elif chart_type == "line":
+        # over a cycle / category the line needs an aggregate; a trend keeps its own
+        update.update(aggregation=spec.aggregation or "mean")
+        if choice.intent == "cyclic_pattern":
+            update.update(group_by=None)
+    elif chart_type in ("scatter", "hexbin"):
+        update.update(aggregation=None)
+    elif chart_type in ("dumbbell", "slopegraph"):
+        update.update(aggregation=spec.aggregation or "mean")
+    return spec.model_copy(update=update)
+
+
+def _finding(
+    profile: DatasetProfile,
+    base: ChartSpec,
+    score: float,
+    x: ColumnRole | None,
+    y: ColumnRole | None,
+    group: ColumnRole | None,
+    ctx: IntentContext,
+    hint: ChartType | None = None,
+) -> Recommendation | None:
+    """One recommendation per analytical finding: the intent picks the chart
+    family, the preferred eligible chart becomes the spec and the other
+    eligible ones its alternatives (each validated on this profile)."""
+    intent = classify_intent(x, y, group, ctx)
+    if intent is None:
+        return None
+    choice = select_chart(intent, x, group, ctx, hint=hint)
+    if choice is None:
+        return None
+    candidates = [choice.preferred, *choice.alternatives]
+    specs = [_variant(base, t, choice) for t in candidates]
+    valid = [sp for sp in specs if not validate_spec(sp, profile)]
+    if not valid:
+        return None
+    return Recommendation(spec=valid[0], score=score, intent=intent, alternatives=valid[1:])
+
+
+def _category_ctx(cat: ColumnProfile, num: ColumnProfile | None, index: _EvidenceIndex, profile: DatasetProfile, **extra) -> IntentContext:
+    key = (cat.name, num.name) if num is not None else None
+    return IntentContext(
+        n_rows=profile.profiled_rows or profile.n_rows,
+        n_groups=cat.n_categories or 0,
+        n_min_group=index.n_min.get(key, 0) if key else 0,
+        distribution_evidence=index.spread_differs.get(key, False) if key else False,
+        **extra,
+    )
+
+
+def _category_charts(
+    profile: DatasetProfile,
+    cat_cols: list[ColumnProfile],
+    numeric_cols: list[ColumnProfile],
+    index: _EvidenceIndex,
+    roles: dict[str, ColumnRole],
 ) -> list[Recommendation]:
+    """Stage 19: one chart per (category, measure) finding. The intent
+    (group comparison / distribution by group / cyclic pattern / ranking)
+    follows the column roles and the evidence; the chart follows the intent."""
     recs = []
-    bar_cats = [c for c in cat_cols if 2 <= (c.n_categories or 0) <= 20]
-    for cat in bar_cats:
+    for cat in [c for c in cat_cols if 2 <= (c.n_categories or 0) <= 20]:
         for num in numeric_cols:
-            recs.append(
-                Recommendation(
-                    spec=ChartSpec(
-                        title=f"Mean {num.name} by {cat.name}",
-                        type="bar",
-                        x=cat.name,
-                        y=num.name,
-                        aggregation="mean",
-                        reason=f"Compares average {num.name} across {cat.name} categories.",
-                    ),
-                    score=0.45 + 0.45 * index.eta(cat.name, num.name),
-                )
-            )
-    if bar_cats:
-        count_cat = max(bar_cats, key=lambda c: (c.n_categories, c.name))
-        recs.append(
-            Recommendation(
-                spec=ChartSpec(
-                    title=f"Record count by {count_cat.name}",
-                    type="bar",
-                    x=count_cat.name,
-                    aggregation="count",
-                    reason=f"Shows how many records fall in each {count_cat.name} category.",
-                ),
-                score=0.6,
-            )
-        )
+            eta = index.eta(cat.name, num.name)
+            ctx = _category_ctx(cat, num, index, profile)
+            x_role, y_role = roles[cat.name], roles[num.name]
+            intent = classify_intent(x_role, y_role, None, ctx)
+            if intent == "distribution_by_group":
+                title = f"{num.name} distribution by {cat.name}"
+                reason = f"Shows how the distribution of {num.name} differs across {cat.name} categories, not just its average."
+                score = 0.4 + 0.45 * eta
+            elif intent == "cyclic_pattern":
+                title = f"{num.name} across {cat.name}"
+                reason = f"Shows how {num.name} moves over the {cat.name} cycle, in its natural order."
+                score = 0.45 + 0.45 * eta
+            elif intent == "ranking":
+                title = f"{cat.name} ranked by mean {num.name}"
+                reason = f"Ranks {cat.name} categories by average {num.name}."
+                score = 0.45 + 0.45 * eta
+            else:
+                title = f"Mean {num.name} by {cat.name}"
+                reason = f"Compares average {num.name} across {cat.name} categories."
+                score = 0.45 + 0.45 * eta
+            base = ChartSpec(title=title, type="bar", x=cat.name, y=num.name, aggregation="mean", reason=reason)
+            rec = _finding(profile, base, score, x_role, y_role, None, ctx)
+            if rec is not None:
+                recs.append(rec)
     return recs
 
 
-def _box_charts(
-    cat_cols: list[ColumnProfile], numeric_cols: list[ColumnProfile], index: _EvidenceIndex
+def _cyclic_numeric_charts(
+    profile: DatasetProfile,
+    cyclic_cols: list[ColumnProfile],
+    numeric_cols: list[ColumnProfile],
+    index: _EvidenceIndex,
+    roles: dict[str, ColumnRole],
 ) -> list[Recommendation]:
-    return [
-        Recommendation(
-            spec=ChartSpec(
-                title=f"{num.name} distribution by {cat.name}",
-                type="box",
-                x=cat.name,
+    """A numeric cycle (hour 0..23) against a measure: strength from the L2
+    non-linear scan (binned eta-squared) or the rank correlation; drawn as a
+    line over the cycle in its natural order (polar / rose as alternatives)."""
+    recs = []
+    for cyc in cyclic_cols:
+        role = roles[cyc.name]
+        for num in numeric_cols:
+            strength = math.sqrt(index.binned_eta2.get((cyc.name, num.name), 0.0))
+            strength = max(strength, abs(index.spearman.get((cyc.name, num.name), 0.0)))
+            ctx = IntentContext(
+                n_rows=profile.profiled_rows or profile.n_rows,
+                n_groups=min(cyc.unique_count, role.period or cyc.unique_count),
+                n_min_group=(profile.profiled_rows or profile.n_rows) // max(cyc.unique_count, 1),
+            )
+            base = ChartSpec(
+                title=f"{num.name} across {cyc.name}",
+                type="line",
+                x=cyc.name,
                 y=num.name,
-                reason=f"Shows the distribution of {num.name} within each {cat.name} category.",
-            ),
-            score=0.4 + 0.45 * index.eta(cat.name, num.name),
-        )
-        for cat in cat_cols
-        if 2 <= (cat.n_categories or 0) <= 12
-        for num in numeric_cols
-        if num.std is not None and num.std > 0
-    ]
+                aggregation="mean",
+                reason=f"Shows how {num.name} moves over the {cyc.name} cycle (mean per {cyc.name}).",
+            )
+            rec = _finding(profile, base, 0.45 + 0.45 * strength, role, roles[num.name], None, ctx)
+            if rec is not None:
+                recs.append(rec)
+    return recs
+
+
+def _count_chart(profile: DatasetProfile, cat_cols: list[ColumnProfile], roles: dict[str, ColumnRole]) -> list[Recommendation]:
+    """Record count over the widest low-cardinality category (fixed score):
+    a ranking for a nominal column, the cycle order for a cyclic one."""
+    bar_cats = [c for c in cat_cols if 2 <= (c.n_categories or 0) <= 20]
+    if not bar_cats:
+        return []
+    count_cat = max(bar_cats, key=lambda c: (c.n_categories, c.name))
+    role = roles[count_cat.name]
+    intent: Intent = "cyclic_pattern" if role.cyclic else "ranking"
+    ctx = IntentContext(n_rows=profile.n_rows, n_groups=count_cat.n_categories or 0, count_measure=True, magnitude_measure=True)
+    choice = select_chart(intent, role, None, ctx, hint="bar")
+    spec = ChartSpec(
+        title=f"Record count by {count_cat.name}",
+        type="bar",
+        x=count_cat.name,
+        aggregation="count",
+        sort=choice.sort if choice else None,
+        reason=f"Shows how many records fall in each {count_cat.name} category.",
+    )
+    alternatives = []
+    if choice is not None:
+        alternatives = [sp for sp in (_variant(spec, t, choice) for t in choice.alternatives) if not validate_spec(sp, profile)]
+    return [Recommendation(spec=spec, score=0.6, intent=intent, alternatives=alternatives)]
+
+
+def _two_state_charts(
+    profile: DatasetProfile,
+    cat_cols: list[ColumnProfile],
+    numeric_cols: list[ColumnProfile],
+    index: _EvidenceIndex,
+    roles: dict[str, ColumnRole],
+) -> list[Recommendation]:
+    """Category × two-state (before/after, weekday/weekend, A/B) → measure,
+    when the interaction evidence says the two states move the categories
+    differently. Drawn as a dumbbell (slopegraph / grouped bar alternatives)."""
+    recs = []
+    states = [c for c in cat_cols if roles[c.name].two_state]
+    for state in states:
+        for cat in cat_cols:
+            if cat.name == state.name or not 2 <= (cat.n_categories or 0) <= 12:
+                continue
+            for num in numeric_cols:
+                strength = index.interaction.get((cat.name, state.name, num.name), 0.0)
+                if strength < TWO_STATE_INTERACTION_MIN:
+                    continue
+                ctx = _category_ctx(cat, num, index, profile)
+                base = ChartSpec(
+                    title=f"{num.name} by {cat.name}: {state.name} compared",
+                    type="dumbbell",
+                    x=cat.name,
+                    y=num.name,
+                    group_by=state.name,
+                    aggregation="mean",
+                    reason=f"Compares mean {num.name} between the two {state.name} states within each {cat.name} (the gap differs by category).",
+                )
+                rec = _finding(profile, base, 0.45 + 0.45 * math.sqrt(strength), roles[cat.name], roles[num.name], roles[state.name], ctx)
+                if rec is not None:
+                    recs.append(rec)
+    return recs
+
+
+def _matrix_charts(
+    profile: DatasetProfile,
+    cat_cols: list[ColumnProfile],
+    numeric_cols: list[ColumnProfile],
+    index: _EvidenceIndex,
+    roles: dict[str, ColumnRole],
+) -> list[Recommendation]:
+    """Two ordered dimensions (month × hour, level × weekday) → measure, when
+    the interaction evidence is there: a matrix heatmap of the aggregate."""
+    recs = []
+    ordered = [c for c in cat_cols if roles[c.name].ordered and not roles[c.name].two_state and 2 <= (c.n_categories or 0) <= 20]
+    for i, a in enumerate(ordered):
+        for b in ordered[i + 1 :]:
+            for num in numeric_cols:
+                strength = index.interaction.get((a.name, b.name, num.name), 0.0)
+                if strength < TWO_STATE_INTERACTION_MIN:
+                    continue
+                ctx = IntentContext(n_rows=profile.n_rows, n_groups=a.n_categories or 0, n_categories=b.n_categories or 0)
+                base = ChartSpec(
+                    title=f"Mean {num.name} by {a.name} × {b.name}",
+                    type="heatmap",
+                    x=a.name,
+                    y=num.name,
+                    group_by=b.name,
+                    aggregation="mean",
+                    reason=f"Shows how mean {num.name} depends on the combination of {a.name} and {b.name}.",
+                )
+                rec = _finding(profile, base, 0.45 + 0.45 * math.sqrt(strength), roles[a.name], roles[num.name], roles[b.name], ctx)
+                if rec is not None:
+                    recs.append(rec)
+    return recs
 
 
 def _scatter_charts(
@@ -511,19 +739,17 @@ def _scatter_charts(
             )
         if group:
             reason += f", colored by {group} (the relationship differs across its groups)"
-        recs.append(
-            Recommendation(
-                spec=ChartSpec(
-                    title=f"{b} vs {a}",
-                    type="scatter",
-                    x=a,
-                    y=b,
-                    group_by=group,
-                    reason=reason + ".",
-                ),
-                score=0.5 + 0.4 * strength,
-            )
-        )
+        n_rows = profile.profiled_rows or profile.n_rows
+        spec = ChartSpec(title=f"{b} vs {a}", type="scatter", x=a, y=b, group_by=group, reason=reason + ".")
+        alternatives: list[ChartSpec] = []
+        if group is None and n_rows > HEXBIN_MIN_N:
+            # stage 19: overplotting — the hexbin is the readable chart, the
+            # (sampled) scatter stays available as an alternative
+            alternatives = [spec]
+            spec = spec.model_copy(update={"type": "hexbin"})
+        elif group is None and n_rows >= 300:
+            alternatives = [spec.model_copy(update={"type": "hexbin"})]
+        recs.append(Recommendation(spec=spec, score=0.5 + 0.4 * strength, intent="numeric_relationship", alternatives=alternatives))
     return recs
 
 
@@ -542,8 +768,9 @@ def _scatter_group(a: str, b: str, group_cols: list[str], index: _EvidenceIndex)
     return best[1] if best else None
 
 
-def _histogram_charts(numeric_cols: list[ColumnProfile]) -> list[Recommendation]:
+def _histogram_charts(profile: DatasetProfile, numeric_cols: list[ColumnProfile]) -> list[Recommendation]:
     recs = []
+    n_rows = profile.profiled_rows or profile.n_rows
     for num in numeric_cols:
         if num.std is None or num.std <= 0:
             continue
@@ -560,6 +787,9 @@ def _histogram_charts(numeric_cols: list[ColumnProfile]) -> list[Recommendation]
                     reason=f"Shows the distribution of {num.name}.",
                 ),
                 score=0.5 + (0.05 if skewed else 0.0),
+                intent="distribution",
+                alternatives=[ChartSpec(title=f"Distribution of {num.name}", type="box", y=num.name, reason=f"Shows the distribution of {num.name}.")]
+                + ([ChartSpec(title=f"Distribution of {num.name}", type="violin", y=num.name, reason=f"Shows the distribution of {num.name}.")] if n_rows >= 30 else []),
             )
         )
     return recs
@@ -580,6 +810,50 @@ def _heatmap_chart(numeric_cols: list[ColumnProfile]) -> list[Recommendation]:
     ]
 
 
+def select_for_spec(spec: ChartSpec, profile: DatasetProfile) -> tuple[ChartSpec, list[ChartSpec], Intent | None]:
+    """Stage 19: an LLM- or probe-suggested chart goes through the same
+    intent → selection step as the rule charts. The suggested type is only a
+    hint: it stays when it is eligible for the finding, otherwise the
+    preferred eligible chart replaces it (the hint never becomes an
+    alternative when the guards reject it). Returns (spec, alternatives,
+    intent); a spec the classifier has no intent for is returned as is."""
+    roles = roles_for(profile.columns)
+    x, y, group = roles.get(spec.x or ""), roles.get(spec.y or ""), roles.get(spec.group_by or "")
+    if spec.type in ("heatmap", "histogram") and spec.x is None:
+        return spec, [], ("distribution" if spec.type == "histogram" else None)
+    index = _EvidenceIndex(profile.evidence)
+    columns = {c.name: c for c in profile.columns}
+    xcol = columns.get(spec.x or "")
+    n_rows = profile.profiled_rows or profile.n_rows
+    n_groups = 0
+    if xcol is not None:
+        n_groups = xcol.n_categories or (min(xcol.unique_count, x.period) if x is not None and x.period else xcol.unique_count)
+    key = (spec.x or "", spec.y or "")
+    ctx = IntentContext(
+        n_rows=n_rows,
+        n_groups=n_groups,
+        n_min_group=index.n_min.get(key, n_rows // max(n_groups, 1) if n_groups else 0),
+        n_categories=(columns.get(spec.group_by or "").n_categories or 0) if spec.group_by in columns else 0,
+        distribution_evidence=index.spread_differs.get(key, False) or spec.type in ("box", "violin", "raincloud", "ridgeline"),
+        count_measure=spec.y is None,
+        magnitude_measure=spec.aggregation in ("sum", "count"),
+        ranking_requested=spec.sort == "value",
+    )
+    if spec.type == "histogram":
+        return spec, [], "distribution"
+    intent = classify_intent(x, y, group, ctx)
+    if intent is None:
+        return spec, [], None
+    choice = select_chart(intent, x, group, ctx, hint=spec.type)
+    if choice is None:
+        return spec, [], intent
+    ordered = [choice.preferred, *choice.alternatives]
+    specs = [sp for sp in (_variant(spec, t, choice) for t in ordered) if not validate_spec(sp, profile)]
+    if not specs:
+        return spec, [], intent
+    return specs[0], specs[1:], intent
+
+
 def evaluate_llm_spec(spec: ChartSpec, profile: DatasetProfile) -> tuple[float, VerificationLevel]:
     """Scores an LLM-suggested chart with the same evidence formulas as the
     rule engine and grades the hypothesis (stage8):
@@ -594,8 +868,29 @@ def evaluate_llm_spec(spec: ChartSpec, profile: DatasetProfile) -> tuple[float, 
     index = _EvidenceIndex(profile.evidence)
     columns = {c.name: c for c in profile.columns}
 
+    if spec.type == "heatmap" and spec.x is not None:
+        # stage 19 matrix pattern: scored on the interaction share of its two dimensions
+        strength = index.interaction.get((spec.x, spec.group_by or "", spec.y or ""))
+        if strength is None:
+            return UNVERIFIED_SCORE, "unverified"
+        score = 0.45 + 0.45 * math.sqrt(strength)
+        return score, "strong" if score >= TOP_SCORE_FLOOR else "weak"
     if spec.type == "heatmap":
         return 0.65, "neutral"
+    # stage 19: the new types are scored as the family they belong to
+    family = _FAMILY.get(spec.type, spec.type)
+    if spec.type == "line" and (col := columns.get(spec.x or "")) is not None and col.semantic_type == "categorical":
+        family = "bar"  # a line over an ordered category is a group comparison
+    if spec.type in ("polar_line", "rose", "line") and (col := columns.get(spec.x or "")) is not None and col.semantic_type == "numeric":
+        # a numeric cycle (hour): the non-linear scan or the rank correlation
+        strength = math.sqrt(index.binned_eta2.get((spec.x or "", spec.y or ""), 0.0))
+        strength = max(strength, abs(index.spearman.get((spec.x or "", spec.y or ""), 0.0)))
+        if spec.type == "line" and strength == 0.0:
+            family = "line"
+        else:
+            score = 0.45 + 0.45 * strength
+            return score, "strong" if score >= TOP_SCORE_FLOOR else "weak"
+    spec = spec.model_copy(update={"type": family})
     if spec.type == "histogram":
         col = columns.get(spec.x or "")
         skewed = (
@@ -764,7 +1059,8 @@ def apply_diversity_caps(recs: list[Recommendation]) -> list[Recommendation]:
     MAX_CHARTS cut. Also called after the LLM merge (stage8 critique #4):
     re-suggesting a chart the caps removed must not bypass the defenses.
 
-    - per type: at most MAX_PER_TYPE charts of one type
+    - per family: at most MAX_PER_TYPE charts of one intent (or type when
+      the chart carries no intent)
     - per x (bar/box): one strong categorical must not monopolize a type's
       slots (stage7 review: quantity took all three bar slots on sales_basic)
     - per y (bar/box/line, stage 14): one measure must not fill the list
@@ -776,18 +1072,25 @@ def apply_diversity_caps(recs: list[Recommendation]) -> list[Recommendation]:
     per_y: dict[str, int] = {}
     for rec in sorted(recs, key=_sort_key):
         chart_type = rec.spec.type
-        if per_type.get(chart_type, 0) >= MAX_PER_TYPE:
+        # stage 19: the type cap counts chart families (the intent) — a cyclic
+        # line and a trend line are different findings, two bars of the same
+        # intent are not more diverse for being bars
+        family = rec.intent or chart_type
+        if per_type.get(family, 0) >= MAX_PER_TYPE:
             continue
         x_key = (chart_type, rec.spec.x or "")
-        if chart_type in ("bar", "box") and per_x.get(x_key, 0) >= MAX_PER_X:
+        # trend lines all share the dataset's datetime column: the per-x cap
+        # applies to lines over a cycle only
+        x_capped = chart_type in _X_CAPPED_TYPES and (chart_type != "line" or rec.intent == "cyclic_pattern")
+        if x_capped and per_x.get(x_key, 0) >= MAX_PER_X:
             continue
         y = rec.spec.y
-        counts_y = chart_type in ("bar", "box", "line") and y is not None
+        counts_y = chart_type in _Y_CAPPED_TYPES and y is not None
         if counts_y and per_y.get(y, 0) >= MAX_PER_Y:
             continue
         kept.append(rec)
-        per_type[chart_type] = per_type.get(chart_type, 0) + 1
-        if chart_type in ("bar", "box"):
+        per_type[family] = per_type.get(family, 0) + 1
+        if x_capped:
             per_x[x_key] = per_x.get(x_key, 0) + 1
         if counts_y:
             per_y[y] = per_y.get(y, 0) + 1

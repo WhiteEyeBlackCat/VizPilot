@@ -842,7 +842,9 @@ try {
     const topCards = await page.locator("[id^=rec-card-][data-tier=top]").count();
     const derivedDisclosed = (await page.getByText(/sales appears to be computed as/).count()) > 0;
     const definitionalCards = await page.getByText(/this relationship is definitional/).count();
-    step("sales_basic.derived", { recCards: await page.locator("[id^=rec-card-]").count(), topEmptyNotice, topCards, derivedDisclosed, definitionalCards });
+    const polarCards = await page.locator("[id^=rec-card-] [data-chart-meta]").evaluateAll((els) => els.filter((e) => /rose|polar/.test(e.textContent ?? "")).length);
+    step("sales_basic.derived", { recCards: await page.locator("[id^=rec-card-]").count(), topEmptyNotice, topCards, derivedDisclosed, definitionalCards, polarCards });
+    if (polarCards !== 0) fail("a nominal dataset got a polar / rose recommendation");
     await shot("31-sales-basic-derived");
     if (!topEmptyNotice || topCards !== 0 || !derivedDisclosed) fail(`sales_basic derived check failed: notice=${topEmptyNotice} topCards=${topCards} disclosed=${derivedDisclosed}`);
     await gotoPage("Overview");
@@ -896,6 +898,68 @@ try {
       if (!ascending || axis.categories.length < 3 || !note || !/數值順序/.test(note)) fail(`month bar not in natural order: ${JSON.stringify({ categories: axis.categories, note })}`);
       // the ranked station bar still says it is ranked
       await gotoPage("Insights");
+    }
+
+    // ---- stage 19: intents, alternatives, polar / rose renderers ------------
+    {
+      await gotoPage("Insights");
+      const intents = await page.locator("[data-card-intent]").evaluateAll((els) => els.map((e) => e.dataset.cardIntent));
+      const cyclic = page.locator("[id^=rec-card-]:has([data-card-intent=cyclic_pattern])").first();
+      const cyclicCount = await page.locator("[data-card-intent=cyclic_pattern]").count();
+      let alternatives = null;
+      let polar = null;
+      if (cyclicCount > 0) {
+        const before = await panelSeq();
+        await cyclic.getByRole("button", { name: /Preview|預覽中/ }).click();
+        await waitPreview(before);
+        const chart = panel().locator(CHART_SEL).first();
+        const line = await chart.evaluate((el) => {
+          const o = el.__echarts?.getOption();
+          return { types: (o?.series ?? []).map((s) => s.type), xs: o?.xAxis?.[0]?.data ?? null, xType: o?.xAxis?.[0]?.type };
+        });
+        alternatives = await panel().locator("[data-preview-alternatives] [data-alternative]").evaluateAll((els) => els.map((e) => e.dataset.alternative));
+        const note = await panel().locator("[data-order-note]").textContent().catch(() => null);
+        if (alternatives.includes("polar_line")) {
+          const seq = await panelSeq();
+          await panel().locator("[data-alternative=polar_line]").click();
+          await waitPreview(seq);
+          polar = await panel().locator(CHART_SEL).first().evaluate((el) => {
+            const o = el.__echarts?.getOption();
+            return { polar: Boolean(o?.polar?.length), angle: o?.angleAxis?.[0]?.data ?? null, coord: o?.series?.[0]?.coordinateSystem, canvas: Boolean(el.querySelector("canvas")) };
+          });
+          await shot("37-hour-like-polar-alternative", panel());
+        }
+        step("hour_like.cyclic-intent", { intents, cyclicCount, line, note, alternatives, polar });
+        if (!line.types.includes("line")) fail(`cyclic pattern is not drawn as a line: ${JSON.stringify(line)}`);
+        if (!note || !/順序/.test(note) || /由高到低/.test(note)) fail(`cyclic chart lacks a natural-order note: ${note}`);
+        if (polar && (!polar.polar || polar.coord !== "polar" || !polar.canvas)) fail(`polar alternative did not render: ${JSON.stringify(polar)}`);
+      } else {
+        step("hour_like.cyclic-intent", { intents, cyclicCount });
+        fail("hour_like has no cyclic_pattern recommendation");
+      }
+      // Explore: a rose over the hour cycle renders on a polar system; a
+      // rose over a nominal column is rejected with the guard's message
+      {
+        const { chart, ...st } = await generateManual({ type: "rose", x: "hr", y: "cnt" });
+        const rose = await chart.evaluate((el) => {
+          const o = el.__echarts?.getOption();
+          return { coord: o?.series?.[0]?.coordinateSystem, n: o?.angleAxis?.[0]?.data?.length ?? 0 };
+        });
+        step("explore.rose", { title: st.title, ...rose, payload: summary.renderPayloads[summary.renderPayloads.length - 1] });
+        await shot("38-explore-rose", panel());
+        if (rose.coord !== "polar" || rose.n !== 24) fail(`rose over hr did not render 24 sectors on a polar system: ${JSON.stringify(rose)}`);
+      }
+      {
+        await gotoPage("Explore");
+        await pick("圖表類型", "rose");
+        await pick("X 軸", "weathersit");
+        await pick("Y 軸", "cnt");
+        await page.getByRole("button", { name: "生成圖表" }).click();
+        await page.waitForTimeout(600);
+        const errors = await page.locator("[data-manual-builder] li").allTextContents();
+        step("explore.rose-nominal-rejected", { errors });
+        if (!errors.some((e) => /must be cyclic/.test(e))) fail(`nominal rose was not rejected: ${JSON.stringify(errors)}`);
+      }
     }
 
     await gotoPage("Overview");

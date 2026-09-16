@@ -6,7 +6,7 @@
 // count changes — and says in words which order the chart is in, so a
 // ranked axis is never mistaken for a chronological one.
 
-import type { Aggregation, BarChartData, BoxChartData, RenderResult } from "../../types";
+import type { Aggregation, BarChartData, BoxChartData, RenderResult, SortOrder } from "../../types";
 
 export type OrderKind = "numeric" | "weekday" | "month" | "date";
 
@@ -64,14 +64,20 @@ export function naturalOrder(categories: Category[]): DisplayOrder | null {
   return null;
 }
 
-/** Order in which a bar's categories are displayed (natural or backend). */
-export function barOrder(d: BarChartData): number[] {
-  return naturalOrder(d.categories)?.index ?? d.categories.map((_, i) => i);
+const identity = (n: number) => Array.from({ length: n }, (_, i) => i);
+
+/** Order in which a bar's categories are displayed. A spec that names its
+ *  order (stage 19 `sort`) is already ordered by the backend and is kept as
+ *  is; only an unordered spec falls back to the natural-sequence heuristic. */
+export function barOrder(d: BarChartData, sort?: SortOrder | null): number[] {
+  if (sort) return identity(d.categories.length);
+  return naturalOrder(d.categories)?.index ?? identity(d.categories.length);
 }
 
-/** Order in which a box plot's groups are displayed (natural or backend). */
-export function boxOrder(d: BoxChartData): number[] {
-  return naturalOrder(d.groups.map((g) => g.name))?.index ?? d.groups.map((_, i) => i);
+/** Order in which a box plot's groups are displayed (same rule as the bar). */
+export function boxOrder(d: BoxChartData, sort?: SortOrder | null): number[] {
+  if (sort) return identity(d.groups.length);
+  return naturalOrder(d.groups.map((g) => g.name))?.index ?? identity(d.groups.length);
 }
 
 const AGG_LABEL: Record<Aggregation, string> = {
@@ -93,23 +99,30 @@ const KIND_LABEL: Record<OrderKind, string> = {
  *  chart has no category axis worth explaining. */
 export function displayOrderNote(result: RenderResult): string | null {
   const { spec } = result;
-  if (spec.type === "bar") {
+  if (spec.type === "bar" || spec.type === "lollipop" || spec.type === "polar_line" || spec.type === "rose") {
     const d = result.chart_data as BarChartData;
     if (d.categories.length < 2) return null;
-    const natural = naturalOrder(d.categories);
     const agg = spec.aggregation ? AGG_LABEL[spec.aggregation] : null;
     const ranked = agg && spec.y ? `${agg} ${spec.y}` : agg === "筆數" ? "筆數" : null;
-    if (natural) {
-      const kept = d.truncated && ranked ? `前 ${d.categories.length} 名（依${ranked}）` : null;
-      return `${spec.x ?? "類別"} 依${KIND_LABEL[natural.kind]}顯示${kept ? `；${kept}` : ""}`;
-    }
+    const kept = d.truncated && ranked ? `前 ${d.categories.length} 名（依${ranked}）` : null;
+    // stage 19: the spec says which order the backend produced
+    if (spec.sort === "value") return ranked ? `依 ${ranked} 由高到低排序` : null;
+    if (spec.sort === "natural") return `依 ${spec.x ?? "類別"} 的類別順序顯示，未依值排序${kept ? `；${kept}` : ""}`;
+    const natural = naturalOrder(d.categories);
+    if (natural) return `${spec.x ?? "類別"} 依${KIND_LABEL[natural.kind]}顯示${kept ? `；${kept}` : ""}`;
     return ranked ? `依 ${ranked} 由高到低排序` : null;
   }
-  if (spec.type === "box") {
-    const d = result.chart_data as BoxChartData;
-    if (d.groups.length < 2 || spec.x === null || spec.x === undefined) return null;
-    const natural = naturalOrder(d.groups.map((g) => g.name));
+  if (spec.type === "box" || spec.type === "violin" || spec.type === "raincloud" || spec.type === "ridgeline" || spec.type === "dot_interval") {
+    const groups = (result.chart_data as { groups: { name: string }[] }).groups;
+    if (groups.length < 2 || spec.x === null || spec.x === undefined) return null;
+    if (spec.sort === "natural") return `依 ${spec.x} 的類別順序顯示，未依值排序`;
+    if (spec.sort === "value") return null;
+    const natural = naturalOrder(groups.map((g) => g.name));
     return natural ? `${spec.x} 依${KIND_LABEL[natural.kind]}顯示` : null;
   }
+  if ((spec.type === "dumbbell" || spec.type === "slopegraph") && spec.sort === "natural") {
+    return `依 ${spec.x} 的類別順序顯示，未依值排序`;
+  }
+  if (spec.type === "line" && spec.sort === "natural") return `依 ${spec.x} 的順序顯示（週期／等級）`;
   return null;
 }

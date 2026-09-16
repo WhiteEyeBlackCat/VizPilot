@@ -21,11 +21,16 @@ import type { CustomSeriesRenderItemAPI, CustomSeriesRenderItemParams } from "ec
 import type {
   BarChartData,
   BoxChartData,
+  BoxGroup,
+  DensityChartData,
+  DotIntervalChartData,
   HeatmapChartData,
+  HexbinChartData,
   HistogramChartData,
   LineChartData,
   RenderResult,
   TimeGranularity,
+  TwoStateChartData,
 } from "../../types";
 import type { VizOption } from "./echarts";
 import { barOrder, boxOrder } from "./order";
@@ -40,6 +45,7 @@ import {
   gridWithVisualMap,
   legend,
   PALETTE,
+  SEQUENTIAL,
   textStyle,
   title,
   toolbox,
@@ -64,8 +70,14 @@ type Pair = [number | string, number | null];
 const pairs = (x: (number | string | null)[], y: (number | null)[]): Pair[] =>
   x.map((xv, i) => [xv ?? "", y[i] ?? null]);
 
+// an ISO date / datetime string on the x axis
+const ISO_X = /^\d{4}-\d{2}(-\d{2})?([T ]\d{2}:\d{2})?/;
 const isTemporalX = (data: LineChartData): boolean =>
-  data.series.some((s) => s.x.some((v) => typeof v === "string"));
+  data.series.some((s) => s.x.some((v) => typeof v === "string" && ISO_X.test(v)));
+// stage 19: a line over an ordered category (weekday names, levels) — the
+// backend already put the points in the column's natural order
+const isCategoricalX = (data: LineChartData): boolean =>
+  !isTemporalX(data) && data.series.some((s) => s.x.some((v) => typeof v === "string"));
 
 // Time-axis tick labels per time_granularity (the backend writes the chosen
 // granularity back into result.spec when it aggregates; a raw hourly series
@@ -134,6 +146,8 @@ function baseOption(result: RenderResult, zoomable: boolean, legendShown: boolea
 function lineOption(result: RenderResult): VizOption {
   const d = result.chart_data as LineChartData;
   const temporal = isTemporalX(d);
+  const categorical = isCategoricalX(d);
+  const categories = categorical ? Array.from(new Set(d.series.flatMap((s) => s.x.map(String)))) : [];
   const many = d.series.some((s) => s.x.length > LINE_SYMBOL_MAX_POINTS);
   const series: LineSeriesOption[] = d.series.map((s) => ({
     type: "line",
@@ -158,7 +172,9 @@ function lineOption(result: RenderResult): VizOption {
             formatter: timeLabelFormatter(result.spec.time_granularity, hasIntradayX(d)),
           },
         }
-      : { ...axisBase, type: "value", scale: true, ...xAxisName(result.spec.x ?? "") },
+      : categorical
+        ? { ...axisBase, type: "category", data: categories, boundaryGap: false, ...xAxisName(result.spec.x ?? ""), splitLine: { show: false } }
+        : { ...axisBase, type: "value", scale: true, ...xAxisName(result.spec.x ?? "") },
     yAxis: { ...axisBase, type: "value", scale: true, ...yAxisName(d.y_label) },
     dataZoom: dataZoomInside(["x"]),
     series,
@@ -208,7 +224,7 @@ function barOption(result: RenderResult): VizOption {
   // stay null so a missing (category, group) cell is a gap, not a zero.
   // Categories with a natural sequence are displayed in it (order.ts);
   // every series is permuted with the same index so pairs never split.
-  const order = barOrder(d);
+  const order = barOrder(d, result.spec.sort);
   const categories = order.map((i) => String(d.categories[i]));
   const series: BarSeriesOption[] = d.series.map((s) => ({
     type: "bar",
@@ -322,7 +338,7 @@ function boxOption(result: RenderResult): VizOption {
   const d = result.chart_data as BoxChartData;
   // groups with a natural sequence are displayed in it (order.ts); the
   // statistics of each group travel with its name
-  const groups = boxOrder(d).map((i) => d.groups[i]);
+  const groups = boxOrder(d, result.spec.sort).map((i) => d.groups[i]);
   const names = groups.map((g) => g.name);
   // ECharts boxplot order: [min, Q1, median, Q3, max]; the backend's fences
   // play the min/max role (whisker ends), exactly as the backend computed them
@@ -420,15 +436,26 @@ export function heatmapCells(matrix: (number | null)[][]): HeatmapCell[] {
 
 function heatmapOption(result: RenderResult): VizOption {
   const d = result.chart_data as HeatmapChartData;
+  // stage 19 matrix pattern: rows are the group_by categories and the cells
+  // hold an aggregate (a sequential scale); the correlation matrix keeps
+  // its symmetric diverging scale over [-1, 1]
+  const matrix = d.rows !== undefined;
+  const rows = d.rows ?? d.columns;
+  const values = d.matrix.flat().filter((v): v is number => v !== null);
+  const lo = matrix ? Math.min(...values) : -1;
+  const hi = matrix ? Math.max(...values) : 1;
   const series: HeatmapSeriesOption = {
     type: "heatmap",
     name: d.y_label,
     data: heatmapCells(d.matrix),
     label: {
-      show: true,
+      show: !matrix || d.columns.length * rows.length <= 96,
       fontSize: 11,
       color: COLORS.text,
-      formatter: (p) => (p.value as HeatmapCell)[2].toFixed(2),
+      formatter: (p) => {
+        const v = (p.value as HeatmapCell)[2];
+        return matrix ? formatNumber(v) : v.toFixed(2);
+      },
     },
     itemStyle: { borderColor: COLORS.cellBorder, borderWidth: 1 },
     emphasis: { itemStyle: { borderColor: COLORS.text } },
@@ -442,7 +469,8 @@ function heatmapOption(result: RenderResult): VizOption {
       formatter: (p) => {
         const item = Array.isArray(p) ? p[0] : p;
         const [j, i, v] = item.value as HeatmapCell;
-        return `${d.columns[i]} × ${d.columns[j]}<br/>${d.y_label}: ${v.toFixed(3)}`;
+        const head = matrix ? `${result.spec.x}: ${d.columns[j]} · ${result.spec.group_by}: ${rows[i]}` : `${d.columns[i]} × ${d.columns[j]}`;
+        return `${head}<br/>${d.y_label}: ${matrix ? formatNumber(v) : v.toFixed(3)}`;
       },
     },
     xAxis: {
@@ -450,23 +478,24 @@ function heatmapOption(result: RenderResult): VizOption {
       type: "category",
       data: d.columns,
       splitArea: { show: true },
-      axisLabel: { ...axisBase.axisLabel, interval: 0, rotate: d.columns.length > 6 ? 45 : 0 },
+      ...(matrix ? xAxisName(result.spec.x ?? "") : {}),
+      axisLabel: { ...axisBase.axisLabel, interval: 0, rotate: d.columns.length > 6 && !matrix ? 45 : 0 },
     },
     // row 0 at the top, like a matrix
-    yAxis: { ...axisBase, type: "category", data: d.columns, inverse: true, splitArea: { show: true } },
+    yAxis: { ...axisBase, type: "category", data: rows, inverse: true, splitArea: { show: true }, ...(matrix ? yAxisName(result.spec.group_by ?? "") : {}) },
     visualMap: {
       type: "continuous",
-      min: -1,
-      max: 1,
+      min: lo,
+      max: hi,
       calculable: false,
       orient: "vertical",
       right: 8,
       top: "middle",
       itemHeight: 140,
       itemWidth: 12,
-      precision: 1,
-      text: ["1", "-1"],
-      inRange: { color: DIVERGING },
+      precision: matrix ? 2 : 1,
+      text: matrix ? [formatNumber(hi), formatNumber(lo)] : ["1", "-1"],
+      inRange: { color: matrix ? SEQUENTIAL : DIVERGING },
       textStyle: { color: COLORS.muted, fontSize: 11 },
     },
     series: [series],
@@ -492,5 +521,458 @@ export function buildOption(result: RenderResult): VizOption {
       return boxOption(result);
     case "heatmap":
       return heatmapOption(result);
+    case "violin":
+    case "raincloud":
+    case "ridgeline":
+      return densityOption(result, result.spec.type);
+    case "dot_interval":
+      return dotIntervalOption(result);
+    case "lollipop":
+      return lollipopOption(result);
+    case "dumbbell":
+      return dumbbellOption(result);
+    case "slopegraph":
+      return slopegraphOption(result);
+    case "hexbin":
+      return hexbinOption(result);
+    case "polar_line":
+    case "rose":
+      return polarOption(result, result.spec.type);
   }
+}
+
+
+// ============================================================================
+// stage 19 family. Every builder below draws exactly the numbers the backend
+// sent (densities, intervals, aggregates, hex counts) with custom / bar /
+// line / scatter series; nothing is re-aggregated here. Category order is the
+// backend's (ChartSpec.sort).
+// ============================================================================
+
+const catAxis = (data: string[], name: string) => ({
+  ...axisBase,
+  type: "category" as const,
+  data,
+  ...xAxisName(name),
+  axisLabel: { ...axisBase.axisLabel, interval: 0, rotate: data.length > BAR_LABEL_ROTATE_FROM ? 30 : 0 },
+  splitLine: { show: false },
+});
+const valAxis = (name: string) => ({ ...axisBase, type: "value" as const, scale: true, ...yAxisName(name) });
+
+// --- violin / raincloud / ridgeline -------------------------------------------
+
+const DENSITY_HALF_WIDTH = 0.42; // category units: two half-violins never touch
+const RIDGE_HEIGHT = 1.35; // ridge peak in row units (rows are 1 apart, so ridges overlap a little)
+// deterministic pseudo-jitter in [-1, 1) from the point index
+export const jitter = (k: number): number => (((k * 9301 + 49297) % 233280) / 233280) * 2 - 1;
+
+function summaryGlyph(api: CustomSeriesRenderItemAPI, at: number, g: BoxGroup, halfWidth: number) {
+  const [x0, yq1] = api.coord([at - halfWidth, stat(g.q1)]);
+  const [x1, yq3] = api.coord([at + halfWidth, stat(g.q3)]);
+  const [xm, ymed] = api.coord([at, stat(g.median)]);
+  const [, ylo] = api.coord([at, stat(g.lower_fence)]);
+  const [, yhi] = api.coord([at, stat(g.upper_fence)]);
+  return {
+    type: "group" as const,
+    children: [
+      { type: "line" as const, shape: { x1: xm, y1: yhi, x2: xm, y2: ylo }, style: { stroke: COLORS.text, lineWidth: 1, opacity: 0.7 } },
+      { type: "rect" as const, shape: { x: x0, y: yq3, width: x1 - x0, height: yq1 - yq3 }, style: { fill: COLORS.elevated, stroke: COLORS.text, lineWidth: 1 } },
+      { type: "line" as const, shape: { x1: x0, y1: ymed, x2: x1, y2: ymed }, style: { stroke: COLORS.text, lineWidth: 2 } },
+    ],
+  };
+}
+
+export function densityOption(result: RenderResult, kind: "violin" | "raincloud" | "ridgeline"): VizOption {
+  const d = result.chart_data as DensityChartData;
+  const groups = d.groups;
+  const names = groups.map((g) => g.name);
+  const grid = d.grid;
+  const ridge = kind === "ridgeline";
+  const tooltipFor = (g: BoxGroup) =>
+    `${g.name}<br/>median: ${fmt(g.median)} · Q1 ${fmt(g.q1)} · Q3 ${fmt(g.q3)}<br/>mean: ${fmt(g.mean)} · n=${g.count}`;
+  // the value axis must span the data (grid + whiskers): a custom series
+  // carries no values ECharts could scale from, so the extent is explicit —
+  // verifier round 1 found the axis auto-scaled to the group indices
+  // the grid already spans the observed values; Tukey fences may lie far
+  // outside the data (a count's lower fence is negative), so they only widen
+  // the axis up to the observed extremes of the box statistics (verifier r2)
+  const stats = groups.flatMap((g) => [g.q1, g.q3, g.median]).filter((v): v is number => v !== null);
+  const lo = Math.min(grid[0] ?? 0, ...stats);
+  const hi = Math.max(grid[grid.length - 1] ?? 1, ...stats);
+  const pad = (hi - lo || 1) * 0.06;
+  const valueExtent = { min: lo - pad, max: hi + pad };
+  const density: CustomSeriesOption = {
+    type: "custom",
+    name: d.y_label,
+    // [group index, value lo, value hi]: the datum spans the data range so
+    // the axis extent is right even before the explicit min / max
+    data: groups.map((_, i) => [i, lo, hi]),
+    renderItem: (_params, api) => {
+      const i = api.value(0) as number;
+      const g = groups[i];
+      const color = PALETTE[i % PALETTE.length];
+      if (ridge) {
+        // baseline on the group's row, the curve rising up to RIDGE_HEIGHT rows
+        const pts = grid.map((v, k) => api.coord([v, i + g.density[k] * RIDGE_HEIGHT]));
+        const base = api.coord([grid[0], i]);
+        const end = api.coord([grid[grid.length - 1], i]);
+        return {
+          type: "polygon" as const,
+          shape: { points: [base, ...pts, end] },
+          style: { fill: color, opacity: 0.6, stroke: color, lineWidth: 1 },
+          z2: groups.length - i, // front rows overlap the ones behind
+        };
+      }
+      const right = grid.map((y, k) => api.coord([i + g.density[k] * DENSITY_HALF_WIDTH, y]));
+      const left = grid.map((y, k) => api.coord([kind === "raincloud" ? i : i - g.density[k] * DENSITY_HALF_WIDTH, y]));
+      return {
+        type: "polygon" as const,
+        shape: { points: [...right, ...left.reverse()] },
+        style: { fill: color, opacity: kind === "raincloud" ? 0.55 : 0.5, stroke: color, lineWidth: 1 },
+      };
+    },
+    encode: ridge ? { x: [1, 2], y: 0 } : { x: 0, y: [1, 2] },
+    tooltip: {
+      formatter: (p) => {
+        const item = Array.isArray(p) ? p[0] : p;
+        return tooltipFor(groups[(item.value as number[])[0]]);
+      },
+    },
+    clip: true,
+  };
+  const series: (CustomSeriesOption | ScatterSeriesOption)[] = [density];
+  if (!ridge) {
+    const offset = kind === "raincloud" ? -0.1 : 0;
+    series.push({
+      type: "custom",
+      name: "summary",
+      data: groups.map((_, i) => [i, lo, hi]),
+      renderItem: (_params, api) => summaryGlyph(api, (api.value(0) as number) + offset, groups[api.value(0) as number], kind === "raincloud" ? 0.06 : 0.05),
+      encode: { x: 0, y: [1, 2] },
+      tooltip: {
+        formatter: (p) => {
+          const item = Array.isArray(p) ? p[0] : p;
+          return tooltipFor(groups[(item.value as number[])[0]]);
+        },
+      },
+      z: 3,
+    });
+  }
+  if (kind === "raincloud") {
+    // the "rain": the backend's point sample, jittered left of the half-violin
+    const rain: [number, number][] = [];
+    groups.forEach((g, i) => (g.points ?? []).forEach((v, k) => rain.push([i - 0.2 - 0.15 * jitter(k), v])));
+    series.push({
+      type: "scatter",
+      name: "points",
+      data: rain,
+      symbolSize: 3,
+      itemStyle: { color: COLORS.muted, opacity: 0.55 },
+      tooltip: { show: false },
+      z: 2,
+    });
+  }
+  const xName = result.spec.x ?? "";
+  return {
+    ...baseOption(result, false, false),
+    tooltip: { ...tooltipBase, trigger: "item" },
+    xAxis: ridge
+      ? { ...axisBase, type: "value", ...valueExtent, ...xAxisName(d.y_label) }
+      : { ...axisBase, type: "value", min: -0.6, max: groups.length - 0.4, interval: 1, axisLabel: { ...axisBase.axisLabel, formatter: (v: number) => names[Math.round(v)] ?? "" }, splitLine: { show: false }, ...xAxisName(xName), nameGap: 34 },
+    yAxis: ridge
+      ? { ...axisBase, type: "value", min: -0.2, max: groups.length - 1 + RIDGE_HEIGHT, interval: 1, axisLabel: { ...axisBase.axisLabel, formatter: (v: number) => names[Math.round(v)] ?? "" }, splitLine: { show: false }, ...yAxisName(xName) }
+      : { ...valAxis(d.y_label), ...valueExtent },
+    series,
+  };
+}
+
+// --- dot_interval ------------------------------------------------------------
+
+export function dotIntervalOption(result: RenderResult): VizOption {
+  const d = result.chart_data as DotIntervalChartData;
+  const names = d.groups.map((g) => g.name);
+  const interval: CustomSeriesOption = {
+    type: "custom",
+    name: "95% interval",
+    data: d.groups.map((g, i) => [i, stat(g.lo), stat(g.hi)]),
+    renderItem: (_params, api) => {
+      const i = api.value(0) as number;
+      const lo = api.value(1) as number;
+      const hi = api.value(2) as number;
+      if (Number.isNaN(lo) || Number.isNaN(hi)) return undefined;
+      const [x, y0] = api.coord([i, lo]);
+      const [, y1] = api.coord([i, hi]);
+      const cap = 5;
+      return {
+        type: "group" as const,
+        children: [
+          { type: "line" as const, shape: { x1: x, y1: y0, x2: x, y2: y1 }, style: { stroke: PALETTE[0], lineWidth: 1.5 } },
+          { type: "line" as const, shape: { x1: x - cap, y1: y0, x2: x + cap, y2: y0 }, style: { stroke: PALETTE[0], lineWidth: 1.5 } },
+          { type: "line" as const, shape: { x1: x - cap, y1: y1, x2: x + cap, y2: y1 }, style: { stroke: PALETTE[0], lineWidth: 1.5 } },
+        ],
+      };
+    },
+    encode: { x: 0, y: [1, 2] },
+    tooltip: { show: false },
+  };
+  const dots: ScatterSeriesOption = {
+    type: "scatter",
+    name: d.y_label,
+    data: d.groups.map((g, i) => [i, g.mean] as [number, number | null]),
+    symbolSize: 9,
+    itemStyle: { color: PALETTE[0] },
+    z: 3,
+  };
+  return {
+    ...baseOption(result, false, false),
+    tooltip: {
+      ...tooltipBase,
+      trigger: "item",
+      formatter: (p) => {
+        const item = Array.isArray(p) ? p[0] : p;
+        const g = d.groups[item.dataIndex];
+        return `${g.name}<br/>mean: ${fmt(g.mean)}<br/>95% interval: ${fmt(g.lo)} – ${fmt(g.hi)} · n=${g.n}`;
+      },
+    },
+    xAxis: catAxis(names, result.spec.x ?? ""),
+    yAxis: valAxis(d.y_label),
+    series: [interval, dots],
+  };
+}
+
+// --- lollipop -----------------------------------------------------------------
+
+export function lollipopOption(result: RenderResult): VizOption {
+  const d = result.chart_data as BarChartData;
+  const order = barOrder(d, result.spec.sort);
+  const categories = order.map((i) => String(d.categories[i]));
+  // many categories read better horizontally: categories down the y axis
+  const horizontal = categories.length > BAR_LABEL_ROTATE_FROM;
+  const series: (BarSeriesOption | ScatterSeriesOption)[] = [];
+  d.series.forEach((s, k) => {
+    const values = order.map((i) => s.values[i] ?? null);
+    series.push({
+      type: "bar",
+      name: s.name,
+      data: values,
+      barWidth: 2,
+      barGap: "150%",
+      itemStyle: { color: PALETTE[k % PALETTE.length], opacity: 0.7 },
+      tooltip: { show: false },
+    });
+    series.push({
+      type: "scatter",
+      name: s.name,
+      data: values.map((v, i) => (horizontal ? [v, i] : [i, v])) as [number | null, number | null][],
+      symbolSize: 10,
+      itemStyle: { color: PALETTE[k % PALETTE.length] },
+      z: 3,
+    });
+  });
+  const cat = { ...catAxis(categories, result.spec.x ?? ""), axisLabel: { ...axisBase.axisLabel, interval: 0, rotate: 0 } };
+  const val = { ...axisBase, type: "value" as const, ...yAxisName(d.y_label) };
+  return {
+    ...baseOption(result, false, d.series.length > 1),
+    tooltip: { ...tooltipBase, trigger: "axis", axisPointer: { type: "shadow" }, valueFormatter: tooltipValue },
+    xAxis: horizontal ? { ...val, ...xAxisName(d.y_label), nameLocation: "middle", nameGap: 28, nameTextStyle: axisBase.nameTextStyle } : cat,
+    yAxis: horizontal ? { ...cat, ...yAxisName(result.spec.x ?? ""), inverse: true } : val,
+    series,
+  };
+}
+
+// --- dumbbell / slopegraph ------------------------------------------------------
+
+export function dumbbellOption(result: RenderResult): VizOption {
+  const d = result.chart_data as TwoStateChartData;
+  const [a, b] = d.series;
+  const connector: CustomSeriesOption = {
+    type: "custom",
+    name: "change",
+    data: d.categories.map((_, i) => [i, stat(a.values[i] ?? null), stat(b.values[i] ?? null)]),
+    renderItem: (_params, api) => {
+      const i = api.value(0) as number;
+      const va = api.value(1) as number;
+      const vb = api.value(2) as number;
+      if (Number.isNaN(va) || Number.isNaN(vb)) return undefined;
+      const [x, ya] = api.coord([i, va]);
+      const [, yb] = api.coord([i, vb]);
+      return { type: "line" as const, shape: { x1: x, y1: ya, x2: x, y2: yb }, style: { stroke: COLORS.muted, lineWidth: 2, opacity: 0.8 } };
+    },
+    encode: { x: 0, y: [1, 2] },
+    tooltip: { show: false },
+  };
+  const dots = d.series.map(
+    (s, k): ScatterSeriesOption => ({
+      type: "scatter",
+      name: s.name,
+      data: s.values.map((v, i) => [i, v] as [number, number | null]),
+      symbolSize: 10,
+      itemStyle: { color: PALETTE[k % PALETTE.length] },
+      z: 3,
+    }),
+  );
+  return {
+    ...baseOption(result, false, true),
+    tooltip: {
+      ...tooltipBase,
+      trigger: "axis",
+      axisPointer: { type: "shadow" },
+      formatter: (p) => {
+        const items = (Array.isArray(p) ? p : [p]).filter((it) => it.seriesType === "scatter");
+        if (items.length === 0) return "";
+        const i = items[0].dataIndex;
+        const lines = d.series.map((s) => `${s.name}: ${fmt(s.values[i])}`);
+        const va = a.values[i];
+        const vb = b.values[i];
+        const delta = va !== null && vb !== null ? `<br/>Δ ${fmt(vb - va)}` : "";
+        return `${d.categories[i]}<br/>${lines.join("<br/>")}${delta}`;
+      },
+    },
+    xAxis: catAxis(d.categories, result.spec.x ?? ""),
+    yAxis: valAxis(d.y_label),
+    series: [connector, ...dots],
+  };
+}
+
+export function slopegraphOption(result: RenderResult): VizOption {
+  const d = result.chart_data as TwoStateChartData;
+  // one line per category between the two states; the value labels sit at
+  // both ends so the graph reads without a tooltip
+  const series: LineSeriesOption[] = d.categories.map((c, i) => ({
+    type: "line",
+    name: c,
+    data: d.series.map((s) => s.values[i] ?? null),
+    symbolSize: 7,
+    lineStyle: { width: 1.75 },
+    emphasis: { focus: "series", lineStyle: { width: 3 } },
+    endLabel: { show: true, formatter: (p) => `${c} ${fmt(p.value as number)}`, color: COLORS.muted, fontSize: 11, distance: 8 },
+    label: { show: false },
+  }));
+  return {
+    ...baseOption(result, false, false),
+    grid: { ...grid, right: 120 },
+    tooltip: {
+      ...tooltipBase,
+      trigger: "axis",
+      formatter: (p) => {
+        const items = Array.isArray(p) ? p : [p];
+        const state = d.states[items[0].dataIndex];
+        return `${state}<br/>` + items.map((it) => `${it.seriesName}: ${fmt(it.value as number)}`).join("<br/>");
+      },
+    },
+    xAxis: { ...axisBase, type: "category", data: d.states, boundaryGap: false, ...xAxisName(result.spec.group_by ?? ""), splitLine: { show: true, lineStyle: { color: COLORS.axisLine } } },
+    yAxis: valAxis(d.y_label),
+    series,
+  };
+}
+
+// --- hexbin ---------------------------------------------------------------------
+
+export function hexbinOption(result: RenderResult): VizOption {
+  const d = result.chart_data as HexbinChartData;
+  const [xLo] = d.x_range;
+  const [yLo] = d.y_range;
+  const counts = d.cells.map((c) => c[2]);
+  const max = counts.length ? Math.max(...counts) : 1;
+  // cell centre in data space from the offset coordinates the backend used
+  const centre = (col: number, row: number): [number, number] => [
+    xLo + (col + 0.5) * d.dx + (row % 2 === 1 ? d.dx / 2 : 0),
+    yLo + row * d.dy * 0.75 + d.dy / 2,
+  ];
+  const hexes: CustomSeriesOption = {
+    type: "custom",
+    name: "count",
+    data: d.cells.map(([col, row, count]) => [...centre(col, row), count]),
+    renderItem: (_params, api) => {
+      const cx = api.value(0) as number;
+      const cy = api.value(1) as number;
+      const [px, py] = api.coord([cx, cy]);
+      // regular pointy-top hexagons tessellate when the circumradius is the
+      // horizontal centre spacing / √3 (verifier N5: half the spacing left gaps)
+      const [px2] = api.coord([cx + d.dx, cy]);
+      const r = Math.max((px2 - px) / Math.sqrt(3), 1.5);
+      const points: number[][] = [];
+      for (let k = 0; k < 6; k++) {
+        const angle = (Math.PI / 6) * (2 * k + 1); // pointy-top
+        points.push([px + r * Math.cos(angle), py - r * Math.sin(angle)]);
+      }
+      return { type: "polygon" as const, shape: { points }, style: { fill: api.visual("color") as string, opacity: 0.9 } };
+    },
+    encode: { x: 0, y: 1, tooltip: 2 },
+    clip: true,
+  };
+  return {
+    ...baseOption(result, true, false),
+    grid: gridWithVisualMap,
+    tooltip: {
+      ...tooltipBase,
+      trigger: "item",
+      formatter: (p) => {
+        const item = Array.isArray(p) ? p[0] : p;
+        const [cx, cy, count] = item.value as [number, number, number];
+        return `${result.spec.x}: ≈ ${formatNumber(cx)}<br/>${result.spec.y}: ≈ ${formatNumber(cy)}<br/>count: ${count}`;
+      },
+    },
+    xAxis: { ...axisBase, type: "value", scale: true, ...xAxisName(result.spec.x ?? "") },
+    yAxis: { ...axisBase, type: "value", scale: true, ...yAxisName(d.y_label) },
+    visualMap: {
+      type: "continuous",
+      dimension: 2,
+      min: 1,
+      max,
+      calculable: false,
+      orient: "vertical",
+      right: 8,
+      top: "middle",
+      itemHeight: 140,
+      itemWidth: 12,
+      text: [String(max), "1"],
+      inRange: { color: SEQUENTIAL },
+      textStyle: { color: COLORS.muted, fontSize: 11 },
+    },
+    dataZoom: dataZoomInside(["x", "y"]),
+    series: [hexes],
+  };
+}
+
+// --- polar_line / rose ---------------------------------------------------------------
+
+export function polarOption(result: RenderResult, kind: "polar_line" | "rose"): VizOption {
+  const d = result.chart_data as BarChartData;
+  const order = barOrder(d, result.spec.sort);
+  const categories = order.map((i) => String(d.categories[i]));
+  const series = d.series.map((s, k): LineSeriesOption | BarSeriesOption =>
+    kind === "rose"
+      ? {
+          type: "bar",
+          name: s.name,
+          coordinateSystem: "polar",
+          data: order.map((i) => s.values[i] ?? null),
+          itemStyle: { color: PALETTE[k % PALETTE.length], opacity: 0.85 },
+          emphasis: { itemStyle: { opacity: 1 } },
+        }
+      : {
+          type: "line",
+          name: s.name,
+          coordinateSystem: "polar",
+          data: order.map((i) => s.values[i] ?? null),
+          symbolSize: 5,
+          lineStyle: { width: 1.5 },
+          areaStyle: { opacity: 0.12 },
+          itemStyle: { color: PALETTE[k % PALETTE.length] },
+          connectNulls: false,
+        },
+  );
+  return {
+    ...baseOption(result, false, d.series.length > 1),
+    grid: undefined,
+    tooltip: { ...tooltipBase, trigger: "axis", valueFormatter: (v) => `${tooltipValue(v)} (${d.y_label})` },
+    polar: { center: ["50%", "54%"], radius: ["12%", "72%"] },
+    // clockwise from the top, like a clock face or a calendar
+    angleAxis: { type: "category", data: categories, startAngle: 90, clockwise: true, boundaryGap: kind === "rose", axisLine: { lineStyle: { color: COLORS.axisLine } }, axisTick: { show: false }, axisLabel: { color: COLORS.muted, fontSize: 11 }, splitLine: { show: true, lineStyle: { color: COLORS.splitLine } } },
+    // no radial-axis name: it would sit on the 12 o'clock label (verifier N6);
+    // the measure is named by the tooltip and the panel
+    radiusAxis: { type: "value", axisLine: { show: false }, axisTick: { show: false }, axisLabel: { color: COLORS.muted, fontSize: 10 }, splitLine: { lineStyle: { color: COLORS.splitLine } }, z: 5 },
+    series,
+  };
 }

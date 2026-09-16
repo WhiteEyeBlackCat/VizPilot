@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { ApiError } from "../api";
 import type { ExploreField, ExploreForm, FieldUpdate } from "../store";
-import type { Aggregation, ChartSpec, ChartType, ColumnProfile, DatasetProfile } from "../types";
+import { CHART_TYPES, type Aggregation, type ChartSpec, type ChartType, type ColumnProfile, type DatasetProfile } from "../types";
 import { ErrorList } from "./ErrorList";
 import { FieldSelect } from "./FieldSelect";
 import { Button } from "@/components/ui/button";
@@ -16,7 +16,10 @@ interface Props {
   onGenerate: (spec: ChartSpec) => Promise<void>;
 }
 
-const CHART_TYPES: ChartType[] = ["line", "bar", "scatter", "histogram", "box", "heatmap"];
+// which types take an aggregation / a group column (mirrors backend spec.py)
+const AGG_TYPES: ChartType[] = ["line", "bar", "lollipop", "polar_line", "rose", "dumbbell", "slopegraph"];
+const BAR_LIKE: ChartType[] = ["bar", "lollipop", "polar_line", "rose"];
+const GROUP_TYPES: ChartType[] = ["line", "bar", "scatter", "histogram", "lollipop", "dumbbell", "slopegraph"];
 const AGGREGATIONS: Aggregation[] = ["mean", "sum", "count", "median", "min", "max"];
 const NUMERIC_DTYPE = /^(U?Int|Float)\d+$/;
 
@@ -49,32 +52,57 @@ export function ManualBuilder({ profile, form, onField, onGenerate }: Props) {
       (c) => c.semantic_type === "categorical" || c.semantic_type === "boolean",
     );
     const groupable = categorical.filter((c) => (c.n_categories ?? c.unique_count) <= 20);
-    const boxX = categorical.filter((c) => {
-      const n = c.n_categories ?? c.unique_count;
-      return n >= 2 && n <= 50;
-    });
-    return {
-      x: {
-        line: names([...datetime, ...numeric]),
-        bar: names(categorical),
-        scatter: names(numeric),
-        histogram: names(numeric),
-        box: names(boxX),
-        heatmap: [] as string[],
-      }[type],
-      y: {
-        line: names(numericY),
-        bar: names(numericY),
-        scatter: names(numeric),
-        histogram: [] as string[],
-        box: names(numericY),
-        heatmap: [] as string[],
-      }[type],
-      group: type === "box" || type === "heatmap" ? [] : names(groupable),
+    const cats = (lo: number, hi: number) =>
+      categorical.filter((c) => {
+        const n = c.n_categories ?? c.unique_count;
+        return n >= lo && n <= hi;
+      });
+    const boxX = cats(2, 50);
+    const twoState = cats(2, 2);
+    // stage 19: the field matrix per type mirrors backend validate_spec; the
+    // ordered / cyclic role of a category (line over month, rose over hour) is
+    // the backend's call — its 422 message says so when a column has none
+    const xByType: Record<ChartType, string[]> = {
+      line: names([...datetime, ...numeric, ...groupable]),
+      bar: names(categorical),
+      scatter: names(numeric),
+      histogram: names(numeric),
+      box: names(boxX),
+      heatmap: [],
+      violin: names(boxX),
+      raincloud: names(cats(2, 8)),
+      ridgeline: names(cats(2, 12)),
+      dot_interval: names(boxX),
+      lollipop: names(categorical),
+      dumbbell: names(boxX),
+      slopegraph: names(cats(2, 8)),
+      hexbin: names(numeric),
+      polar_line: names([...groupable, ...numeric]),
+      rose: names([...groupable, ...numeric]),
     };
+    const yByType: Record<ChartType, string[]> = {
+      line: names(numericY),
+      bar: names(numericY),
+      scatter: names(numeric),
+      histogram: [],
+      box: names(numericY),
+      heatmap: [],
+      violin: names(numericY),
+      raincloud: names(numericY),
+      ridgeline: names(numericY),
+      dot_interval: names(numericY),
+      lollipop: names(numericY),
+      dumbbell: names(numericY),
+      slopegraph: names(numericY),
+      hexbin: names(numeric),
+      polar_line: names(numericY),
+      rose: names(numericY),
+    };
+    const groupChoices = type === "dumbbell" || type === "slopegraph" ? names(twoState) : GROUP_TYPES.includes(type) ? names(groupable) : [];
+    return { x: xByType[type], y: yByType[type], group: groupChoices };
   }, [cols, type]);
 
-  const showAgg = type === "line" || type === "bar";
+  const showAgg = AGG_TYPES.includes(type);
 
   // axes must be pairwise distinct (stage3 validation): hide already-picked
   // columns from the other selects instead of round-tripping a 422
@@ -97,9 +125,14 @@ export function ManualBuilder({ profile, form, onField, onGenerate }: Props) {
   // aggregation prefill (stage6 blocking #2): group_by, or a line x with
   // duplicate values (long-format data), requires an aggregation upstream
   useEffect(() => {
-    if (type === "bar") {
+    if (BAR_LIKE.includes(type)) {
       if (!y) setAgg("count");
+      else if (type === "rose") setAgg((prev) => (prev === "sum" || prev === "count" ? prev : "sum")); // a rose is a magnitude
       else setAgg((prev) => (prev && prev !== "count" ? prev : "mean"));
+      return;
+    }
+    if (type === "dumbbell" || type === "slopegraph") {
+      setAgg((prev) => prev || "mean");
       return;
     }
     if (type !== "line") return;
@@ -148,7 +181,7 @@ export function ManualBuilder({ profile, form, onField, onGenerate }: Props) {
             value={agg}
             onChange={setAgg}
             choices={AGGREGATIONS}
-            disabled={type === "bar" && !y}
+            disabled={BAR_LIKE.includes(type) && !y}
           />
         )}
         <Button size="sm" className="h-8" disabled={busy} onClick={() => void generate()}>

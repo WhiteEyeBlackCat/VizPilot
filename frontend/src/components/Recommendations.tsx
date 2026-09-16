@@ -13,6 +13,7 @@ import type {
 } from "../types";
 import { ErrorList } from "./ErrorList";
 import { InsightList } from "./InsightList";
+import { INTENT_LABEL } from "./intentLabels";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge, type BadgeVariant } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -178,6 +179,11 @@ export function Recommendations({
         {warningChips(rec.warnings)}
         <div className="mt-auto flex flex-wrap items-center gap-x-2 gap-y-1 pt-1 text-xs text-muted-foreground/90">
           <span data-chart-meta>{chartMeta(rec.spec)}</span>
+          {rec.intent && (
+            <span className="text-info/90" data-card-intent={rec.intent}>
+              {INTENT_LABEL[rec.intent] ?? rec.intent}
+            </span>
+          )}
           {rec.confidence && rec.confidence.overall < 1 && (
             <Tooltip>
               <TooltipTrigger asChild>

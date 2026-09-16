@@ -24,6 +24,7 @@ from pydantic import ValidationError
 
 from ..charts.confidence import Warning, excluded_column_warnings, with_caution
 from ..charts.rules import (
+    select_for_spec,
     TOP_SCORE_FLOOR,
     Recommendation,
     Tier,
@@ -365,6 +366,9 @@ class _Merger:
         if errors:
             logger.warning("dropping LLM chart '%s': %s", spec.title, "; ".join(errors))
             return None
+        # stage 19: the suggested type is a hint — the intent of the finding
+        # (roles + evidence) picks the chart; the LLM never needs the inventory
+        spec, alternatives, intent = select_for_spec(spec, self.profile)
 
         score, level = evaluate_llm_spec(spec, self.profile)
         key = _key(spec)
@@ -386,7 +390,7 @@ class _Merger:
                 if level == "unverified":
                     note = f" ({UNVERIFIED_NOTE})"
                     spec.reason = (spec.reason + note) if spec.reason else UNVERIFIED_NOTE
-                rec = Recommendation(spec=spec, score=score, source="llm", tier_cap=_TIER_CAP[level])
+                rec = Recommendation(spec=spec, score=score, source="llm", tier_cap=_TIER_CAP[level], intent=intent, alternatives=alternatives)
                 apply_confidence([rec], self.profile)  # same chain as the rules charts
                 apply_derived_caps([rec], self.profile)
                 if substitutions:

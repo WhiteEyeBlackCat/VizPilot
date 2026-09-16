@@ -184,7 +184,9 @@ def _healthy_df(n: int = 600) -> pl.DataFrame:
 def test_healthy_dataset_has_all_factors_one_and_no_warnings() -> None:
     profile = _profile(_healthy_df())
     recs = recommend_charts(profile)
-    assert {r.spec.type for r in recs} >= {"bar", "box", "scatter", "line", "histogram", "heatmap"}
+    # stage 19: bar + box of one pair collapsed into one finding (box is an alternative)
+    assert {r.spec.type for r in recs} >= {"bar", "scatter", "line", "histogram", "heatmap"}
+    assert any(a.type == "box" for r in recs for a in r.alternatives)
     for rec in recs:
         assert rec.confidence.overall == 1.0
         assert rec.confidence.n_source == "exact"

@@ -74,9 +74,47 @@ export interface DatasetProfile {
   evidence?: Evidence;
 }
 
-export type ChartType = "line" | "bar" | "scatter" | "histogram" | "box" | "heatmap";
+// the six original types plus the stage-19 family (backend charts/spec.py)
+export type ChartType =
+  | "line"
+  | "bar"
+  | "scatter"
+  | "histogram"
+  | "box"
+  | "heatmap"
+  | "violin"
+  | "raincloud"
+  | "ridgeline"
+  | "dot_interval"
+  | "lollipop"
+  | "dumbbell"
+  | "slopegraph"
+  | "hexbin"
+  | "polar_line"
+  | "rose";
+export const CHART_TYPES: ChartType[] = [
+  "line",
+  "bar",
+  "scatter",
+  "histogram",
+  "box",
+  "heatmap",
+  "violin",
+  "raincloud",
+  "ridgeline",
+  "dot_interval",
+  "lollipop",
+  "dumbbell",
+  "slopegraph",
+  "hexbin",
+  "polar_line",
+  "rose",
+];
 export type Aggregation = "mean" | "sum" | "count" | "median" | "min" | "max";
 export type TimeGranularity = "raw" | "day" | "week" | "month";
+/** category order on a category axis (stage 19): the column's natural order
+ *  or ranked by value; null = backend default (ordered roles natural, else ranked) */
+export type SortOrder = "natural" | "value";
 
 export interface ChartSpec {
   title: string;
@@ -88,9 +126,24 @@ export interface ChartSpec {
   bins?: number | null;
   time_granularity?: TimeGranularity | null;
   top_n?: number | null;
+  sort?: SortOrder | null; // stage 19, additive
   reason?: string;
   priority?: number;
 }
+
+/** Why a chart family was chosen (backend charts/intent.py); additive. */
+export type VisualizationIntent =
+  | "trend"
+  | "distribution"
+  | "distribution_by_group"
+  | "group_comparison"
+  | "ranking"
+  | "numeric_relationship"
+  | "cyclic_pattern"
+  | "matrix_pattern"
+  | "two_state_comparison"
+  | "composition"
+  | "flow";
 
 export type Tier = "top" | "secondary" | "exploratory";
 export type Supported = "strong" | "weak" | "unverified";
@@ -124,6 +177,10 @@ export interface Recommendation {
   tier: Tier;
   confidence?: Confidence | null;
   warnings?: Warning[];
+  /** stage 19 (additive): the analytical intent behind the chart and the
+   *  other eligible charts of the same finding (the card shows the preferred) */
+  intent?: VisualizationIntent | null;
+  alternatives?: ChartSpec[];
 }
 
 /** Backend measurement behind an insight (stage 17.3; additive). The label
@@ -206,6 +263,59 @@ export interface HeatmapChartData {
   columns: string[];
   matrix: (number | null)[][];
   y_label: string;
+  /** stage 19 matrix pattern (x × group_by → aggregate): the row labels;
+   *  absent for the correlation matrix (rows == columns) */
+  rows?: string[];
+}
+
+// --- stage 19 payloads (backend charts/render.py) --------------------------
+
+/** violin / raincloud / ridgeline: one normalised density per group over a
+ *  shared grid plus the box statistics; raincloud carries sampled points */
+export interface DensityGroup extends BoxGroup {
+  density: number[]; // peak-normalised to 1, one value per grid centre
+  bandwidth: number;
+  points?: number[];
+}
+
+export interface DensityChartData {
+  groups: DensityGroup[];
+  grid: number[];
+  y_label: string;
+}
+
+export interface DotIntervalGroup {
+  name: string;
+  mean: number | null;
+  lo: number | null;
+  hi: number | null;
+  n: number;
+}
+
+export interface DotIntervalChartData {
+  groups: DotIntervalGroup[];
+  y_label: string;
+}
+
+/** dumbbell / slopegraph: aggregate per category for exactly two states */
+export interface TwoStateChartData {
+  categories: string[];
+  states: string[];
+  series: { name: string; values: (number | null)[] }[];
+  y_label: string;
+}
+
+/** hexbin: [column, row, count] cells in offset coordinates over the ranges */
+export interface HexbinChartData {
+  cells: [number, number, number][];
+  x_range: [number, number];
+  y_range: [number, number];
+  dx: number;
+  dy: number;
+  columns: number;
+  rows: number;
+  n: number;
+  y_label: string;
 }
 
 export type ChartData =
@@ -213,7 +323,11 @@ export type ChartData =
   | BarChartData
   | HistogramChartData
   | BoxChartData
-  | HeatmapChartData;
+  | HeatmapChartData
+  | DensityChartData
+  | DotIntervalChartData
+  | TwoStateChartData
+  | HexbinChartData;
 
 // Stage 9: histogram over a sentinel-laden column is binned over the robust
 // range; the rows outside it are counted here, never dropped silently

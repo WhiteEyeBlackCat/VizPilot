@@ -6,6 +6,7 @@ import { hideAllTips } from "../charts/echarts/EChartsView";
 import { COLORS } from "../charts/echarts/theme";
 import type { Preview } from "../store";
 import type { ChartSpec, Recommendation, Warning, WarningSeverity } from "../types";
+import { INTENT_LABEL } from "./intentLabels";
 import { ChartView } from "./ChartView";
 import { evidenceRows } from "./InsightList";
 import { specRows } from "./Recommendations";
@@ -30,6 +31,8 @@ interface Props {
   onClose: () => void;
   onSave: () => void;
   onRemove: () => void;
+  /** stage 19: render another eligible chart of the same finding into the panel */
+  onPreviewSpec?: (spec: ChartSpec) => Promise<void>;
 }
 
 const WARNING_VARIANT: Record<WarningSeverity, BadgeVariant> = {
@@ -74,7 +77,7 @@ function safeFileName(title: string): string {
  *  Explore result, or of a saved workspace chart — with the analysis that
  *  goes with it (stage 18: analysis detail panel). Save is the only way a
  *  chart enters the workspace. */
-export function PreviewPanel({ preview, saved, variant, mode, open, onToggle, onClose, onSave, onRemove }: Props) {
+export function PreviewPanel({ preview, saved, variant, mode, open, onToggle, onClose, onSave, onRemove, onPreviewSpec }: Props) {
   const [rootRef, root] = useElementSize<HTMLElement>();
   const [enlarged, setEnlarged] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
@@ -95,6 +98,11 @@ export function PreviewPanel({ preview, saved, variant, mode, open, onToggle, on
   // the full finding: an insight's text, or the legacy insightText of a
   // saved chart from before stage 18
   const detailText = insight ? insight.text : (insightText ?? null);
+  // stage 19: the other eligible charts of this finding (the recommendation
+  // lists them; the one on screen may itself be an alternative)
+  const family = rec ? [rec.spec, ...(rec.alternatives ?? [])] : [];
+  const alternatives = family.filter((alt) => alt.type !== spec.type || alt.x !== spec.x || alt.y !== spec.y || alt.group_by !== spec.group_by);
+  const intentLabel = rec?.intent ? INTENT_LABEL[rec.intent] ?? rec.intent : null;
 
   const chartInstance = () => {
     const host = chartHostRef.current?.querySelector<HTMLDivElement>("[data-chart-view]");
@@ -155,6 +163,11 @@ export function PreviewPanel({ preview, saved, variant, mode, open, onToggle, on
         <Badge variant="muted" className="font-normal">
           {spec.type}
         </Badge>
+        {intentLabel && (
+          <Badge variant="info" className="hidden font-normal sm:inline-flex" data-preview-intent={rec?.intent}>
+            {intentLabel}
+          </Badge>
+        )}
         {rec?.source === "llm" && (
           <Badge variant="accent" className="font-normal">
             AI
@@ -245,6 +258,26 @@ export function PreviewPanel({ preview, saved, variant, mode, open, onToggle, on
                 </ul>
               )}
             </section>
+
+            {alternatives.length > 0 && onPreviewSpec && (
+              <section data-preview-alternatives>
+                <h3 className="mb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Alternative views</h3>
+                <div className="flex flex-wrap gap-1">
+                  {alternatives.map((alt) => (
+                    <Button
+                      key={`${alt.type}-${alt.x}-${alt.y}-${alt.group_by}`}
+                      variant="outline"
+                      size="sm"
+                      className="h-6 px-2 text-xs"
+                      onClick={() => void onPreviewSpec(alt)}
+                      data-alternative={alt.type}
+                    >
+                      {alt.type}
+                    </Button>
+                  ))}
+                </div>
+              </section>
+            )}
 
             <details className="group text-muted-foreground/80" data-preview-technical>
               <summary className="cursor-pointer select-none text-[11px] uppercase tracking-wide hover:text-muted-foreground">

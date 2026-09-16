@@ -90,7 +90,9 @@ def test_valid_specs(profile, kwargs) -> None:
 
 
 def test_line_categorical_x(profile) -> None:
-    _assert_error(profile, "must be datetime or numeric", type="line", x="city", y="value")
+    # stage 19: a nominal category is still no line axis; an ordered one
+    # (month, weekday, level) is — with an aggregation
+    _assert_error(profile, "must be datetime, numeric or an ordered category", type="line", x="city", y="value")
 
 
 def test_line_missing_axes(profile) -> None:
@@ -219,8 +221,10 @@ def test_box_with_aggregation(profile) -> None:
 
 
 def test_heatmap_with_fields(profile) -> None:
-    assert _errors(profile, type="heatmap", x="value") == ["heatmap must not have x"]
-    _assert_error(profile, "must not have aggregation", type="heatmap", aggregation="mean")
+    # stage 19: a partial field set is neither the correlation matrix nor a
+    # full x × group_by matrix of aggregate(y)
+    _assert_error(profile, "either a correlation matrix", type="heatmap", x="value")
+    _assert_error(profile, "either a correlation matrix", type="heatmap", aggregation="mean")
 
 
 def test_heatmap_requires_two_numeric_columns() -> None:

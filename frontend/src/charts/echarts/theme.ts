@@ -50,6 +50,9 @@ export const COLORS = {
 // luminance band that is ≥ 3:1 against the surface AND keeps the near-white
 // cell labels ≥ 3:1 on top of them. (visualMap min/max live in option.ts.)
 export const DIVERGING = ["#3b82f6", "#2a3040", "#ef4444"];
+// sequential scale for counts / aggregates (stage 19 hexbin, matrix
+// heatmap): one step above the surface up to the primary blue
+export const SEQUENTIAL = ["#2a3040", "#1e40af", "#60a5fa", "#dbeafe"];
 
 export const FONT_FAMILY =
   'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans TC", sans-serif';

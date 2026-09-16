@@ -142,6 +142,18 @@ export default function App() {
 
   const previewManual = useCallback((spec: ChartSpec) => previewSpec(spec, { source: "explore" }), [previewSpec]);
 
+  /** Stage 19: another eligible chart of the finding in the panel keeps the
+   *  finding's context (recommendation, insight) and stays a preview. */
+  const previewAlternative = useCallback(
+    (spec: ChartSpec) => {
+      const current = state.preview;
+      if (!current) return Promise.resolve();
+      if (current.source === "explore") return previewSpec(spec, { source: "explore" });
+      return previewSpec(spec, { source: "insight", rec: current.rec, insight: current.insight, insightText: current.insightText });
+    },
+    [previewSpec, state.preview],
+  );
+
   const previewSaved = useCallback(
     (chart: SavedChart) => {
       if (!datasetId) return;
@@ -236,6 +248,7 @@ export default function App() {
       onClose={() => dispatch({ type: "CLOSE_PREVIEW" })}
       onSave={savePreview}
       onRemove={() => preview.savedKey && removeSaved(preview.savedKey)}
+      onPreviewSpec={previewAlternative}
     />
   );
 

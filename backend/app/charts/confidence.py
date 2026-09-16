@@ -374,7 +374,35 @@ def small_group_majority(groups: dict[str, int]) -> tuple[bool, bool]:
 # --- assessment -----------------------------------------------------------------
 
 
+# stage 19: the confidence chain reasons about data usage, which the new
+# chart types share with a classic one (same columns, same aggregation).
+# Mapping them onto their family keeps the D11 formula untouched for the
+# original six and gives the new ones the same treatment.
+_CONFIDENCE_FAMILY: dict[str, str] = {
+    "lollipop": "bar",
+    "polar_line": "bar",
+    "rose": "bar",
+    "dumbbell": "bar",
+    "slopegraph": "bar",
+    "violin": "box",
+    "raincloud": "box",
+    "ridgeline": "box",
+    "dot_interval": "box",
+    "hexbin": "scatter",
+}
+
+
+def _family_spec(spec: ChartSpec) -> ChartSpec:
+    family = _CONFIDENCE_FAMILY.get(spec.type)
+    if spec.type == "heatmap" and spec.x is not None:
+        family = "bar"  # matrix pattern: x × group_by cells of aggregate(y)
+    if family is None:
+        return spec
+    return spec.model_copy(update={"type": family})
+
+
 def assess(spec: ChartSpec, profile: DatasetProfile) -> Assessment:
+    spec = _family_spec(spec)
     view = _View(profile)
     rate, groups, exact = effective_counts(spec, view)
     rate = min(max(rate, 0.0), 1.0)

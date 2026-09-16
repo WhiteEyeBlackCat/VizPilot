@@ -40,7 +40,9 @@ Principle: statistics produce evidence → LLM proposes hypotheses → statistic
 | `datasets/` | HTTP routes (`/api/*`), file loading, dataset store | contain statistics or ranking logic |
 | `profiling/` | `DatasetProfile` and both evidence layers; deterministic, LLM-free | know about charts, tiers, or the LLM |
 | `charts/spec.py` | `ChartSpec` model + validation matrix (shared gate for rules, LLM, manual builder) | be bypassed by any producer |
-| `charts/rules.py` | candidates, evidence scoring, caps, tiers, LLM-spec verification | read raw rows (works on profile only) |
+| `charts/roles.py` | semantic role per column (nominal / ordinal / cyclic / datetime / numeric / boolean) from the profile — no data | read raw rows |
+| `charts/intent.py` | VisualizationIntent classifier + eligible-chart guards + preferred/alternatives selection (pure, deterministic) | know ECharts, read data, call the LLM |
+| `charts/rules.py` | one candidate per finding: roles + evidence → intent → chart (+ alternatives), scoring, caps, tiers, LLM-spec verification (`select_for_spec`) | read raw rows (works on profile only) |
 | `charts/confidence.py` | the single confidence formula, `Warning`/`Confidence` payloads, tier caps | be duplicated elsewhere |
 | `charts/render.py` | aggregate a DataFrame per spec into `RenderResult`; hard point cap; sentinel-aware histogram range | change chart semantics without frontend parity tests |
 | `llm/` | prompt (metadata only), provider abstraction, tolerant parsing, merge with rules | send raw data, produce code, or be required for the app to work |

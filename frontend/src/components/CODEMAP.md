@@ -42,12 +42,13 @@ generated_at: 2026-09-15
 
 | File | Domain | Deps | Function |
 |---|---|---|---|
-| `PreviewPanel.tsx` | Preview | `← ../store.ts, ../types.ts, ../charts/echarts/*, InsightList.tsx, Recommendations.tsx \| → ../App.tsx` | Analysis detail panel (stage 18): header + context line, chart sized to ~64% of the panel, "Why this matters" (insight text / why_it_matters), "Supporting evidence" (effect, n, confidence, warnings), collapsible chart spec, actions row (Save/Remove, Export, Enlarge, Close); enlarge Dialog re-renders the same RenderResult at 70vh. |
+| `PreviewPanel.tsx` | Preview | `← ../store.ts, ../types.ts, ../charts/echarts/*, InsightList.tsx, Recommendations.tsx \| → ../App.tsx` | Analysis detail panel (stage 18): header + context line, chart sized to ~64% of the panel, "Why this matters" (insight text / why_it_matters), "Supporting evidence" (effect, n, confidence, warnings), collapsible chart spec, actions row (Save/Remove, Export, Enlarge, Close); "Alternative views" (stage 19: `rec.alternatives`, rendered through `onPreviewSpec`), intent badge; enlarge Dialog re-renders the same RenderResult at 70vh. |
 | `InsightList.tsx` | Insights | `← ../types.ts \| → Recommendations.tsx, PreviewPanel.tsx` | Key Findings rows: badge + headline (`headline ?? text`, never truncated) as one `aria-expanded` button; expanded detail = full text, why it matters, evidence `dl`, View chart. Weight lead/secondary/compact by `supported`. |
 | `Recommendations.tsx` | Insights | `← ../api.ts, InsightList.tsx \| → ../pages/InsightsPage.tsx, ../pages/WorkspacePage.tsx` | Key Findings section first, then "More charts" (h2) with tier h3s; cards show title, purpose, `type · aggregation`, confidence tooltip, spec tooltip (Info button), Preview; `data-x`/`data-y` for e2e; empty-top honesty text. |
-| `ManualBuilder.tsx` | Explore | `← ../store.ts, ../types.ts, ../api.ts \| → ../pages/ExplorePage.tsx` | Spec form with type-dependent field filters; 422 errors listed. |
+| `ManualBuilder.tsx` | Explore | `← ../store.ts, ../types.ts, ../api.ts \| → ../pages/ExplorePage.tsx` | Spec form for the 16 types with type-dependent field filters (`xByType` / `yByType`, two-state group, aggregation types); 422 errors listed (the cyclic / ordered role checks are the backend's). |
 | `DatasetOverview.tsx` | Overview | `← ../types.ts \| → ../pages/OverviewPage.tsx` | Column table with semantic-type badges and quality flags. |
 | `Sidebar.tsx` | Shell | `← ../store.ts, ../lib/router.ts \| → ../App.tsx` | Page nav + dataset list; hash links. |
 | `UploadPanel.tsx`, `NewDatasetDialog.tsx` | Upload | `← ../api.ts \| → ../App.tsx` | Upload hook/dropzone; modal wrapper. |
 | `ChartView.tsx` | Chart | `← ../charts/echarts/* \| → PreviewPanel.tsx` | `buildOption` + `EChartsView` with height prop and empty state. |
 | `PageHeader.tsx`, `ErrorList.tsx`, `FieldSelect.tsx` | Shared | — | Small shared pieces. |
+| `intentLabels.ts` | Insights | `← ../types.ts \| → Recommendations.tsx, PreviewPanel.tsx` | `INTENT_LABEL`: plain-language label per `VisualizationIntent` (stage 19). |

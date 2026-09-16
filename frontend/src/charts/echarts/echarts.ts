@@ -1,5 +1,6 @@
 // The one place ECharts modules are registered (tree-shaken build): every
-// series type the six ChartSpec types need plus the shared components.
+// series type the ChartSpec types need plus the shared components (the
+// stage-19 family draws with custom / bar / line / scatter series and polar).
 // Import `echarts` from here, never from "echarts" directly.
 
 import {
@@ -22,6 +23,7 @@ import {
   DataZoomComponent,
   GridComponent,
   LegendComponent,
+  PolarComponent,
   TitleComponent,
   ToolboxComponent,
   TooltipComponent,
@@ -31,11 +33,18 @@ import type {
   DataZoomComponentOption,
   GridComponentOption,
   LegendComponentOption,
+  PolarComponentOption,
   TitleComponentOption,
   ToolboxComponentOption,
   TooltipComponentOption,
   VisualMapComponentOption,
 } from "echarts/components";
+// the polar axis option types are not exported on their own: take them
+// from the full option type (type-only import, no runtime cost)
+import type { EChartsOption } from "echarts";
+
+type AngleAxisOption = NonNullable<EChartsOption["angleAxis"]>;
+type RadiusAxisOption = NonNullable<EChartsOption["radiusAxis"]>;
 import * as echarts from "echarts/core";
 import type { ComposeOption } from "echarts/core";
 import { CanvasRenderer, SVGRenderer } from "echarts/renderers";
@@ -54,6 +63,7 @@ echarts.use([
   ToolboxComponent,
   VisualMapComponent,
   TitleComponent,
+  PolarComponent, // stage 19: polar_line / rose
   CanvasRenderer, // browser
   SVGRenderer, // server-side rendering in tests (renderToSVGString)
 ]);
@@ -73,7 +83,8 @@ export type VizOption = ComposeOption<
   | ToolboxComponentOption
   | VisualMapComponentOption
   | TitleComponentOption
->;
+  | PolarComponentOption
+> & { angleAxis?: AngleAxisOption; radiusAxis?: RadiusAxisOption };
 
 export type { ECharts } from "echarts/core";
 export { echarts };

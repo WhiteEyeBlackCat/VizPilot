@@ -3,13 +3,13 @@ mode: learning
 generated_at: 2026-09-15
 ---
 
-> ECharts adapter: pure `buildOption(RenderResult) → VizOption` for the six chart types, a single theme source, tree-shaken registration, and a 50-line React binding. Verified against 18 real-backend fixtures.
+> ECharts adapter: pure `buildOption(RenderResult) → VizOption` for the 16 chart types (six classic + the stage-19 family drawn with custom / bar / line / scatter series and a polar system), a single theme source, tree-shaken registration, and a 50-line React binding. Verified against 18 real-backend fixtures plus synthetic payloads.
 
 ## Task Guide
 
 | Task | Domain | Target | Also Check |
 |---|---|---|---|
-| Understand how a RenderResult becomes an ECharts option (per type) | Option | `option.ts` (`buildOption` L:466 dispatches to per-type builders) | `../__fixtures__/index.json` |
+| Understand how a RenderResult becomes an ECharts option (per type) | Option | `option.ts` (`buildOption` dispatches to per-type builders; stage-19 builders `densityOption`, `dotIntervalOption`, `lollipopOption`, `dumbbellOption`, `slopegraphOption`, `hexbinOption`, `polarOption` at the end of the file) | `../__fixtures__/index.json`, `option.stage19.test.ts` |
 | Understand time-axis labels / histogram bins / box stats / heatmap cells | Option | `option.ts` (`timeLabelFormatter`, `histogramBins`, `heatmapCells`) | `option.test.ts` |
 | Understand colours, fonts, grid, tooltip, toolbox, dark theme | Theme | `theme.ts` | `theme.test.ts` (contrast) |
 | Understand the reading order of a category axis (hour/month/weekday/date vs ranked) and its note | Order | `order.ts` | `order.test.ts`, `../../components/ChartView.tsx` |
@@ -20,7 +20,9 @@ generated_at: 2026-09-15
 
 | Symbol | Source | Line |
 |---|---|---|
-| `buildOption`, `isEmpty` | `option.ts` | L:466, L:48 |
+| `buildOption`, `isEmpty` | `option.ts` | `rg "^export function buildOption" frontend/src/charts/echarts/option.ts`, L:51 |
+| `densityOption`, `dotIntervalOption`, `lollipopOption`, `dumbbellOption`, `slopegraphOption`, `hexbinOption`, `polarOption` | `option.ts` | `rg "^export function .*Option" frontend/src/charts/echarts/option.ts` |
+| `SEQUENTIAL` | `theme.ts` | `rg "export const SEQUENTIAL" frontend/src/charts/echarts/theme.ts` |
 | `EChartsView`, `hideAllTips`, `EChartsHost` | `EChartsView.tsx` | L:26, L:18, L:12 |
 | `echarts`, `VizOption`, `ECharts` | `echarts.ts` | L:79, L:62 |
 | `PALETTE`, `COLORS`, `DIVERGING` | `theme.ts` | L:23, L:34, L:52 |
@@ -33,9 +35,9 @@ generated_at: 2026-09-15
 | `option.ts` | Option | `← ../../types.ts, order.ts \| → ../../components/ChartView.tsx` | Builders for line/bar/scatter/histogram/box/heatmap; semantics mirror the old Plotly layer (null gaps, display_range); bar/box categories with a natural sequence are permuted by `order.ts` (stage 18), plain labels keep the backend ranking. |
 | `order.ts` | Order | `← ../../types.ts \| → option.ts, ../../components/ChartView.tsx` | `naturalOrder` (numeric / weekday / month / ISO date) → permutation; `displayOrderNote` wording ("依 平均 y 由高到低排序" / "x 依數值順序顯示"). |
 | `theme.ts` | Theme | `→ ../../components/PreviewPanel.tsx` | Palette, text styles, grid presets, tooltip/legend/toolbox/dataZoom factories. |
-| `echarts.ts` | Registration | — | `echarts/core` + used charts/components/renderers; `VizOption` composed type. |
+| `echarts.ts` | Registration | — | `echarts/core` + used charts/components/renderers (incl. `PolarComponent`); `VizOption` composed type (+ `angleAxis` / `radiusAxis`). |
 | `EChartsView.tsx` | Binding | `→ ../../components/*` | Init/setOption/resize/dispose; exposes host element. |
-| `option.test.ts`, `option.ssr.test.ts`, `theme.test.ts`, `order.test.ts` | Tests | `← ../__fixtures__/*.json` | vitest: option values, SSR render, contrast, display order + notes. |
+| `option.test.ts`, `option.ssr.test.ts`, `theme.test.ts`, `order.test.ts`, `option.stage19.test.ts` | Tests | `← ../__fixtures__/*.json` | vitest: option values, SSR render, contrast, display order + notes, stage-19 builders (payload → series, SSR smoke). |
 
 ## File Dependencies
 

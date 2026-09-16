@@ -100,9 +100,10 @@ subgroup-specific behaviour, distribution differences, unusual but well-supporte
 anything that changes how the data should be interpreted.
 - No strong hypotheses about effects the evidence shows as close to zero; no probes just to \
 probe. Use only the listed columns, spelled exactly (case-sensitive).
-- importance: 5 = changes the whole reading of the dataset, 1 = minor. A chart is required. \
-Chart types: line, bar, scatter, histogram, box, heatmap (never pie); aggregations: mean, sum, \
-count, median, min, max; every line chart needs an aggregation.
+- importance: 5 = changes the whole reading of the dataset, 1 = minor. "chart" is optional: the \
+backend chooses the chart family from the evidence and the column roles; give a chart only for a \
+claim without test_needed (types: line, bar, scatter, histogram, box, heatmap — never pie; \
+aggregations: mean, sum, count, median, min, max; a line needs an aggregation). Set "chart": null otherwise.
 - "charts" (optional, may be empty): extra charts or re-ranking of the rule candidates, same \
 chart shape, lower priority number = more important.
 

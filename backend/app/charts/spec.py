@@ -11,15 +11,52 @@ from typing import Literal
 from pydantic import BaseModel
 
 from ..profiling.models import ColumnProfile, DatasetProfile
+from .roles import column_role
 
-ChartType = Literal["line", "bar", "scatter", "histogram", "box", "heatmap"]
+# the six original types plus the stage-19 family; the type says how the
+# chart is drawn, the intent (charts/intent.py) says why it was chosen
+ChartType = Literal[
+    "line",
+    "bar",
+    "scatter",
+    "histogram",
+    "box",
+    "heatmap",
+    "violin",
+    "raincloud",
+    "ridgeline",
+    "dot_interval",
+    "lollipop",
+    "dumbbell",
+    "slopegraph",
+    "hexbin",
+    "polar_line",
+    "rose",
+]
 Aggregation = Literal["mean", "sum", "count", "median", "min", "max"]
 TimeGranularity = Literal["raw", "day", "week", "month"]
+# category order on a category axis (stage 19): "natural" = the column's own
+# order (month 1..12, Mon..Sun, low..high), "value" = ranked by the aggregate;
+# None keeps the pre-stage-19 behaviour (ordered roles natural, else ranked)
+SortOrder = Literal["natural", "value"]
 
 BINS_RANGE = (5, 200)
 TOP_N_RANGE = (3, 50)
 GROUP_BY_MAX_CATEGORIES = 20
 BOX_X_CATEGORIES_RANGE = (2, 50)
+RAINCLOUD_X_CATEGORIES_RANGE = (2, 8)
+RIDGELINE_X_CATEGORIES_RANGE = (2, 12)
+TWO_STATE_X_CATEGORIES_RANGE = (2, 50)
+POLAR_X_CATEGORIES_MAX = 60
+
+# types whose x is a category axis (sort applies)
+CATEGORY_AXIS_TYPES = frozenset(
+    {"bar", "lollipop", "box", "violin", "raincloud", "ridgeline", "dot_interval", "dumbbell", "slopegraph", "polar_line", "rose", "line"}
+)
+# same data as a bar: rendered by the bar aggregation
+BAR_LIKE_TYPES = frozenset({"bar", "lollipop", "polar_line", "rose"})
+DENSITY_TYPES = frozenset({"violin", "raincloud", "ridgeline"})
+TWO_STATE_TYPES = frozenset({"dumbbell", "slopegraph"})
 
 _NUMERIC_DTYPE_RE = re.compile(r"^(U?Int|Float)\d+$")
 _AXIS_BANNED = ("id", "unknown", "text")
@@ -34,7 +71,8 @@ class ChartSpec(BaseModel):
     aggregation: Aggregation | None = None
     bins: int | None = None  # histogram only
     time_granularity: TimeGranularity | None = None  # line with datetime x only
-    top_n: int | None = None  # bar only; render applies default 20
+    top_n: int | None = None  # bar / lollipop only; render applies default 20
+    sort: SortOrder | None = None  # category order (stage 19, additive)
     reason: str = ""
     priority: int = 100  # smaller = shown first
 
@@ -105,12 +143,14 @@ def validate_spec(spec: ChartSpec, profile: DatasetProfile) -> list[str]:
         elif not BINS_RANGE[0] <= spec.bins <= BINS_RANGE[1]:
             errors.append(f"bins must be within {BINS_RANGE[0]}..{BINS_RANGE[1]}")
     if spec.top_n is not None:
-        if spec.type != "bar":
-            errors.append("top_n is only valid for bar")
+        if spec.type not in ("bar", "lollipop"):
+            errors.append("top_n is only valid for bar / lollipop")
         elif not TOP_N_RANGE[0] <= spec.top_n <= TOP_N_RANGE[1]:
             errors.append(f"top_n must be within {TOP_N_RANGE[0]}..{TOP_N_RANGE[1]}")
     if spec.time_granularity is not None and spec.type != "line":
         errors.append("time_granularity is only valid for line charts")
+    if spec.sort is not None and spec.type not in CATEGORY_AXIS_TYPES:
+        errors.append(f"sort is not valid for {spec.type} (no category axis)")
 
     check = _TYPE_CHECKS[spec.type]
     check(spec, profile, x, y, group, errors)
@@ -126,18 +166,26 @@ def _require(role: str, col: ColumnProfile | None, spec: ChartSpec, errors: list
     return col is not None
 
 
+def _is_ordered_category(col: ColumnProfile) -> bool:
+    """A categorical whose values have their own order (month, weekday,
+    rating): may serve as a line's x (stage 19) — the line follows that order."""
+    return col.semantic_type == "categorical" and column_role(col).ordered
+
+
 def _check_line(spec, profile, x, y, group, errors) -> None:
-    if _require("x", x, spec, errors) and x.semantic_type not in ("datetime", "numeric"):
-        errors.append(f"line x column '{x.name}' must be datetime or numeric")
+    if _require("x", x, spec, errors) and x.semantic_type not in ("datetime", "numeric") and not _is_ordered_category(x):
+        errors.append(f"line x column '{x.name}' must be datetime, numeric or an ordered category (month, weekday, level)")
     if _require("y", y, spec, errors) and not _is_numeric_y(y):
         errors.append(f"line y column '{y.name}' must be numeric")
     if spec.time_granularity is not None and x is not None and x.semantic_type != "datetime":
         errors.append("time_granularity requires a datetime x column")
+    if x is not None and x.semantic_type == "categorical" and spec.aggregation is None:
+        errors.append("aggregation is required when a line's x is a category")
     # granularity/aggregation closure (stage3 blocking #2)
     if spec.time_granularity not in (None, "raw"):
         if spec.aggregation is None:
             errors.append("aggregation is required when time_granularity is coarser than raw")
-    elif x is not None and spec.aggregation is None:
+    elif x is not None and x.semantic_type != "categorical" and spec.aggregation is None:
         non_missing = profile.n_rows - x.missing_count
         if x.unique_count < non_missing:
             errors.append(
@@ -148,15 +196,15 @@ def _check_line(spec, profile, x, y, group, errors) -> None:
 
 def _check_bar(spec, profile, x, y, group, errors) -> None:
     if _require("x", x, spec, errors) and not _is_groupable(x):
-        errors.append(f"bar x column '{x.name}' must be categorical or boolean")
+        errors.append(f"{spec.type} x column '{x.name}' must be categorical or boolean")
     if spec.y is None:
         if spec.aggregation != "count":
-            errors.append("bar with y=None requires aggregation='count'")
+            errors.append(f"{spec.type} with y=None requires aggregation='count'")
     else:
         if y is not None and not _is_numeric_y(y):
-            errors.append(f"bar y column '{y.name}' must be numeric")
+            errors.append(f"{spec.type} y column '{y.name}' must be numeric")
         if spec.aggregation is None:
-            errors.append("bar requires aggregation when y is given")
+            errors.append(f"{spec.type} requires aggregation when y is given")
 
 
 def _check_scatter(spec, profile, x, y, group, errors) -> None:
@@ -194,13 +242,123 @@ def _check_box(spec, profile, x, y, group, errors) -> None:
 
 
 def _check_heatmap(spec, profile, x, y, group, errors) -> None:
-    for role in ("x", "y", "group_by", "aggregation"):
-        if getattr(spec, role) is not None:
-            errors.append(f"heatmap must not have {role}")
-    # dataset-level requirement (stage3 blocking #4)
-    n_numeric = sum(1 for c in profile.columns if c.semantic_type == "numeric")
-    if n_numeric < 2:
-        errors.append("heatmap requires at least 2 numeric columns in the dataset")
+    given = [role for role in ("x", "y", "group_by", "aggregation") if getattr(spec, role) is not None]
+    if not given:
+        # correlation matrix: dataset-level requirement (stage3 blocking #4)
+        n_numeric = sum(1 for c in profile.columns if c.semantic_type == "numeric")
+        if n_numeric < 2:
+            errors.append("heatmap requires at least 2 numeric columns in the dataset")
+        return
+    # stage 19 matrix pattern: x × group_by cells coloured by aggregate(y)
+    if len(given) < 4:
+        errors.append("heatmap is either a correlation matrix (no fields) or a matrix of x × group_by with y and aggregation")
+    if x is not None and not (_is_groupable(x) or column_role(x).cyclic):
+        errors.append(f"heatmap x column '{x.name}' must be categorical or cyclic")
+    elif x is not None and _categories(x) > GROUP_BY_MAX_CATEGORIES and not column_role(x).cyclic:
+        errors.append(f"heatmap x column '{x.name}' has {_categories(x)} categories (maximum {GROUP_BY_MAX_CATEGORIES})")
+    if group is not None and not (_is_groupable(group) or column_role(group).cyclic):
+        errors.append(f"heatmap group_by column '{group.name}' must be categorical or cyclic")
+    if y is not None and not _is_numeric_y(y):
+        errors.append(f"heatmap y column '{y.name}' must be numeric")
+
+
+# --- stage 19 family --------------------------------------------------------
+
+
+def _check_density(spec, profile, x, y, group, errors) -> None:
+    """violin / raincloud / ridgeline: a distribution of numeric y per category x."""
+    ranges = {"violin": BOX_X_CATEGORIES_RANGE, "raincloud": RAINCLOUD_X_CATEGORIES_RANGE, "ridgeline": RIDGELINE_X_CATEGORIES_RANGE}
+    if spec.type != "violin":
+        _require("x", x, spec, errors)
+    if x is not None:
+        if not _is_groupable(x):
+            errors.append(f"{spec.type} x column '{x.name}' must be categorical or boolean")
+        else:
+            lo, hi = ranges[spec.type]
+            if not lo <= _categories(x) <= hi:
+                errors.append(f"{spec.type} x column '{x.name}' must have {lo}..{hi} categories")
+    if _require("y", y, spec, errors) and not _is_numeric_y(y):
+        errors.append(f"{spec.type} y column '{y.name}' must be numeric")
+    if spec.group_by is not None:
+        errors.append(f"{spec.type} must not have group_by (x is the grouping)")
+    if spec.aggregation is not None:
+        errors.append(f"{spec.type} must not have an aggregation")
+
+
+def _check_dot_interval(spec, profile, x, y, group, errors) -> None:
+    """Mean of y with an interval per category x (the mean is implied)."""
+    if _require("x", x, spec, errors):
+        if not _is_groupable(x):
+            errors.append(f"dot_interval x column '{x.name}' must be categorical or boolean")
+        else:
+            lo, hi = BOX_X_CATEGORIES_RANGE
+            if not lo <= _categories(x) <= hi:
+                errors.append(f"dot_interval x column '{x.name}' must have {lo}..{hi} categories")
+    if _require("y", y, spec, errors) and not _is_numeric_y(y):
+        errors.append(f"dot_interval y column '{y.name}' must be numeric")
+    if spec.group_by is not None:
+        errors.append("dot_interval must not have group_by")
+    if spec.aggregation not in (None, "mean"):
+        errors.append("dot_interval shows the mean: aggregation must be omitted or 'mean'")
+
+
+def _check_two_state(spec, profile, x, y, group, errors) -> None:
+    """dumbbell / slopegraph: aggregate of y per category x for exactly the
+    two states of group_by."""
+    if _require("x", x, spec, errors):
+        if not _is_groupable(x):
+            errors.append(f"{spec.type} x column '{x.name}' must be categorical or boolean")
+        else:
+            lo, hi = TWO_STATE_X_CATEGORIES_RANGE
+            if not lo <= _categories(x) <= hi:
+                errors.append(f"{spec.type} x column '{x.name}' must have {lo}..{hi} categories")
+    if _require("y", y, spec, errors) and not _is_numeric_y(y):
+        errors.append(f"{spec.type} y column '{y.name}' must be numeric")
+    if spec.group_by is None:
+        errors.append(f"{spec.type} requires group_by: the column holding the two states")
+    elif group is not None and _categories(group) != 2:
+        errors.append(f"{spec.type} group_by column '{group.name}' must have exactly 2 categories (states), has {_categories(group)}")
+    if spec.aggregation is None:
+        errors.append(f"{spec.type} requires aggregation")
+
+
+def _check_hexbin(spec, profile, x, y, group, errors) -> None:
+    if _require("x", x, spec, errors) and x.semantic_type != "numeric":
+        errors.append(f"hexbin x column '{x.name}' must be numeric")
+    if _require("y", y, spec, errors) and y.semantic_type != "numeric":
+        errors.append(f"hexbin y column '{y.name}' must be numeric")
+    if spec.aggregation is not None:
+        errors.append("hexbin must not have an aggregation")
+    if spec.group_by is not None:
+        errors.append("hexbin must not have group_by")
+
+
+def _check_polar(spec, profile, x, y, group, errors) -> None:
+    """polar_line / rose: an aggregate of y around a cyclic x (hour, month,
+    weekday, direction). A nominal category is never a cycle."""
+    if _require("x", x, spec, errors):
+        role = column_role(x)
+        if not role.cyclic:
+            errors.append(f"{spec.type} x column '{x.name}' must be cyclic (hour, month, weekday, season, direction)")
+        elif x.semantic_type == "categorical" and _categories(x) > POLAR_X_CATEGORIES_MAX:
+            errors.append(f"{spec.type} x column '{x.name}' has too many categories")
+    if spec.y is None:
+        if spec.aggregation != "count":
+            errors.append(f"{spec.type} with y=None requires aggregation='count'")
+    else:
+        if y is not None and not _is_numeric_y(y):
+            errors.append(f"{spec.type} y column '{y.name}' must be numeric")
+        if spec.aggregation is None:
+            errors.append(f"{spec.type} requires aggregation when y is given")
+        elif spec.type == "rose" and spec.aggregation not in ("sum", "count"):
+            # a sector's area reads as a quantity: a mean is not one
+            errors.append("rose encodes a magnitude: aggregation must be 'sum' or 'count' (use polar_line for a mean)")
+    if spec.group_by is not None:
+        errors.append(f"{spec.type} must not have group_by")
+
+
+def _check_lollipop(spec, profile, x, y, group, errors) -> None:
+    _check_bar(spec, profile, x, y, group, errors)
 
 
 _TYPE_CHECKS = {
@@ -210,4 +368,14 @@ _TYPE_CHECKS = {
     "histogram": _check_histogram,
     "box": _check_box,
     "heatmap": _check_heatmap,
+    "violin": _check_density,
+    "raincloud": _check_density,
+    "ridgeline": _check_density,
+    "dot_interval": _check_dot_interval,
+    "lollipop": _check_lollipop,
+    "dumbbell": _check_two_state,
+    "slopegraph": _check_two_state,
+    "hexbin": _check_hexbin,
+    "polar_line": _check_polar,
+    "rose": _check_polar,
 }
