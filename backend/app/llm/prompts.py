@@ -66,9 +66,12 @@ boolean with 2-20 categories (distribution_difference: up to 50); x / y / target
 categorical column can never be x or y); time = datetime. Also rejected: identifiers, text, \
 constant columns, >50% missing, the same column in two roles, derived-formula pairs, \
 near-duplicate pairs. Use distribution_difference when group means look alike but the shapes may \
-differ, interaction when you suspect two factors act together. At most 5 probes per dataset: \
-request one only when the evidence section does not already answer the question; otherwise \
-test_needed = null, evidence_available = true."""
+differ, interaction when you suspect two factors act together. A column listed under "Distribution \
+shapes worth knowing" as multimodal / with separated peaks, next to a categorical column whose \
+group effect (eta) on it is near zero, is a distribution_difference case, not group_difference: \
+the groups split the peaks, the near-zero eta only says their MEANS coincide. At most 5 probes per \
+dataset: request one only when the evidence section does not already answer the question; \
+otherwise test_needed = null, evidence_available = true."""
 
 HYPOTHESIS_SYSTEM_PROMPT = """You are the hypothesis generator of a data exploration assistant. You read a \
 dataset profile with measured evidence (effect sizes, correlations, distribution / group / \

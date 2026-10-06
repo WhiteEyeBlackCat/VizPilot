@@ -440,6 +440,11 @@ class _Workflow:
         self.trace = trace
         self.merger = _Merger(profile, rules)
         self.columns = {c.name: c for c in profile.columns}
+        # case-insensitive lookup: the LLM sometimes capitalises a column
+        # name at the start of a sentence ("Latency_ms shows ..."); that is
+        # a wording quirk, not a hallucinated column, so it is corrected in
+        # place rather than dropping an otherwise valid hypothesis
+        self._columns_lower = {name.lower(): name for name in self.columns}
         self.hypotheses_seen = 0
 
     # -- stage 1: gate ------------------------------------------------------------
@@ -529,7 +534,17 @@ class _Workflow:
         # evidence), near-duplicate names are mapped to the representative,
         # and a column-like token outside the dataset is a hallucination
         statement = self._clean_statement(h.statement)
-        foreign = [t for t in _SNAKE_TOKEN.findall(statement) if t not in self.columns]
+        foreign: list[str] = []
+        for token in _SNAKE_TOKEN.findall(statement):
+            if token in self.columns:
+                continue
+            canonical = self._columns_lower.get(token.lower())
+            if canonical is not None:
+                # a case quirk (sentence-initial capitalisation), not a
+                # hallucinated column: fix the case in place
+                statement = re.sub(rf"\b{re.escape(token)}\b", canonical, statement)
+                continue
+            foreign.append(token)
         if foreign:
             self._drop(hid, h, f"statement names unknown columns {foreign}")
             return None
