@@ -356,8 +356,10 @@ def test_llm_numbers_are_stripped_from_the_statement(profile, df) -> None:
     (insight,) = result["insights"]
     assert "0.99" not in insight["text"] and "9999" not in insight["text"]
     # the labelled numbers are stripped; the bare "80%" is an LLM number the
-    # backend never measured, so the neutral wording replaces the statement
-    assert insight["text"].startswith("Sales varies by segment (adjusted eta-squared")
+    # backend never measured, so the neutral wording replaces the statement.
+    # "sales" (the target column) stays lowercase: _neutral() only
+    # capitalises a leading word that is not itself a column name (stage 20a)
+    assert insight["text"].startswith("sales varies by segment (adjusted eta-squared")
     (record,) = result["debug"]["wording"]
     assert record["statement"] == "Segment e sells far more, about 80% more." and record["source"] == "neutral"
 
@@ -493,7 +495,7 @@ def test_statement_bare_numbers_fall_back_to_neutral_wording(profile, df) -> Non
     result, _ = _run(profile, df, [hyp])
     (insight,) = result["insights"]
     assert "60%" not in insight["text"] and "2.5" not in insight["text"] and "0.99" not in insight["text"]
-    assert insight["text"].startswith("Sales varies by segment (adjusted eta-squared")
+    assert insight["text"].startswith("sales varies by segment (adjusted eta-squared")
     (record,) = result["debug"]["wording"]
     assert record["source"] == "neutral"
     assert any("statement 1: number" in e for e in result["debug"]["errors"])
@@ -654,3 +656,103 @@ def test_headline_is_optional_gated_and_never_costs_the_insight(profile, df) -> 
     # an explicit null keeps the LLM wording (verifier NB-1)
     null, _ = _run(profile, df, hyp, final={"insights": [{**base, "headline": None}]})
     assert null["insights"][0]["headline"] is None and null["insights"][0]["text"] == base["text"]
+
+
+# --- stage 20a: wording gate quality (column tokens with digits, LLM #2 prompt) -----------
+
+
+def _pm25_frame(n: int = 200) -> pl.DataFrame:
+    """A dataset whose numeric column name itself contains digits, so the
+    number scan can be exercised against a real group difference."""
+    rng = random.Random(11)
+    station = ["x", "y"] * (n // 2)
+    return pl.DataFrame(
+        {
+            "station": station,
+            "pm25": [rng.gauss(10 if s == "x" else 40, 3) for s in station],
+        }
+    )
+
+
+@pytest.fixture(scope="module")
+def pm25_df():
+    return _pm25_frame()
+
+
+@pytest.fixture(scope="module")
+def pm25_profile(pm25_df):
+    return profile_dataset(pm25_df, "5" * 32, BIG)
+
+
+def test_digit_bearing_column_name_passes_the_number_gate(pm25_profile, pm25_df) -> None:
+    # "pm25" must not be read as the number 25; the masked statement should
+    # pass the gate untouched and keep the template wording (not neutral)
+    hyp = _h("pm25 varies by station.", "group_difference", {"group": "station", "target": "pm25"}, None, 5)
+    result, _ = _run(pm25_profile, pm25_df, [hyp])
+    (insight,) = result["insights"]
+    assert insight["text"].startswith("pm25 varies by station (")
+    (record,) = result["debug"]["wording"]
+    assert record["source"] == "template"
+
+
+def test_digit_leading_unknown_column_token_is_dropped(profile, df) -> None:
+    # "2023_sales" is not a column of this dataset; starting with a digit
+    # must not let it escape the unknown-column gate (stage 20a gap)
+    hyp = _h("Sales rise with 2023_sales in segment e.", "group_difference", {"group": "segment", "target": "sales"}, None)
+    result, _ = _run(profile, df, [hyp])
+    assert result["insights"] == []
+    assert "unknown columns ['2023_sales']" in result["debug"]["dropped"][0]["reason"]
+
+
+def test_real_stray_number_next_to_a_masked_column_is_still_rejected(pm25_profile, pm25_df) -> None:
+    # masking "pm25" must be exact-token: a genuine fabricated number right
+    # next to it ("37") is still caught and the sentence still falls back
+    hyp = _h("pm25 rises 37% at station y.", "group_difference", {"group": "station", "target": "pm25"}, None, 5)
+    result, _ = _run(pm25_profile, pm25_df, [hyp])
+    (insight,) = result["insights"]
+    assert "37" not in insight["text"]
+    (record,) = result["debug"]["wording"]
+    assert record["source"] == "neutral"
+
+
+def test_neutral_wording_keeps_column_name_lowercase(pm25_profile, pm25_df) -> None:
+    # a statement with a real stray number falls back to _neutral(); "pm25"
+    # (the leading column name) must stay lowercase, unlike the old
+    # core[0].upper() behaviour that produced "Pm25 varies by station"
+    hyp = _h("pm25 jumps 9000% at station y.", "group_difference", {"group": "station", "target": "pm25"}, None, 5)
+    result, _ = _run(pm25_profile, pm25_df, [hyp])
+    (insight,) = result["insights"]
+    assert insight["text"].startswith("pm25 varies by station (")
+    assert "Pm25" not in insight["text"]
+    (record,) = result["debug"]["wording"]
+    assert record["source"] == "neutral"
+
+
+def test_llm2_prompt_drops_unquotable_column_mean(profile) -> None:
+    from app.llm.coverage import ValidatedHypothesis
+    from app.llm.prompts import build_final_messages
+
+    col = next(c for c in profile.columns if c.semantic_type == "numeric" and c.name == "sales")
+    v = ValidatedHypothesis(
+        id=1,
+        statement="sales varies by segment.",
+        reason="",
+        importance=3,
+        test_type="group_difference",
+        columns={"group": "segment", "target": "sales"},
+        validation="existing_evidence",
+        verdict="pass",
+        effect_label="eta2",
+        effect_value=0.5,
+        n=600,
+        evidence_lines=[],
+        evidence={},
+        chart_candidates=[],
+    )
+    content = build_final_messages(profile, [v])[1]["content"]
+    section = content.split("Columns involved:")[1].split("Validated hypotheses")[0]
+    # the column's dataset-wide mean/min/max are not evidence for this (or
+    # any) specific hypothesis, so LLM #2 is never shown them (stage 20a)
+    assert "mean=" not in section and "min=" not in section and "max=" not in section
+    assert "sales (numeric)" in section
+    assert str(round(col.mean, 3)) not in section

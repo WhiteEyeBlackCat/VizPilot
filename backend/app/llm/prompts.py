@@ -8,6 +8,7 @@ a few per category, series compressed to shapes), not dumped.
 """
 
 import json
+import re
 from typing import Any
 
 from ..charts.roles import roles_for
@@ -29,6 +30,14 @@ from ..profiling.models import (
     SubgroupAnomaly,
 )
 from .coverage import ValidatedHypothesis
+
+# stage 20a: `coverage.bin_extremes_lines` deliberately describes a bin's x
+# range ("... for x in [12.3, 18.1]") with numbers that are NOT in the
+# wording gate's quotable set (bin edges, unlike the bin's y-mean, are not
+# backend evidence for the hypothesis — see that function's docstring); shown
+# verbatim to LLM #2 they only tempt a sentence that gets rejected, so the
+# range is stripped here rather than widened into the quotable set.
+_STRIP_BIN_RANGE = re.compile(r"\s+in \[[^\]]*\]")
 
 MAX_COLUMNS = 40
 MAX_CORR_PAIRS = 8
@@ -480,7 +489,7 @@ def _final_user_content(profile: DatasetProfile, validated: list[ValidatedHypoth
             f"    effect: {v.effect_label} = {v.effect_value:.3f} (n={v.n})"
         )
         for line in v.evidence_lines[:8]:
-            lines.append(f"    - {line}")
+            lines.append(f"    - {_STRIP_BIN_RANGE.sub('', line)}")
         for cid, spec in v.chart_candidates:
             lines.append(
                 f"    chart {cid}: {spec.type}, x={spec.x}, y={spec.y}, group_by={spec.group_by}, "
@@ -533,23 +542,25 @@ def _describe_column(col: ColumnProfile) -> str:
 def _describe_column_brief(col: ColumnProfile) -> str:
     """LLM #2 column line: type and a rounded range only (no quality flags,
     no extreme-value counts — nothing the analyst could mistake for a fact
-    to report)."""
+    to report).
+
+    A numeric column's dataset-wide mean/min/max is deliberately left out
+    (stage 20a): it is not part of `quotable_numbers` for any particular
+    hypothesis (that set is the backend's per-hypothesis evidence, e.g. a
+    probe's group means), so showing it here only invites a sentence the
+    wording gate then rejects. Widening the quotable set to include it would
+    let LLM #2 quote a column's global stats as support for a claim they may
+    be unrelated to, which is the safety property the gate exists to keep —
+    so the number is stripped from the prompt instead."""
     base = f"{col.name} ({col.semantic_type})"
     if col.semantic_type == "numeric":
-        return f"{base}: mean={_round3(col.mean)}, min={_round3(col.min)}, max={_round3(col.max)}"
+        return base
     if col.semantic_type in ("categorical", "boolean"):
         top = ", ".join(str(t.value) for t in (col.top_values or [])[:3])
         return f"{base}: {col.n_categories} categories, e.g. {top}"
     if col.semantic_type == "datetime":
         return f"{base}: {str(col.min)[:10]} to {str(col.max)[:10]}"
     return base
-
-
-def _round3(value: Any) -> Any:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return value
-    rounded = round(float(value), 3)
-    return int(rounded) if float(rounded).is_integer() else rounded
 
 
 def _top_correlations(profile: DatasetProfile) -> list[tuple[str, str, float]]:

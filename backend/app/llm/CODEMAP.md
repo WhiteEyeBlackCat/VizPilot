@@ -12,7 +12,7 @@ generated_at: 2026-09-16
 | Understand the recommendations response assembly (rules + workflow, tiers, insights, `message`) | Service | `service.py` (`RecommendationService.get`, `_shape`) | `../charts/rules.py` (`assign_tiers`), `../datasets/router.py` (`?debug=1`) |
 | Follow one hypothesis: gate → coverage → probe → wording | Workflow | `service.py` (`_Workflow`: `validate` → `_gate` → `_validated`, `_run_probes`, `needs_final_call`, `finish` → `_final_wording`, `_merge`) | `coverage.py` (`check_coverage`, `definitional_conflict`), `../probes/engine.py` |
 | Understand what counts as "already answered by the tables" and its thresholds | Coverage | `coverage.py` (`check_coverage`, `apply_confidence_cap`, `corroborated`) | `../probes/engine.py` (`THRESHOLDS`), `../charts/confidence.py` (`assess`) |
-| Understand which numbers the LLM may quote and the neutral fallback | Wording gate | `service.py` (`_wording_problem`, `quotable_numbers`, `_neutral`, `_template`) | `tests/test_llm_workflow.py` (number/date cases) |
+| Understand which numbers the LLM may quote and the neutral fallback | Wording gate | `service.py` (`_wording_problem`, `_mask_column_tokens`, `quotable_numbers`, `_neutral`, `_template`) | `tests/test_llm_workflow.py` (number/date cases) |
 | Understand what LLM #1 / LLM #2 are shown | Prompt | `prompts.py` (`build_hypothesis_messages`, `build_final_messages`, `PROBE_TYPE_GUIDE`) | `../profiling/models.py` (layer 2 signals) |
 | Understand provider abstraction / disabled fallback / usage accounting | Provider | `provider.py` | `../config.py`, DECISIONS D4, D7 |
 | Understand tolerant parsing of LLM JSON | Schema | `schemas.py`, `service.py` (`_parse_hypotheses`, `_parse_final`, `_parse_suggestion`) | — |

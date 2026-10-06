@@ -71,7 +71,10 @@ MAX_HEADLINE_CHARS = 120  # stage 18: headline shown collapsed; longer ones are 
 UNVERIFIED_NOTE = "hypothesis not verified against the data"
 FALLBACK_MESSAGE = "AI suggestions unavailable ({reason}); showing rule-based recommendations."
 NO_PATTERNS_MESSAGE = "No strong non-definitional and analytically useful patterns were found."
-_SNAKE_TOKEN = re.compile(r"\b[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+\b")
+# stage 20a: a column-like token may start with a digit ("2023_sales") and
+# still be a hallucinated column name, so the leading character is no longer
+# restricted to a letter — only the presence of an underscore matters.
+_SNAKE_TOKEN = re.compile(r"\b[A-Za-z0-9]+_[A-Za-z0-9_]+\b")
 # numbers the LLM writes are never evidence: "(eta² = 0.99)", "r=0.8", "n = 12", "(0.45)"
 _STAT_NUMBER = re.compile(
     r"(?:\b(?:adjusted\s+)?(?:eta[²2]?|eta-squared|r[²2]?|rho|corr(?:elation)?|n|p|z|d|ks|spread|effect(?:\s+size)?)|η[²2]?)"
@@ -921,12 +924,32 @@ class _Workflow:
         return merged, {key: final_priority.get(redirect.get(key, key)) for key in set(llm_priority) | set(final_priority)}
 
 
+def _mask_column_tokens(text: str, columns: set[str]) -> str:
+    """Blot out every occurrence of a known column name (as a whole token,
+    case-insensitive, bare or wrapped in backticks/quotes) with a same-length
+    run of '#'. A column whose name contains digits (`pm25`, `co2_ppm`,
+    `q1_sales`) must never make the number scan see a stray "25", "2" or "1";
+    and once the real columns are blotted out, anything the snake-case scan
+    still finds is guaranteed to be foreign (stage 20a)."""
+    masked = text
+    for name in sorted((n for n in columns if n), key=len, reverse=True):
+        pattern = re.compile(r"[`\"']?\b" + re.escape(name) + r"\b[`\"']?", re.IGNORECASE)
+        masked = pattern.sub(lambda m: "#" * len(m.group(0)), masked)
+    return masked
+
+
 def _wording_problem(text: str, v: ValidatedHypothesis, names: set[str]) -> str | None:
     """LLM #2 may only restate: every number must be one the backend measured
     for this hypothesis (rounded to the digits written), every column name
     must be one the hypothesis is about, and no column-like token may come
     from outside the dataset."""
-    foreign = [t for t in _SNAKE_TOKEN.findall(text) if t not in names]
+    # known column names are masked out before the foreign-token and number
+    # scans so digits inside a column name (pm25, co2_ppm, q1_sales) are
+    # never read as a quoted number, and a leftover snake-case token is
+    # necessarily foreign. The "mentioned columns outside the hypothesis"
+    # check below still needs the real names, so it runs on the raw text.
+    masked = _mask_column_tokens(text, names)
+    foreign = [t for t in _SNAKE_TOKEN.findall(masked) if t not in names]
     if foreign:
         return f"unknown tokens {foreign}"
     allowed = set(v.columns.values())
@@ -938,11 +961,11 @@ def _wording_problem(text: str, v: ValidatedHypothesis, names: set[str]) -> str 
     # quotable individually, so "2023-01-11" must not pass by recombining the
     # digits of 2023-11-01); a matching date is removed before the number scan
     dates = quotable_dates(v)
-    for m in _ISO_DATE.finditer(text):
+    for m in _ISO_DATE.finditer(masked):
         if m.group(0) not in dates:
             return f"date {m.group(0)} is not in the validated evidence"
-    text = _ISO_DATE.sub(" ", text)
-    for token in _NUMBER.findall(text):
+    masked = _ISO_DATE.sub(" ", masked)
+    for token in _NUMBER.findall(masked):
         if not _number_supported(token, evidence_numbers):
             return f"number {token} is not in the validated evidence"
     return None
@@ -1066,14 +1089,22 @@ _NEUTRAL = {
 }
 
 
+def _starts_with_column(text: str, columns: Any) -> bool:
+    return any(re.match(r"^" + re.escape(name) + r"\b", text) for name in columns if name)
+
+
 def _neutral(v: ValidatedHypothesis) -> str:
     """A number-free description of the finding (test + columns) followed by
-    the backend effect; used when the LLM's own words cannot be verified."""
+    the backend effect; used when the LLM's own words cannot be verified.
+    Column names are substituted verbatim and never re-cased — `pm25` must
+    stay `pm25` — so only a leading word that is itself not a column name
+    (e.g. "the") is capitalised (stage 20a)."""
     pattern = _NEUTRAL.get(v.test_type, "{columns} show a verified pattern")
     core = pattern.format(**{**{"columns": ", ".join(v.columns.values())}, **v.columns})
     shape = v.evidence.get("shape")
     detail = f"{shape.replace('_', ' ')}; " if isinstance(shape, str) else ""
-    return f"{core[0].upper()}{core[1:]} ({detail}{v.effect_label}: {v.effect_value:.2f}, n={v.n})."
+    sentence = core if _starts_with_column(core, v.columns.values()) else f"{core[0].upper()}{core[1:]}"
+    return f"{sentence} ({detail}{v.effect_label}: {v.effect_value:.2f}, n={v.n})."
 
 
 def _template(v: ValidatedHypothesis) -> str:
