@@ -273,5 +273,50 @@
       "aggregation": "mean",
       "time_granularity": "month"
     }
+  },
+  "stacked_bar_mix": {
+    "file": "e2e/data/flows.csv",
+    "spec": {
+      "title": "revenue by region, split by channel",
+      "type": "stacked_bar",
+      "x": "region",
+      "y": "revenue",
+      "group_by": "channel",
+      "aggregation": "sum",
+      "sort": "natural"
+    }
+  },
+  "stacked_bar_percent": {
+    "file": "e2e/data/flows.csv",
+    "spec": {
+      "title": "channel share of revenue by region",
+      "type": "stacked_bar",
+      "x": "region",
+      "y": "revenue",
+      "group_by": "channel",
+      "aggregation": "sum",
+      "percent": true
+    }
+  },
+  "sankey_hub_flow": {
+    "file": "e2e/data/flows.csv",
+    "spec": {
+      "title": "shipments from hub to hub",
+      "type": "sankey",
+      "x": "from_hub",
+      "group_by": "to_hub",
+      "aggregation": "count"
+    }
+  },
+  "sankey_hub_revenue": {
+    "file": "e2e/data/flows.csv",
+    "spec": {
+      "title": "revenue from hub to hub",
+      "type": "sankey",
+      "x": "from_hub",
+      "y": "revenue",
+      "group_by": "to_hub",
+      "aggregation": "sum"
+    }
   }
 }

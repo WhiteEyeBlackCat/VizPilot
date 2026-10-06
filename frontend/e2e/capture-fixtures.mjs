@@ -146,6 +146,25 @@ const FIXTURES = {
     file: "e2e/data/dense_xy.csv",
     spec: { title: "y vs x", type: "hexbin", x: "x", y: "y" },
   },
+  // --- stage 20b: composition / flow (e2e/data/make_stage20b.py) ---
+  // the channel mix of each region's revenue: absolute stack and 100 % stack
+  stacked_bar_mix: {
+    file: "e2e/data/flows.csv",
+    spec: { title: "revenue by region, split by channel", type: "stacked_bar", x: "region", y: "revenue", group_by: "channel", aggregation: "sum", sort: "natural" },
+  },
+  stacked_bar_percent: {
+    file: "e2e/data/flows.csv",
+    spec: { title: "channel share of revenue by region", type: "stacked_bar", x: "region", y: "revenue", group_by: "channel", aggregation: "sum", percent: true },
+  },
+  // a declared from/to pair: counted flows, self-loops dropped
+  sankey_hub_flow: {
+    file: "e2e/data/flows.csv",
+    spec: { title: "shipments from hub to hub", type: "sankey", x: "from_hub", group_by: "to_hub", aggregation: "count" },
+  },
+  sankey_hub_revenue: {
+    file: "e2e/data/flows.csv",
+    spec: { title: "revenue from hub to hub", type: "sankey", x: "from_hub", y: "revenue", group_by: "to_hub", aggregation: "sum" },
+  },
 };
 
 // `--only a,b,c` (or positional names) records a subset and merges it into the existing index.json

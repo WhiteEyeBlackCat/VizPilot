@@ -73,6 +73,43 @@ def test_stage191_fixtures_are_recorded() -> None:
     assert expected <= set(_ENTRIES), f"missing fixtures: {expected - set(_ENTRIES)} (npm run capture-fixtures -- --only …)"
 
 
+def test_stage20b_fixtures_are_recorded() -> None:
+    expected = {"stacked_bar_mix", "stacked_bar_percent", "sankey_hub_flow", "sankey_hub_revenue"}
+    assert expected <= set(_ENTRIES), f"missing fixtures: {expected - set(_ENTRIES)} (npm run capture-fixtures -- --only …)"
+
+
+def test_stage20b_fixture_semantics() -> None:
+    """Composition and flow, checked on the recorded payloads."""
+    load = lambda name: json.loads((FIXTURES / f"{name}.json").read_text())["chart_data"]  # noqa: E731
+    mix = load("stacked_bar_mix")
+    assert sorted(mix["categories"]) == ["East", "North", "South", "West"]
+    assert [s["name"] for s in mix["series"]] == ["online", "partner", "retail"]
+    assert mix["percent"] is False
+    for i, total in enumerate(mix["totals"]):
+        assert total == pytest.approx(sum(s["values"][i] or 0 for s in mix["series"]))
+    share = load("stacked_bar_percent")
+    assert share["percent"] is True and "share of" in share["y_label"]
+    for i in range(len(share["categories"])):
+        assert sum(s["values"][i] or 0 for s in share["series"]) == pytest.approx(100.0)
+    # the absolute magnitude behind the shares is the same as the absolute chart's
+    assert sorted(share["totals"]) == pytest.approx(sorted(mix["totals"]))
+
+    flow = load("sankey_hub_flow")
+    labels = {n["name"]: n["label"] for n in flow["nodes"]}
+    assert len(labels) == len(flow["nodes"]) and not flow["truncated"]
+    assert flow["self_loops"] > 0  # make_stage20b plants rows that stay in their hub
+    assert all(labels[l["source"]] != labels[l["target"]] for l in flow["links"])
+    assert sum(l["value"] for l in flow["links"]) == 600 - flow["self_loops"]
+    weighted = load("sankey_hub_revenue")
+    assert weighted["y_label"] == "sum(revenue)"
+    values = [link["value"] for link in weighted["links"]]
+    assert values == sorted(values, reverse=True) and min(values) > 0
+    # same graph, different weight: the count and the sum share their links
+    assert {(link["source"], link["target"]) for link in weighted["links"]} == {
+        (link["source"], link["target"]) for link in flow["links"]
+    }
+
+
 def test_stage191_fixture_semantics() -> None:
     """The purpose of each fixture, checked on the recorded payloads."""
     load = lambda name: json.loads((FIXTURES / f"{name}.json").read_text())["chart_data"]  # noqa: E731

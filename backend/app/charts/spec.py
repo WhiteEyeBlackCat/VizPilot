@@ -32,6 +32,9 @@ ChartType = Literal[
     "hexbin",
     "polar_line",
     "rose",
+    # stage 20b: composition (part-to-whole) and flow
+    "stacked_bar",
+    "sankey",
 ]
 Aggregation = Literal["mean", "sum", "count", "median", "min", "max"]
 TimeGranularity = Literal["raw", "day", "week", "month"]
@@ -48,10 +51,18 @@ RAINCLOUD_X_CATEGORIES_RANGE = (2, 8)
 RIDGELINE_X_CATEGORIES_RANGE = (2, 12)
 TWO_STATE_X_CATEGORIES_RANGE = (2, 50)
 POLAR_X_CATEGORIES_MAX = 60
+# stage 20b composition: the x axis is a bar axis, the parts are the stack —
+# beyond a handful of parts a stack is unreadable and stops being a composition
+STACKED_X_CATEGORIES_RANGE = (2, 20)
+STACKED_PARTS_RANGE = (2, 8)
+# stage 20b flow: both ends of a sankey are category axes of bounded size
+SANKEY_CATEGORIES_RANGE = (2, 20)
+# only sum / count compose: a mean of parts does not add up to the whole
+COMPOSITION_AGGREGATIONS = ("sum", "count")
 
 # types whose x is a category axis (sort applies)
 CATEGORY_AXIS_TYPES = frozenset(
-    {"bar", "lollipop", "box", "violin", "raincloud", "ridgeline", "dot_interval", "dumbbell", "slopegraph", "polar_line", "rose", "line"}
+    {"bar", "lollipop", "box", "violin", "raincloud", "ridgeline", "dot_interval", "dumbbell", "slopegraph", "polar_line", "rose", "line", "stacked_bar"}
 )
 # same data as a bar: rendered by the bar aggregation
 BAR_LIKE_TYPES = frozenset({"bar", "lollipop", "polar_line", "rose"})
@@ -73,6 +84,9 @@ class ChartSpec(BaseModel):
     time_granularity: TimeGranularity | None = None  # line with datetime x only
     top_n: int | None = None  # bar / lollipop only; render applies default 20
     sort: SortOrder | None = None  # category order (stage 19, additive)
+    # stage 20b, additive: stacked_bar only — True normalises every bar to
+    # 100 % so the chart reads as a share instead of a magnitude
+    percent: bool | None = None
     reason: str = ""
     priority: int = 100  # smaller = shown first
 
@@ -151,6 +165,8 @@ def validate_spec(spec: ChartSpec, profile: DatasetProfile) -> list[str]:
         errors.append("time_granularity is only valid for line charts")
     if spec.sort is not None and spec.type not in CATEGORY_AXIS_TYPES:
         errors.append(f"sort is not valid for {spec.type} (no category axis)")
+    if spec.percent is not None and spec.type != "stacked_bar":
+        errors.append("percent is only valid for stacked_bar")
 
     check = _TYPE_CHECKS[spec.type]
     check(spec, profile, x, y, group, errors)
@@ -361,6 +377,64 @@ def _check_lollipop(spec, profile, x, y, group, errors) -> None:
     _check_bar(spec, profile, x, y, group, errors)
 
 
+# --- stage 20b: composition / flow -------------------------------------------
+
+
+def _check_composition_measure(spec, y, errors) -> None:
+    """A part-to-whole chart adds its parts up: only sum (of a numeric y) and
+    count compose. A mean of the parts is not the whole."""
+    if spec.y is None:
+        if spec.aggregation != "count":
+            errors.append(f"{spec.type} with y=None requires aggregation='count'")
+        return
+    if y is not None and not _is_numeric_y(y):
+        errors.append(f"{spec.type} y column '{y.name}' must be numeric")
+    if spec.aggregation is None:
+        errors.append(f"{spec.type} requires aggregation when y is given")
+    elif spec.aggregation not in COMPOSITION_AGGREGATIONS:
+        errors.append(
+            f"{spec.type} shows parts of a whole: aggregation must be "
+            f"{' or '.join(repr(a) for a in COMPOSITION_AGGREGATIONS)} (a mean does not compose)"
+        )
+
+
+def _check_stacked_bar(spec, profile, x, y, group, errors) -> None:
+    """Parts of a whole per category: x is the bar axis, group_by is the part."""
+    if _require("x", x, spec, errors):
+        if not _is_groupable(x):
+            errors.append(f"stacked_bar x column '{x.name}' must be categorical or boolean")
+        else:
+            lo, hi = STACKED_X_CATEGORIES_RANGE
+            if not lo <= _categories(x) <= hi:
+                errors.append(f"stacked_bar x column '{x.name}' must have {lo}..{hi} categories")
+    if spec.group_by is None:
+        errors.append("stacked_bar requires group_by: the column holding the parts")
+    elif group is not None and _is_groupable(group):
+        lo, hi = STACKED_PARTS_RANGE
+        if not lo <= _categories(group) <= hi:
+            errors.append(
+                f"stacked_bar group_by column '{group.name}' must have {lo}..{hi} parts, "
+                f"has {_categories(group)}"
+            )
+    _check_composition_measure(spec, y, errors)
+
+
+def _check_sankey(spec, profile, x, y, group, errors) -> None:
+    """Flow from one category column to another: x is the source, group_by the
+    target, the weight is a count or a sum."""
+    lo, hi = SANKEY_CATEGORIES_RANGE
+    if _require("x", x, spec, errors):
+        if not _is_groupable(x):
+            errors.append(f"sankey x column '{x.name}' (the source) must be categorical or boolean")
+        elif not lo <= _categories(x) <= hi:
+            errors.append(f"sankey x column '{x.name}' must have {lo}..{hi} categories")
+    if spec.group_by is None:
+        errors.append("sankey requires group_by: the target column the flow goes to")
+    elif group is not None and _is_groupable(group) and not lo <= _categories(group) <= hi:
+        errors.append(f"sankey group_by column '{group.name}' must have {lo}..{hi} categories")
+    _check_composition_measure(spec, y, errors)
+
+
 _TYPE_CHECKS = {
     "line": _check_line,
     "bar": _check_bar,
@@ -378,4 +452,6 @@ _TYPE_CHECKS = {
     "hexbin": _check_hexbin,
     "polar_line": _check_polar,
     "rose": _check_polar,
+    "stacked_bar": _check_stacked_bar,
+    "sankey": _check_sankey,
 }

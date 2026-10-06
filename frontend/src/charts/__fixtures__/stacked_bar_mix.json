@@ -1,0 +1,66 @@
+{
+  "spec": {
+    "title": "revenue by region, split by channel",
+    "type": "stacked_bar",
+    "x": "region",
+    "y": "revenue",
+    "group_by": "channel",
+    "aggregation": "sum",
+    "bins": null,
+    "time_granularity": null,
+    "top_n": null,
+    "sort": "natural",
+    "percent": null,
+    "reason": "",
+    "priority": 100
+  },
+  "chart_data": {
+    "categories": [
+      "East",
+      "North",
+      "South",
+      "West"
+    ],
+    "series": [
+      {
+        "name": "online",
+        "values": [
+          11381.99,
+          95210.54,
+          4132.37,
+          22384.34
+        ]
+      },
+      {
+        "name": "partner",
+        "values": [
+          72770.7,
+          1514.8700000000001,
+          4765.94,
+          20033.81
+        ]
+      },
+      {
+        "name": "retail",
+        "values": [
+          6677.5,
+          10445.050000000001,
+          99566.96,
+          17670.35
+        ]
+      }
+    ],
+    "truncated": false,
+    "y_label": "sum(revenue)",
+    "totals": [
+      90830.19,
+      107170.45999999999,
+      108465.27,
+      60088.5
+    ],
+    "percent": false
+  },
+  "sampled": false,
+  "n_points": 12,
+  "display_range": null
+}

@@ -1,0 +1,200 @@
+{
+  "spec": {
+    "title": "shipments from hub to hub",
+    "type": "sankey",
+    "x": "from_hub",
+    "y": null,
+    "group_by": "to_hub",
+    "aggregation": "count",
+    "bins": null,
+    "time_granularity": null,
+    "top_n": null,
+    "sort": null,
+    "percent": null,
+    "reason": "",
+    "priority": 100
+  },
+  "chart_data": {
+    "nodes": [
+      {
+        "name": "0:alpha",
+        "label": "alpha",
+        "column": "from_hub",
+        "side": "source",
+        "value": 102
+      },
+      {
+        "name": "0:bravo",
+        "label": "bravo",
+        "column": "from_hub",
+        "side": "source",
+        "value": 103
+      },
+      {
+        "name": "0:charlie",
+        "label": "charlie",
+        "column": "from_hub",
+        "side": "source",
+        "value": 103
+      },
+      {
+        "name": "0:delta",
+        "label": "delta",
+        "column": "from_hub",
+        "side": "source",
+        "value": 103
+      },
+      {
+        "name": "0:echo",
+        "label": "echo",
+        "column": "from_hub",
+        "side": "source",
+        "value": 103
+      },
+      {
+        "name": "1:alpha",
+        "label": "alpha",
+        "column": "to_hub",
+        "side": "target",
+        "value": 103
+      },
+      {
+        "name": "1:bravo",
+        "label": "bravo",
+        "column": "to_hub",
+        "side": "target",
+        "value": 103
+      },
+      {
+        "name": "1:charlie",
+        "label": "charlie",
+        "column": "to_hub",
+        "side": "target",
+        "value": 102
+      },
+      {
+        "name": "1:delta",
+        "label": "delta",
+        "column": "to_hub",
+        "side": "target",
+        "value": 104
+      },
+      {
+        "name": "1:echo",
+        "label": "echo",
+        "column": "to_hub",
+        "side": "target",
+        "value": 102
+      }
+    ],
+    "links": [
+      {
+        "source": "0:alpha",
+        "target": "1:charlie",
+        "value": 26
+      },
+      {
+        "source": "0:alpha",
+        "target": "1:delta",
+        "value": 26
+      },
+      {
+        "source": "0:bravo",
+        "target": "1:alpha",
+        "value": 26
+      },
+      {
+        "source": "0:bravo",
+        "target": "1:delta",
+        "value": 26
+      },
+      {
+        "source": "0:bravo",
+        "target": "1:echo",
+        "value": 26
+      },
+      {
+        "source": "0:charlie",
+        "target": "1:alpha",
+        "value": 26
+      },
+      {
+        "source": "0:charlie",
+        "target": "1:bravo",
+        "value": 26
+      },
+      {
+        "source": "0:charlie",
+        "target": "1:delta",
+        "value": 26
+      },
+      {
+        "source": "0:delta",
+        "target": "1:bravo",
+        "value": 26
+      },
+      {
+        "source": "0:delta",
+        "target": "1:charlie",
+        "value": 26
+      },
+      {
+        "source": "0:delta",
+        "target": "1:echo",
+        "value": 26
+      },
+      {
+        "source": "0:echo",
+        "target": "1:alpha",
+        "value": 26
+      },
+      {
+        "source": "0:echo",
+        "target": "1:bravo",
+        "value": 26
+      },
+      {
+        "source": "0:echo",
+        "target": "1:delta",
+        "value": 26
+      },
+      {
+        "source": "0:alpha",
+        "target": "1:bravo",
+        "value": 25
+      },
+      {
+        "source": "0:alpha",
+        "target": "1:echo",
+        "value": 25
+      },
+      {
+        "source": "0:bravo",
+        "target": "1:charlie",
+        "value": 25
+      },
+      {
+        "source": "0:charlie",
+        "target": "1:echo",
+        "value": 25
+      },
+      {
+        "source": "0:delta",
+        "target": "1:alpha",
+        "value": 25
+      },
+      {
+        "source": "0:echo",
+        "target": "1:charlie",
+        "value": 25
+      }
+    ],
+    "truncated": false,
+    "n_links_total": 20,
+    "self_loops": 86,
+    "y_label": "count"
+  },
+  "sampled": false,
+  "n_points": 20,
+  "display_range": null
+}

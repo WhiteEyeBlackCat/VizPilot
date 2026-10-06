@@ -1,6 +1,7 @@
 // The one place ECharts modules are registered (tree-shaken build): every
 // series type the ChartSpec types need plus the shared components (the
-// stage-19 family draws with custom / bar / line / scatter series and polar).
+// stage-19 family draws with custom / bar / line / scatter series and polar;
+// stage 20b adds the sankey series — a stacked bar is still a bar series).
 // Import `echarts` from here, never from "echarts" directly.
 
 import {
@@ -9,6 +10,7 @@ import {
   CustomChart,
   HeatmapChart,
   LineChart,
+  SankeyChart,
   ScatterChart,
 } from "echarts/charts";
 import type {
@@ -17,6 +19,7 @@ import type {
   CustomSeriesOption,
   HeatmapSeriesOption,
   LineSeriesOption,
+  SankeySeriesOption,
   ScatterSeriesOption,
 } from "echarts/charts";
 import {
@@ -56,6 +59,7 @@ echarts.use([
   BoxplotChart,
   HeatmapChart,
   CustomChart,
+  SankeyChart, // stage 20b: flow
   GridComponent,
   TooltipComponent,
   LegendComponent,
@@ -76,6 +80,7 @@ export type VizOption = ComposeOption<
   | BoxplotSeriesOption
   | HeatmapSeriesOption
   | CustomSeriesOption
+  | SankeySeriesOption
   | GridComponentOption
   | TooltipComponentOption
   | LegendComponentOption

@@ -209,3 +209,104 @@ def test_recommendations_are_deterministic_with_intents() -> None:
     first = [r.model_dump() for r in _recs(df)[1]]
     second = [r.model_dump() for r in _recs(df)[1]]
     assert first == second and all("intent" in r and "alternatives" in r for r in first)
+
+
+# --- stage 20b. composition and flow ---------------------------------------------------
+
+
+def _mix_df(n: int = 1200) -> pl.DataFrame:
+    """region × channel → revenue with a mix that shifts region by region (a
+    real interaction), plus a `pct` rate that must never be summed."""
+    rng = random.Random(20)
+    regions = ["North", "South", "East", "West"]
+    channels = ["online", "retail", "partner"]
+    weights = {"North": (7, 2, 1), "South": (1, 8, 1), "East": (3, 2, 5), "West": (1, 1, 1)}
+    level = {("North", "online"): 900, ("North", "retail"): 300, ("North", "partner"): 150,
+             ("South", "online"): 200, ("South", "retail"): 950, ("South", "partner"): 180,
+             ("East", "online"): 250, ("East", "retail"): 220, ("East", "partner"): 1000,
+             ("West", "online"): 400, ("West", "retail"): 420, ("West", "partner"): 410}
+    rows = []
+    for i in range(n):
+        region = regions[i % 4]
+        channel = rng.choices(channels, weights=weights[region])[0]
+        rows.append(
+            {
+                "region": region,
+                "channel": channel,
+                "revenue": round(max(0.0, rng.gauss(level[(region, channel)], 50)), 2),
+                "pct": round(rng.uniform(0, 100), 2),
+            }
+        )
+    return pl.DataFrame(rows)
+
+
+def _hub_df(n: int = 1200) -> pl.DataFrame:
+    """A declared from/to pair with some rows staying in the same hub."""
+    rng = random.Random(22)
+    hubs = ["alpha", "bravo", "charlie", "delta"]
+    rows = []
+    for i in range(n):
+        src = hubs[i % 4]
+        rows.append(
+            {
+                "from_hub": src,
+                "to_hub": src if i % 6 == 0 else hubs[(i % 4 + 1 + (i // 4) % 3) % 4],
+                "amount": round(rng.uniform(1, 100), 2),
+            }
+        )
+    return pl.DataFrame(rows)
+
+
+def test_shifting_mix_of_a_summable_measure_is_a_composition() -> None:
+    df = _mix_df()
+    profile, recs = _recs(df)
+    rec = _find(recs, x="region", y="revenue", group_by="channel")
+    assert rec is not None and rec.intent == "composition"
+    assert rec.spec.type == "stacked_bar" and rec.spec.aggregation == "sum"
+    assert rec.spec.sort == "natural"  # only a ranking sorts by value
+    assert [a.type for a in rec.alternatives] == ["bar"]  # the parts side by side; never a pie
+    data = render_chart(apply_semantic_casts(df, profile), rec.spec, profile)["chart_data"]
+    assert sorted(data["categories"]) == ["East", "North", "South", "West"]
+    assert len(data["series"]) == 3 and data["percent"] is False
+    for i, total in enumerate(data["totals"]):
+        assert total == pytest.approx(sum(s["values"][i] or 0 for s in data["series"]))
+
+
+def test_a_rate_is_never_the_measure_of_a_composition() -> None:
+    _, recs = _recs(_mix_df())
+    # adding percentages up produces no total: pct never earns a stack
+    assert all(not (r.spec.type == "stacked_bar" and r.spec.y == "pct") for r in recs)
+
+
+def test_a_declared_from_to_pair_is_a_flow() -> None:
+    df = _hub_df()
+    profile, recs = _recs(df)
+    rec = _find(recs, x="from_hub", group_by="to_hub")
+    assert rec is not None and rec.intent == "flow"
+    assert rec.spec.type == "sankey" and rec.spec.aggregation == "count" and rec.spec.y is None
+    assert rec.spec.sort is None and rec.alternatives == []
+    data = render_chart(apply_semantic_casts(df, profile), rec.spec, profile)["chart_data"]
+    assert data["self_loops"] > 0 and data["links"] and not data["truncated"]
+    assert sum(link["value"] for link in data["links"]) == df.height - data["self_loops"]
+
+
+def test_category_pairs_without_a_declared_direction_are_never_a_flow() -> None:
+    # two columns over the same domain are as likely a copy as a transition:
+    # no statistic can tell, so the rules never guess a flow
+    rng = random.Random(21)
+    states = ["new", "open", "closed"]
+    df = pl.DataFrame(
+        {
+            "status_a": [states[i % 3] for i in range(600)],
+            "status_b": [rng.choice(states) for _ in range(600)],
+            "amount": [rng.uniform(1, 100) for _ in range(600)],
+        }
+    )
+    _, recs = _recs(df)
+    assert "sankey" not in _all_types(recs)
+
+
+def test_noise_and_tiny_datasets_get_no_composition_or_flow() -> None:
+    for name in ("noise.csv", "tiny_dataset.csv"):
+        _, recs = _recs(_real_dataset(name))
+        assert not ({"stacked_bar", "sankey"} & _all_types(recs)), name

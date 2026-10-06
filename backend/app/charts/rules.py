@@ -58,8 +58,44 @@ LINE_GROUP_MAIN_EFFECT_MIN = 0.1  # eta-squared(group, y): main-effect grouping 
 # box) when evidence.dispersion carries a STRONG entry for the pair — the
 # thresholds live in profiling/evidence.py (DISPERSION_*)
 TWO_STATE_INTERACTION_MIN = 0.05  # interaction share for a category × two-state chart
+# stage 20b composition: the same interaction evidence says the mix of parts is
+# not the same in every bar — without it a stack only restates two bar charts.
+# The floor is deliberately above the two-state one: a dumbbell asks a narrow
+# question about two states, a stacked bar takes a slot to claim the whole mix
+# shifts, so a share that barely clears the noise does not earn one.
+COMPOSITION_INTERACTION_MIN = 0.08
+COMPOSITION_PARTS_RANGE = (2, 8)
+COMPOSITION_X_RANGE = (2, 20)
+# a rate, a share or an average is already normalised: adding its values up
+# produces no total, so it is never the measure of a composition
+_NON_ADDITIVE_NAME_RE = re.compile(
+    r"(^|_)(pct|percent|percentage|ratio|rate|share|avg|average|mean|median|per)($|_)", re.I
+)
+# stage 20b flow: a sankey claims "these rows moved from A to B". The only
+# honest, statistic-free signal for that is the author's own naming — a
+# declared from/to (source/target, prev/next …) pair over one stem. A pair of
+# look-alike category columns is NOT treated as a flow: it is as likely to be
+# a copy, whose sankey would be all self-loops.
+FLOW_SCORE = 0.55  # descriptive, like the count bar; no effect size behind it
+FLOW_NODES_RANGE = (2, 20)
+_FLOW_TOKEN_PAIRS = (
+    ("source", "target"),
+    ("src", "dst"),
+    ("src", "dest"),
+    ("from", "to"),
+    ("origin", "destination"),
+    ("origin", "dest"),
+    ("orig", "dest"),
+    ("start", "end"),
+    ("prev", "next"),
+    ("previous", "next"),
+    ("before", "after"),
+    ("old", "new"),
+    ("parent", "child"),
+    ("sender", "receiver"),
+)
 # types sharing the bar's per-x cap and the per-y cap (stage 19 family)
-_X_CAPPED_TYPES = frozenset({"bar", "lollipop", "box", "violin", "raincloud", "ridgeline", "dot_interval", "polar_line", "rose", "line"})
+_X_CAPPED_TYPES = frozenset({"bar", "lollipop", "box", "violin", "raincloud", "ridgeline", "dot_interval", "polar_line", "rose", "line", "stacked_bar"})
 _Y_CAPPED_TYPES = _X_CAPPED_TYPES | frozenset({"dumbbell", "slopegraph"})
 
 Tier = Literal["top", "secondary", "exploratory"]
@@ -71,6 +107,7 @@ _FAMILY: dict[str, str] = {
     "lollipop": "bar",
     "polar_line": "bar",
     "rose": "bar",
+    "stacked_bar": "bar",
     "dumbbell": "bar",
     "slopegraph": "bar",
     "violin": "box",
@@ -384,6 +421,8 @@ def recommend_charts(profile: DatasetProfile) -> list[Recommendation]:
     candidates += _count_chart(profile, cat_cols, roles)
     candidates += _two_state_charts(profile, cat_cols, measures, index, roles)
     candidates += _matrix_charts(profile, cat_cols, measures, index, roles)
+    candidates += _composition_charts(profile, cat_cols, measures, index, roles)
+    candidates += _flow_charts(profile, cat_cols, roles)
     # a cycle (hour) is drawn once, by the cyclic line: never also as a scatter / hexbin
     candidates += _scatter_charts(profile, measures, group_cols, index)
     candidates += _histogram_charts(profile, numeric_cols)
@@ -499,8 +538,13 @@ def _variant(spec: ChartSpec, chart_type: ChartType, choice: ChartChoice) -> Cha
     sort = choice.sort if chart_type in CATEGORY_AXIS_TYPES else None
     if chart_type == spec.type:
         return spec if spec.sort is not None or sort is None else spec.model_copy(update={"sort": sort})
-    update: dict = {"type": chart_type, "sort": sort, "top_n": None}
-    if chart_type in ("box", "violin", "raincloud", "ridgeline", "dot_interval"):
+    update: dict = {"type": chart_type, "sort": sort, "top_n": None, "percent": None}
+    if chart_type in ("stacked_bar", "sankey"):
+        # only sum / count compose (spec.py COMPOSITION_AGGREGATIONS)
+        update.update(aggregation="count" if spec.y is None else (spec.aggregation if spec.aggregation == "sum" else "sum"))
+        if chart_type == "stacked_bar":
+            update.update(percent=spec.percent)
+    elif chart_type in ("box", "violin", "raincloud", "ridgeline", "dot_interval"):
         update.update(aggregation=None, group_by=None)
     elif chart_type in ("bar", "lollipop", "polar_line", "rose"):
         update.update(aggregation=spec.aggregation or ("count" if spec.y is None else "mean"))
@@ -725,6 +769,144 @@ def _matrix_charts(
     return recs
 
 
+# --- stage 20b: composition / flow -------------------------------------------
+
+
+def _is_additive_measure(num: ColumnProfile) -> bool:
+    """A measure whose parts add up to a whole: a genuine numeric quantity,
+    never negative (a signed measure has no part-to-whole reading, and a
+    rating or a code is not a quantity to sum), and not already a rate or an
+    average — the sum of percentages or of per-unit values is not a total."""
+    if num.semantic_type != "numeric" or _NON_ADDITIVE_NAME_RE.search(num.name):
+        return False
+    return isinstance(num.min, (int, float)) and not isinstance(num.min, bool) and num.min >= 0
+
+
+def _composition_charts(
+    profile: DatasetProfile,
+    cat_cols: list[ColumnProfile],
+    numeric_cols: list[ColumnProfile],
+    index: _EvidenceIndex,
+    roles: dict[str, ColumnRole],
+) -> list[Recommendation]:
+    """Category × parts → summed magnitude, when the interaction evidence says
+    the mix of parts is not the same in every category. Drawn as a stacked bar
+    (grouped bar as the alternative) — never a pie."""
+    recs: list[Recommendation] = []
+    x_lo, x_hi = COMPOSITION_X_RANGE
+    p_lo, p_hi = COMPOSITION_PARTS_RANGE
+    for cat in [c for c in cat_cols if x_lo <= (c.n_categories or 0) <= x_hi]:
+        for part in cat_cols:
+            if part.name == cat.name or not p_lo <= (part.n_categories or 0) <= p_hi:
+                continue
+            # a composition is directional: the bars are the whole, the stack
+            # the split. Only the reading whose stack is the narrower
+            # dimension is drawn (ties by name), so one pair never yields two
+            # charts of the same numbers transposed.
+            if (part.n_categories or 0, part.name) > (cat.n_categories or 0, cat.name):
+                continue
+            for num in numeric_cols:
+                if not _is_additive_measure(num):
+                    continue
+                strength = index.interaction.get((cat.name, part.name, num.name), 0.0)
+                if strength < COMPOSITION_INTERACTION_MIN:
+                    continue
+                ctx = _category_ctx(
+                    cat,
+                    num,
+                    index,
+                    profile,
+                    n_categories=part.n_categories or 0,
+                    part_to_whole=True,
+                    magnitude_measure=True,
+                )
+                base = ChartSpec(
+                    title=f"Total {num.name} by {cat.name}, split by {part.name}",
+                    type="stacked_bar",
+                    x=cat.name,
+                    y=num.name,
+                    group_by=part.name,
+                    aggregation="sum",
+                    reason=(
+                        f"Shows how the total {num.name} of each {cat.name} is made up of its "
+                        f"{part.name} parts (the mix differs by {cat.name})."
+                    ),
+                )
+                rec = _finding(
+                    profile, base, 0.45 + 0.45 * math.sqrt(strength), roles[cat.name], roles[num.name], roles[part.name], ctx
+                )
+                if rec is not None:
+                    recs.append(rec)
+    return recs
+
+
+def _name_parts(name: str) -> list[tuple[str, str]]:
+    """(token, stem) readings of a column name: the whole name, its first
+    underscore-separated token and its last one ("from_city" -> ("from",
+    "city"), "city_from" -> ("from", "city"))."""
+    low = name.strip().lower()
+    out = [(low, "")]
+    if "_" in low:
+        head, rest = low.split("_", 1)
+        out.append((head, rest))
+        stem, tail = low.rsplit("_", 1)
+        out.append((tail, stem))
+    return out
+
+
+def flow_direction(a: str, b: str) -> tuple[str, str] | None:
+    """(source, target) when the two column names declare a transition over
+    one stem (from_city / to_city, status_prev / status_next, src / dst);
+    None otherwise. Deterministic and independent of the argument order."""
+    for first, second in ((a, b), (b, a)):
+        for token_a, stem_a in _name_parts(first):
+            for token_b, stem_b in _name_parts(second):
+                if stem_a == stem_b and (token_a, token_b) in _FLOW_TOKEN_PAIRS:
+                    return first, second
+    return None
+
+
+def _flow_charts(
+    profile: DatasetProfile,
+    cat_cols: list[ColumnProfile],
+    roles: dict[str, ColumnRole],
+) -> list[Recommendation]:
+    """A declared from → to pair of category columns: how many rows move from
+    each source to each target, drawn as a sankey. The weight is a row count:
+    the flow itself is the finding, so there is no effect size to score and
+    the chart carries the descriptive FLOW_SCORE."""
+    recs: list[Recommendation] = []
+    lo, hi = FLOW_NODES_RANGE
+    usable = {c.name: c for c in cat_cols if lo <= (c.n_categories or 0) <= hi}
+    names = sorted(usable)
+    for i, a in enumerate(names):
+        for b in names[i + 1 :]:
+            direction = flow_direction(a, b)
+            if direction is None:
+                continue
+            src, dst = direction
+            ctx = IntentContext(
+                n_rows=profile.profiled_rows or profile.n_rows,
+                n_groups=usable[src].n_categories or 0,
+                n_categories=usable[dst].n_categories or 0,
+                count_measure=True,
+                magnitude_measure=True,
+                flow_pair=True,
+            )
+            base = ChartSpec(
+                title=f"Flow from {src} to {dst}",
+                type="sankey",
+                x=src,
+                group_by=dst,
+                aggregation="count",
+                reason=f"Shows how many records move from each {src} to each {dst}.",
+            )
+            rec = _finding(profile, base, FLOW_SCORE, roles[src], None, roles[dst], ctx)
+            if rec is not None:
+                recs.append(rec)
+    return recs
+
+
 def _scatter_charts(
     profile: DatasetProfile,
     numeric_cols: list[ColumnProfile],
@@ -868,6 +1050,10 @@ def select_for_spec(spec: ChartSpec, profile: DatasetProfile) -> tuple[ChartSpec
         count_measure=spec.y is None,
         magnitude_measure=spec.aggregation in ("sum", "count"),
         ranking_requested=spec.sort == "value",
+        # stage 20b: a suggested stacked bar / sankey states the intent itself
+        # (the guards in intent.py still decide whether it is eligible)
+        part_to_whole=spec.type == "stacked_bar",
+        flow_pair=spec.type == "sankey" or flow_direction(spec.x or "", spec.group_by or "") == (spec.x, spec.group_by),
     )
     if spec.type == "histogram":
         return spec, [], "distribution"
@@ -907,6 +1093,18 @@ def evaluate_llm_spec(spec: ChartSpec, profile: DatasetProfile) -> tuple[float, 
         return score, "strong" if score >= TOP_SCORE_FLOOR else "weak"
     if spec.type == "heatmap":
         return 0.65, "neutral"
+    if spec.type == "sankey" or (spec.type == "stacked_bar" and spec.y is None):
+        # stage 20b: counting how rows split across two category columns is a
+        # description, not a hypothesis the evidence scan can grade
+        return 0.6, "neutral"
+    if spec.type == "stacked_bar":
+        # the claim is "the mix of parts differs by category": the same
+        # interaction share the matrix heatmap is scored on
+        strength = index.interaction.get((spec.x or "", spec.group_by or "", spec.y or ""))
+        if strength is None:
+            return UNVERIFIED_SCORE, "unverified"
+        score = 0.45 + 0.45 * math.sqrt(strength)
+        return score, "strong" if score >= TOP_SCORE_FLOOR else "weak"
     # stage 19: the new types are scored as the family they belong to
     family = _FAMILY.get(spec.type, spec.type)
     if spec.type == "line" and (col := columns.get(spec.x or "")) is not None and col.semantic_type == "categorical":
