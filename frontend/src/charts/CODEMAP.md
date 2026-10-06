@@ -17,4 +17,4 @@ generated_at: 2026-09-15
 | Dir | Domain | Depends On | Purpose |
 |---|---|---|---|
 | `echarts/` | Chart Layer | echarts, ../types.ts | Option builders, theme, binding, tests. |
-| `__fixtures__/` | Fixtures | — | 18 `RenderResult` JSON files captured from the real backend (some >1000 lines; data, not code — do not read whole). |
+| `__fixtures__/` | Fixtures | — | 19 `RenderResult` JSON files captured from the real backend (some >1000 lines; data, not code — do not read whole). |

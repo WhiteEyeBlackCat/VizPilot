@@ -6,6 +6,7 @@
 // change.
 //
 //   npm run capture-fixtures            (backend must be running on 8100)
+//   npm run capture-fixtures -- <name>… (re-record only these; index.json is merged)
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
@@ -26,6 +27,12 @@ const FIXTURES = {
   line_grouped: {
     file: "air_quality.csv",
     spec: { title: "mean temperature per day by station", type: "line", x: "timestamp", y: "temperature", group_by: "station", aggregation: "mean", time_granularity: "day" },
+  },
+  line_grouped_gap: {
+    // e2e/data/seasonal_groups.csv: each season covers only some months of
+    // each year, so a group's consecutive points can be many buckets apart
+    file: "e2e/data/seasonal_groups.csv",
+    spec: { title: "mean temp per month by season", type: "line", x: "dteday", y: "temp", group_by: "season", aggregation: "mean", time_granularity: "month" },
   },
   line_raw_time: {
     file: "air_quality.csv",
@@ -141,10 +148,12 @@ const FIXTURES = {
   },
 };
 
-// `--only a,b,c` records a subset and merges it into the existing index.json
+// `--only a,b,c` (or positional names) records a subset and merges it into the existing index.json
 // (the other fixtures keep their recorded snapshots)
 const onlyArg = process.argv.indexOf("--only");
-const only = onlyArg >= 0 ? new Set(process.argv[onlyArg + 1].split(",")) : null;
+const positional = process.argv.slice(2).filter((a, i, arr) => a !== "--only" && arr[i - 1] !== "--only");
+const onlyNames = onlyArg >= 0 ? process.argv[onlyArg + 1].split(",") : positional;
+const only = onlyNames.length ? new Set(onlyNames) : null;
 
 async function upload(file) {
   // dataset/<file> (generated synthetic data) or a small committed file
@@ -220,5 +229,5 @@ for (const [name, fx] of Object.entries(FIXTURES)) {
       ("truncated" in r.chart_data ? ` truncated=${r.chart_data.truncated}` : ""),
   );
 }
-writeFileSync(join(outDir, "index.json"), JSON.stringify(index, null, 2) + "\n");
+writeFileSync(indexPath, JSON.stringify(index, null, 2) + "\n");
 console.log(`[fixtures] wrote ${Object.keys(index).length} fixtures to ${outDir}`);

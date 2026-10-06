@@ -22,3 +22,4 @@ generated_at: 2026-09-15
 | `README.md` | E2E | Requirements and coverage list. |
 | `data/sparse_groups.csv` | E2E | Committed input for null-gap fixtures. |
 | `data/make_stage191.py` → `data/spread_groups.csv`, `data/cycles.csv`, `data/dense_xy.csv` | E2E | Stage 19.1 deterministic inputs (same mean / different dispersion + ordered level; hour / month cycles; dense XY) behind the raincloud / ridgeline / box / natural-order bar + line / polar_line / rose / hexbin fixtures and `backend/tests/test_fixture_regression.py`. |
+| `data/seasonal_groups.csv` | E2E | Committed input for `line_grouped_gap` (24 monthly rows; each season occupies only part of each year). |

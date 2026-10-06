@@ -141,6 +141,154 @@ function baseOption(result: RenderResult, zoomable: boolean, legendShown: boolea
   };
 }
 
+// --- grouped temporal gaps --------------------------------------------------
+//
+// A grouped line over time (`temp over dteday by season`) has, per group,
+// only the buckets that group occupies: the backend (`render.py`
+// `_render_line`) emits a point for every (x, group) bucket that occurs and
+// none for a month in which a season does not occur, so ECharts joined the
+// last 2011 summer point straight to the first 2012 one across nine months
+// that other seasons occupy. The fix is presentation-only and keeps every
+// backend (x, y) pair in order.
+//
+// Rule (chart semantics, no calendar): the chart's temporal buckets are the
+// x values that actually exist in any series (union across groups, deduped
+// on their parsed timestamp). A group's line breaks between two consecutive
+// observations iff at least one such bucket lies between them — i.e. the
+// group is absent from a bucket where the chart has data. Where that holds
+// an invisible null point is inserted at the midpoint and
+// `connectNulls: false` draws the break. Nothing is generated: a weekend in
+// business-day data, a holiday, or an overnight stretch in hourly data is no
+// bucket of the chart when no group has a point there, so the line stays
+// connected across it; a season absent from months that other seasons
+// occupy breaks. Only grouped temporal lines are touched.
+//
+// The rule presumes the x values are *aligned buckets* — identities shared
+// by every group — and would fragment raw asynchronous timestamps (group A
+// at 09:00, 11:00, 13:00 and B at 10:00, 12:00, 14:00 have no bucket in
+// common; each group would be cut into isolated points). Two things decide
+// whether the x values are aligned buckets, `temporalGrid` records which:
+//
+// 1. "bucketed": `spec.time_granularity` is day / week / month — the backend
+//    truncated x to that unit and aggregated (`_render_line`), so the x
+//    values are calendar buckets by construction and the rule applies to
+//    every group as it is.
+// 2. "grid": the granularity is raw / unset (the rules keep raw up to 500
+//    distinct timestamps, e.g. every monthly or hourly dataset of that size),
+//    so the x values are the timestamps themselves and the data has to show
+//    the grid. The union of x is read on the coarsest exact scale it fits
+//    (calendar months when every value is a month start, calendar days when
+//    every value is a midnight, else milliseconds; DST-safe for day and
+//    month grids), the grid unit is the smallest step between consecutive
+//    buckets, and the union is a regular grid iff every step is a whole
+//    multiple of the unit and at least half of the steps are exactly one
+//    unit (the grid is dense at its own unit, not a coincidence of a few
+//    shared instants). On such a grid a group is broken only when it samples
+//    at the unit itself — at least half of its own consecutive steps are one
+//    unit — because a group whose typical step is coarser (every second
+//    hour, quarterly points among monthly ones) is a sparser series, not a
+//    series with holes, and is drawn continuous.
+// 3. null: anything else (irregular spacing, a single bucket) — raw
+//    timestamps, never broken.
+//
+// Neither chart titles nor column names take part; the decision is a pure
+// function of the echoed spec's granularity and the x values.
+
+const DAY_MS = 86_400_000;
+
+// Parsed timestamp (ms) of an x value, the bucket's canonical key. Date-only
+// strings are read as local midnight, the way ECharts' time axis reads them
+// (`Date.parse` alone would take "2011-01-01" as UTC but
+// "2011-01-01T00:00:00" as local, splitting one bucket in two).
+const temporalKey = (v: number | string | null): number => {
+  if (typeof v !== "string") return NaN;
+  if (/^\d{4}-\d{2}$/.test(v)) return Date.parse(`${v}-01T00:00:00`);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return Date.parse(`${v}T00:00:00`);
+  return Date.parse(v.replace(/^(\d{4}-\d{2}-\d{2}) /, "$1T"));
+};
+
+export type GridScale = "month" | "day" | "ms";
+
+/** Bucket keys on the coarsest exact calendar scale every key fits: month
+ *  index when all are local month starts, day number when all are local
+ *  midnights, otherwise the millisecond itself. */
+export function gridPositions(keys: number[]): { scale: GridScale; position: Map<number, number> } {
+  const dates = keys.map((k) => new Date(k));
+  const midnight = (d: Date) => d.getHours() === 0 && d.getMinutes() === 0 && d.getSeconds() === 0 && d.getMilliseconds() === 0;
+  let scale: GridScale = "ms";
+  if (dates.length && dates.every((d) => midnight(d) && d.getDate() === 1)) scale = "month";
+  else if (dates.length && dates.every(midnight)) scale = "day";
+  const pos = (d: Date, k: number): number =>
+    scale === "month" ? d.getFullYear() * 12 + d.getMonth() : scale === "day" ? Math.round(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / DAY_MS) : k;
+  return { scale, position: new Map(keys.map((k, i) => [k, pos(dates[i], k)])) };
+}
+
+/** Steps between consecutive valid positions of a series. */
+const steps = (positions: number[]): number[] => {
+  const out: number[] = [];
+  for (let i = 1; i < positions.length; i++) if (!Number.isNaN(positions[i - 1]) && !Number.isNaN(positions[i])) out.push(positions[i] - positions[i - 1]);
+  return out;
+};
+const atLeastHalf = (xs: number[], pred: (v: number) => boolean): boolean => xs.length > 0 && 2 * xs.filter(pred).length >= xs.length;
+
+export interface TemporalGrid {
+  /** parsed x (ms) → global index in sorted order, over every series;
+   *  unparsable / null x values take no part */
+  index: Map<number, number>;
+  /** why the x values count as aligned buckets: the backend truncated them
+   *  ("bucketed"), a regular grid was detected in the data ("grid"), or they
+   *  are raw timestamps that are never broken (null) */
+  aligned: "bucketed" | "grid" | null;
+  /** key → position on the detected grid scale, and the grid unit
+   *  (positions); only meaningful when `aligned === "grid"` */
+  scale: GridScale;
+  position: Map<number, number>;
+  unit: number;
+}
+
+/** The chart's temporal buckets over every series, with the verdict on
+ *  whether they are aligned buckets (see "grouped temporal gaps"). */
+export function temporalGrid(data: LineChartData, granularity: TimeGranularity | null | undefined): TemporalGrid {
+  const keys = new Set<number>();
+  for (const s of data.series) for (const v of s.x) {
+    const k = temporalKey(v);
+    if (!Number.isNaN(k)) keys.add(k);
+  }
+  const sorted = Array.from(keys).sort((a, b) => a - b);
+  const index = new Map(sorted.map((k, i) => [k, i]));
+  const { scale, position } = gridPositions(sorted);
+  const unionSteps = steps(sorted.map((k) => position.get(k)!));
+  const unit = unionSteps.length ? Math.min(...unionSteps) : 0;
+  const bucketed = granularity === "day" || granularity === "week" || granularity === "month";
+  const regular = unit > 0 && unionSteps.every((s) => s % unit === 0) && atLeastHalf(unionSteps, (s) => s === unit);
+  return { index, aligned: bucketed ? "bucketed" : regular ? "grid" : null, scale, position, unit };
+}
+
+/** `pairs()` for one group with a null point inserted between two
+ *  consecutive observations whenever another existing bucket of the chart
+ *  lies between them (the group is absent there); unchanged when the chart's
+ *  x values are not aligned buckets, or — on a detected grid — when this
+ *  group does not sample at the grid unit. */
+export function breakAbsentBuckets(
+  x: (number | string | null)[],
+  y: (number | null)[],
+  grid: TemporalGrid,
+): Pair[] {
+  const base = pairs(x, y);
+  if (grid.aligned === null) return base;
+  const keys = x.map(temporalKey);
+  if (grid.aligned === "grid" && !atLeastHalf(steps(keys.map((k) => grid.position.get(k) ?? NaN)), (s) => s === grid.unit)) return base;
+  const out: Pair[] = [];
+  for (let i = 0; i < base.length; i++) {
+    if (i > 0) {
+      const gp = grid.index.get(keys[i - 1]);
+      const gc = grid.index.get(keys[i]);
+      if (gp !== undefined && gc !== undefined && Math.abs(gc - gp) > 1) out.push([(keys[i - 1] + keys[i]) / 2, null]);
+    }
+    out.push(base[i]);
+  }
+  return out;
+}
 // --- line -------------------------------------------------------------------
 
 function lineOption(result: RenderResult): VizOption {
@@ -149,10 +297,15 @@ function lineOption(result: RenderResult): VizOption {
   const categorical = isCategoricalX(d);
   const categories = categorical ? Array.from(new Set(d.series.flatMap((s) => s.x.map(String)))) : [];
   const many = d.series.some((s) => s.x.length > LINE_SYMBOL_MAX_POINTS);
+  // grouped temporal series break where a group is absent from an aligned
+  // bucket other groups occupy (see "grouped temporal gaps" above); raw
+  // asynchronous timestamps, ungrouped lines and numeric / category axes are
+  // passed through as they are
+  const grid = temporal && result.spec.group_by != null ? temporalGrid(d, result.spec.time_granularity) : null;
   const series: LineSeriesOption[] = d.series.map((s) => ({
     type: "line",
     name: s.name,
-    data: pairs(s.x, s.y),
+    data: grid ? breakAbsentBuckets(s.x, s.y, grid) : pairs(s.x, s.y),
     showSymbol: !many,
     symbolSize: 5,
     lineStyle: { width: 1.5 },
