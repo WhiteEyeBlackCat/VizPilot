@@ -34,15 +34,16 @@ generated_at: 2026-09-15
 | `App` | `App.tsx` | L:33 |
 | `reducer`, `initialState`, `AppState`, `Action`, `PAGES`, `Preview`, `SavedChart`, `specKey`, `isSaved` | `store.ts` | L:143, L:86, L:70, L:101, L:25, L:34, L:47, L:119, L:136 |
 | `api`, `ApiError` | `api.ts` | L:49, L:9 |
-| `ChartSpec`, `Recommendation`, `Insight`, `RecommendationsResponse`, `RenderResult`, `DatasetProfile` | `types.ts` | L:81, L:120, L:129, L:135, L:211, L:62 |
+| `ChartSpec`, `Recommendation`, `Insight`, `RecommendationsResponse`, `RenderResult`, `DatasetProfile` | `types.ts` | L:142, L:198, L:213, L:234, L:408, L:64 |
+| `StackedBarChartData`, `SankeyChartData` (stage 20b) | `types.ts` | L:351, L:376 |
 
 ## Files
 
 | File | Domain | Deps | Function |
 |---|---|---|---|
 | `App.tsx` | Shell | `← components/*, pages/*, lib/* \| → main.tsx` | Loads datasets; on select fetches profile + recs(llm=false) + recs(llm=true) in parallel; routes pages; keeps panel group mounted; `previewRecommendation(rec, insight?)` / `previewInsight` link a chart to its finding. |
-| `store.ts` | State | `→ 8 files (foundational); rg "from \"../store\"\|@/store" frontend/src -l` | `AppState`/`Action`/`reducer`; per-dataset workspace; explore form. `Preview.insight` / `SavedChart.insight` carry the finding a chart supports (stage 18). |
+| `store.ts` | State | `→ 8 files (foundational); rg "from \"../store\"\|@/store" frontend/src -l` | `AppState`/`Action`/`reducer`; per-dataset workspace; explore form (`ExploreForm.stack` is the stage-20b 100 %-stack toggle). `Preview.insight` / `SavedChart.insight` carry the finding a chart supports (stage 18). |
 | `api.ts` | API Client | `→ App.tsx, components/UploadPanel.tsx, ManualBuilder.tsx, Recommendations.tsx` | fetch wrappers for `/api/*`; `ApiError` carries 422 errors. |
-| `types.ts` | Types | `→ many` | Contract mirrors (keep in sync with backend models). `Insight` optional fields: `headline`, `why_it_matters`, `validation`, `priority`, `effect{label,value,n}`. |
+| `types.ts` | Types | `→ many` | Contract mirrors (keep in sync with backend models). `Insight` optional fields: `headline`, `why_it_matters`, `validation`, `priority`, `effect{label,value,n}`. Stage 20b: `ChartType` gains `stacked_bar` / `sankey`, `ChartSpec.percent?`, and the `StackedBarChartData` / `SankeyChartData` payloads. |
 | `main.tsx` | Shell | — | React root. |
 | `index.css` | Theme | — | Tailwind layers + light/dark CSS variable tokens (16.1). |

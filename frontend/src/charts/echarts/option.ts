@@ -13,6 +13,7 @@ import type {
   CustomSeriesOption,
   HeatmapSeriesOption,
   LineSeriesOption,
+  SankeySeriesOption,
   ScatterSeriesOption,
 } from "echarts/charts";
 // type-only: the runtime registration lives in ./echarts.ts
@@ -29,6 +30,9 @@ import type {
   HistogramChartData,
   LineChartData,
   RenderResult,
+  SankeyChartData,
+  SankeyLink,
+  StackedBarChartData,
   TimeGranularity,
   TwoStateChartData,
 } from "../../types";
@@ -691,6 +695,10 @@ export function buildOption(result: RenderResult): VizOption {
     case "polar_line":
     case "rose":
       return polarOption(result, result.spec.type);
+    case "stacked_bar":
+      return stackedBarOption(result);
+    case "sankey":
+      return sankeyOption(result);
   }
 }
 
@@ -1135,5 +1143,109 @@ export function polarOption(result: RenderResult, kind: "polar_line" | "rose"): 
     // the measure is named by the tooltip and the panel
     radiusAxis: { type: "value", axisLine: { show: false }, axisTick: { show: false }, axisLabel: { color: COLORS.muted, fontSize: 10 }, splitLine: { lineStyle: { color: COLORS.splitLine } }, z: 5 },
     series,
+  };
+}
+
+// ============================================================================
+// stage 20b: composition (stacked_bar) and flow (sankey). Both payloads are
+// fully aggregated by the backend — the shares, the bar totals and the link
+// weights all come from render.py; nothing is summed here.
+// ============================================================================
+
+// --- stacked_bar ---------------------------------------------------------------
+
+export function stackedBarOption(result: RenderResult): VizOption {
+  const d = result.chart_data as StackedBarChartData;
+  const order = barOrder(d, result.spec.sort);
+  const categories = order.map((i) => String(d.categories[i]));
+  // one stack id: every series piles into the same bar. Null stays null, so a
+  // combination that never occurs leaves a gap in the stack instead of a zero.
+  const series: BarSeriesOption[] = d.series.map((s, k) => ({
+    type: "bar",
+    name: s.name,
+    stack: "total",
+    data: order.map((i) => s.values[i] ?? null),
+    barMaxWidth: 48,
+    barCategoryGap: "38%",
+    itemStyle: { color: PALETTE[k % PALETTE.length], opacity: 0.92 },
+    emphasis: { focus: "series", itemStyle: { opacity: 1 } },
+  }));
+  const totals = order.map((i) => d.totals[i] ?? null);
+  return {
+    ...baseOption(result, false, true),
+    tooltip: {
+      ...tooltipBase,
+      trigger: "axis",
+      axisPointer: { type: "shadow" },
+      formatter: (p) => {
+        const items = Array.isArray(p) ? p : [p];
+        if (items.length === 0) return "";
+        const i = items[0].dataIndex;
+        const lines = items.map((it) => `${it.marker ?? ""}${it.seriesName}: ${fmt(it.value as number | null)}${d.percent ? " %" : ""}`);
+        // a 100 % stack still names the magnitude it is a share of
+        const total = totals[i];
+        const foot = total === null ? "" : `<br/>${d.percent ? "總計" : "合計"} ${fmt(total)}`;
+        return `${categories[i]}<br/>${lines.join("<br/>")}${foot}`;
+      },
+    },
+    xAxis: catAxis(categories, result.spec.x ?? ""),
+    yAxis: {
+      ...axisBase,
+      type: "value",
+      ...yAxisName(d.y_label),
+      ...(d.percent ? { max: 100, axisLabel: { ...axisBase.axisLabel, formatter: "{value}%" } } : {}),
+    },
+    series,
+  };
+}
+
+// --- sankey -------------------------------------------------------------------
+
+export function sankeyOption(result: RenderResult): VizOption {
+  const d = result.chart_data as SankeyChartData;
+  // node identities are side-prefixed by the backend so the same label on both
+  // ends is two nodes; the label the reader sees is the column value itself.
+  const label = new Map(d.nodes.map((n) => [n.name, n.label]));
+  // one colour per distinct label, so the same category keeps its colour on
+  // both ends and a transition is readable as "this went into that"
+  const labels = [...new Set(d.nodes.map((n) => n.label))];
+  const colorOf = (name: string) => PALETTE[Math.max(0, labels.indexOf(label.get(name) ?? name)) % PALETTE.length];
+  const series: SankeySeriesOption = {
+    type: "sankey",
+    left: 24,
+    right: 108,
+    top: 48,
+    bottom: 24,
+    nodeWidth: 14,
+    nodeGap: 10,
+    draggable: false,
+    emphasis: { focus: "adjacency" },
+    data: d.nodes.map((n) => ({
+      name: n.name,
+      value: n.value,
+      itemStyle: { color: colorOf(n.name), borderWidth: 0 },
+      label: { formatter: () => n.label, color: COLORS.text, fontSize: 11 },
+    })),
+    links: d.links.map((l) => ({ source: l.source, target: l.target, value: l.value })),
+    lineStyle: { color: "gradient", opacity: 0.38, curveness: 0.5 },
+  };
+  return {
+    ...baseOption(result, false, false),
+    grid: undefined,
+    tooltip: {
+      ...tooltipBase,
+      trigger: "item",
+      formatter: (p) => {
+        const item = Array.isArray(p) ? p[0] : p;
+        if (item.dataType === "edge") {
+          const link = item.data as SankeyLink;
+          return `${label.get(link.source) ?? link.source} → ${label.get(link.target) ?? link.target}<br/>${d.y_label}: ${fmt(link.value)}`;
+        }
+        const node = d.nodes.find((n) => n.name === item.name);
+        if (!node) return String(item.name);
+        return `${node.label}（${node.column}）<br/>${d.y_label}: ${fmt(node.value)}`;
+      },
+    },
+    series: [series],
   };
 }

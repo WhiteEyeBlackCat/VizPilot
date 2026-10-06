@@ -66,11 +66,13 @@ export interface ExploreForm {
   y: string;
   group: string;
   agg: string;
+  /** stage 20b, stacked_bar only: "" = absolute stack, "percent" = 100 % */
+  stack: string;
 }
 export type ExploreField = keyof ExploreForm;
 export type FieldUpdate<T> = T | ((prev: T) => T);
 
-export const initialExploreForm: ExploreForm = { type: "bar", x: "", y: "", group: "", agg: "" };
+export const initialExploreForm: ExploreForm = { type: "bar", x: "", y: "", group: "", agg: "", stack: "" };
 
 export interface AppState {
   datasets: DatasetMeta[] | null; // null until the list request answered

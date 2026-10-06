@@ -109,7 +109,10 @@ export type ChartType =
   | "slopegraph"
   | "hexbin"
   | "polar_line"
-  | "rose";
+  | "rose"
+  // stage 20b: composition (part-to-whole) and flow
+  | "stacked_bar"
+  | "sankey";
 export const CHART_TYPES: ChartType[] = [
   "line",
   "bar",
@@ -127,6 +130,8 @@ export const CHART_TYPES: ChartType[] = [
   "hexbin",
   "polar_line",
   "rose",
+  "stacked_bar",
+  "sankey",
 ];
 export type Aggregation = "mean" | "sum" | "count" | "median" | "min" | "max";
 export type TimeGranularity = "raw" | "day" | "week" | "month";
@@ -145,6 +150,8 @@ export interface ChartSpec {
   time_granularity?: TimeGranularity | null;
   top_n?: number | null;
   sort?: SortOrder | null; // stage 19, additive
+  /** stage 20b, additive: stacked_bar only — every bar normalised to 100 % */
+  percent?: boolean | null;
   reason?: string;
   priority?: number;
 }
@@ -336,6 +343,45 @@ export interface HexbinChartData {
   y_label: string;
 }
 
+// --- stage 20b payloads (backend charts/render.py) --------------------------
+
+/** stacked_bar: the bar payload plus the total of every bar. `percent` says
+ *  whether `series[].values` are shares (0..100) — `totals` always carries
+ *  the absolute magnitude behind them. */
+export interface StackedBarChartData extends BarChartData {
+  totals: (number | null)[];
+  percent: boolean;
+}
+
+/** One end of a sankey link. `name` is the node identity (side-prefixed, so
+ *  the same label on both ends is two nodes and the graph never cycles) and
+ *  `label` is the value as it appears in the column. */
+export interface SankeyNode {
+  name: string;
+  label: string;
+  column: string;
+  side: "source" | "target";
+  value: number;
+}
+
+export interface SankeyLink {
+  source: string; // a node `name`
+  target: string;
+  value: number;
+}
+
+/** sankey: aggregated flow from one category column to another. Self-loops
+ *  are dropped before aggregation (`self_loops` counts the rows) and only the
+ *  heaviest links are kept (`truncated` / `n_links_total`). */
+export interface SankeyChartData {
+  nodes: SankeyNode[];
+  links: SankeyLink[];
+  truncated: boolean;
+  n_links_total: number;
+  self_loops: number;
+  y_label: string;
+}
+
 export type ChartData =
   | LineChartData
   | BarChartData
@@ -345,7 +391,9 @@ export type ChartData =
   | DensityChartData
   | DotIntervalChartData
   | TwoStateChartData
-  | HexbinChartData;
+  | HexbinChartData
+  | StackedBarChartData
+  | SankeyChartData;
 
 // Stage 9: histogram over a sentinel-laden column is binned over the robust
 // range; the rows outside it are counted here, never dropped silently

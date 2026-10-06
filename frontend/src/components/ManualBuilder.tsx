@@ -17,9 +17,13 @@ interface Props {
 }
 
 // which types take an aggregation / a group column (mirrors backend spec.py)
-const AGG_TYPES: ChartType[] = ["line", "bar", "lollipop", "polar_line", "rose", "dumbbell", "slopegraph"];
+const AGG_TYPES: ChartType[] = ["line", "bar", "lollipop", "polar_line", "rose", "dumbbell", "slopegraph", "stacked_bar", "sankey"];
 const BAR_LIKE: ChartType[] = ["bar", "lollipop", "polar_line", "rose"];
 const GROUP_TYPES: ChartType[] = ["line", "bar", "scatter", "histogram", "lollipop", "dumbbell", "slopegraph"];
+// stage 20b: only sum / count compose (backend spec.COMPOSITION_AGGREGATIONS)
+const COMPOSITION_TYPES: ChartType[] = ["stacked_bar", "sankey"];
+const COMPOSITION_AGGREGATIONS: Aggregation[] = ["sum", "count"];
+const STACK_MODES = ["percent"];
 const AGGREGATIONS: Aggregation[] = ["mean", "sum", "count", "median", "min", "max"];
 const NUMERIC_DTYPE = /^(U?Int|Float)\d+$/;
 
@@ -28,12 +32,13 @@ const names = (cols: ColumnProfile[]) => cols.map((c) => c.name);
 export function ManualBuilder({ profile, form, onField, onGenerate }: Props) {
   // same names and setter semantics as the former useState pairs (value or
   // updater), backed by the store; the logic below is unchanged
-  const { type, x, y, group, agg } = form;
+  const { type, x, y, group, agg, stack } = form;
   const setType = useCallback((v: FieldUpdate<string>) => onField("type", v), [onField]);
   const setX = useCallback((v: FieldUpdate<string>) => onField("x", v), [onField]);
   const setY = useCallback((v: FieldUpdate<string>) => onField("y", v), [onField]);
   const setGroup = useCallback((v: FieldUpdate<string>) => onField("group", v), [onField]);
   const setAgg = useCallback((v: FieldUpdate<string>) => onField("agg", v), [onField]);
+  const setStack = useCallback((v: FieldUpdate<string>) => onField("stack", v), [onField]);
   const [busy, setBusy] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
 
@@ -87,6 +92,9 @@ export function ManualBuilder({ profile, form, onField, onGenerate }: Props) {
       hexbin: names(numeric),
       polar_line: names(polarX),
       rose: names(polarX),
+      // stage 20b: the composition's bar axis and the flow's source column
+      stacked_bar: names(cats(2, 20)),
+      sankey: names(cats(2, 20)),
     };
     const yByType: Record<ChartType, string[]> = {
       line: names(numericY),
@@ -105,12 +113,26 @@ export function ManualBuilder({ profile, form, onField, onGenerate }: Props) {
       hexbin: names(numeric),
       polar_line: names(numericY),
       rose: names(numericY),
+      stacked_bar: names(numericY),
+      sankey: names(numericY),
     };
-    const groupChoices = type === "dumbbell" || type === "slopegraph" ? names(twoState) : GROUP_TYPES.includes(type) ? names(groupable) : [];
+    const groupChoices =
+      type === "dumbbell" || type === "slopegraph"
+        ? names(twoState)
+        : type === "stacked_bar"
+          ? names(cats(2, 8)) // the parts of the stack
+          : type === "sankey"
+            ? names(groupable) // the target the flow goes to
+            : GROUP_TYPES.includes(type)
+              ? names(groupable)
+              : [];
     return { x: xByType[type], y: yByType[type], group: groupChoices };
   }, [cols, type, profile.column_roles]);
 
   const showAgg = AGG_TYPES.includes(type);
+  // stage 20b: a stack reads as a part-to-whole, so only sum / count are offered
+  const isComposition = COMPOSITION_TYPES.includes(type);
+  const aggChoices = isComposition ? COMPOSITION_AGGREGATIONS : AGGREGATIONS;
 
   // axes must be pairwise distinct (stage3 validation): hide already-picked
   // columns from the other selects instead of round-tripping a 422
@@ -123,7 +145,8 @@ export function ManualBuilder({ profile, form, onField, onGenerate }: Props) {
     setY((prev) => (options.y.includes(prev) ? prev : ""));
     setGroup((prev) => (options.group.includes(prev) ? prev : ""));
     if (!showAgg) setAgg("");
-  }, [options, showAgg]);
+    if (type !== "stacked_bar") setStack("");
+  }, [options, showAgg, type]);
 
   useEffect(() => {
     setY((prev) => (prev === x ? "" : prev));
@@ -137,6 +160,11 @@ export function ManualBuilder({ profile, form, onField, onGenerate }: Props) {
       if (!y) setAgg("count");
       else if (type === "rose") setAgg((prev) => (prev === "sum" || prev === "count" ? prev : "sum")); // a rose is a magnitude
       else setAgg((prev) => (prev && prev !== "count" ? prev : "mean"));
+      return;
+    }
+    if (isComposition) {
+      // only sum / count compose: count with no measure, sum with one
+      setAgg(!y ? "count" : (prev) => (prev === "sum" || prev === "count" ? prev : "sum"));
       return;
     }
     if (type === "dumbbell" || type === "slopegraph") {
@@ -160,6 +188,7 @@ export function ManualBuilder({ profile, form, onField, onGenerate }: Props) {
       y: y || null,
       group_by: group || null,
       aggregation: showAgg && agg ? (agg as Aggregation) : null,
+      percent: type === "stacked_bar" ? stack === "percent" : null,
     };
     try {
       await onGenerate(spec);
@@ -188,9 +217,13 @@ export function ManualBuilder({ profile, form, onField, onGenerate }: Props) {
             label="聚合"
             value={agg}
             onChange={setAgg}
-            choices={AGGREGATIONS}
-            disabled={BAR_LIKE.includes(type) && !y}
+            choices={aggChoices}
+            disabled={(BAR_LIKE.includes(type) || isComposition) && !y}
           />
+        )}
+        {type === "stacked_bar" && (
+          // "—" = absolute stack (the magnitude), "percent" = 100 % stack (the share)
+          <FieldSelect label="堆疊方式" value={stack} onChange={setStack} choices={STACK_MODES} />
         )}
         <Button size="sm" className="h-8" disabled={busy} onClick={() => void generate()}>
           {busy ? "生成中…" : "生成圖表"}

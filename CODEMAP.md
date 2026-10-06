@@ -30,7 +30,7 @@ stats:
 | Understand how charts are drawn / themed | Chart Layer | `frontend/src/charts/echarts/CODEMAP.md` | `frontend/src/charts/__fixtures__/index.json` |
 | Understand pages / feature components / shadcn kit | Frontend UI | `frontend/src/pages/CODEMAP.md`, `frontend/src/components/CODEMAP.md` | `frontend/src/components/ui/CODEMAP.md` |
 | Run tests / e2e / find a test for a module | Tests | `backend/tests/CODEMAP.md`, `frontend/e2e/CODEMAP.md` | `frontend/package.json` |
-| Re-record / check the real-backend render fixtures (stage 19.1) | Tests | `frontend/e2e/capture-fixtures.mjs` (`--only a,b`), `frontend/e2e/data/make_stage191.py` | `backend/tests/test_fixture_regression.py`, `frontend/src/charts/echarts/option.stage191.test.ts` |
+| Re-record / check the real-backend render fixtures (stage 19.1 / 20b) | Tests | `frontend/e2e/capture-fixtures.mjs` (`--only a,b`), `frontend/e2e/data/make_stage191.py`, `frontend/e2e/data/make_stage20b.py` | `backend/tests/test_fixture_regression.py`, `frontend/src/charts/echarts/option.stage191.test.ts`, `option.stage20.test.ts` |
 | Get a dataset with a planted pattern | Synthetic Data | `dataset/syn/CODEMAP.md` | — |
 
 ## Subdirectories
@@ -47,7 +47,7 @@ stats:
 |---|---|---|
 | `create_app` | `backend/app/main.py` | L:18 |
 | `DatasetProfile`, `Evidence`, `PROFILE_VERSION` | `backend/app/profiling/models.py` | L:448, L:433, L:7 |
-| `ChartSpec`, `validate_spec` | `backend/app/charts/spec.py` | L:28, L:61 |
+| `ChartSpec`, `validate_spec` | `backend/app/charts/spec.py` | L:76, L:113 |
 | `Recommendation`, `recommend_charts`, `assign_tiers` | `backend/app/charts/rules.py` | L:90, L:347, L:393 |
 | `render_chart` | `backend/app/charts/render.py` | L:50 |
 | `RecommendationService` | `backend/app/llm/service.py` | L:106 |

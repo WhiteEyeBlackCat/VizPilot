@@ -622,6 +622,103 @@ def _render_matrix(df, spec, profile):
     return {"columns": columns, "rows": rows, "matrix": matrix, "y_label": _y_label(spec)}, False, n_points
 
 
+# --- stage 20b: composition (stacked_bar) -------------------------------------
+
+
+def _render_stacked_bar(df, spec, profile):
+    """Parts of a whole per category: the bar aggregation (same ranking,
+    same top_n truncation, same null-for-a-missing-cell rule) plus the column
+    total of every bar. Parts whose own column has an order (low < high) are
+    stacked in it; otherwise alphabetically, as the grouped bar does.
+    `percent` normalises each bar to 100 % — the absolute totals travel in
+    `totals` so the magnitude behind a share is never lost."""
+    chart_data, sampled, n_points = _render_bar(df, spec, profile)
+    series = chart_data["series"]
+    role = _role_of(profile, spec.group_by)
+    if role is not None and role.ordered:
+        by_name = {s["name"]: s for s in series}
+        series = [by_name[n] for n in _order_values(list(by_name), spec.group_by, profile, spec)]
+    n_categories = len(chart_data["categories"])
+    totals: list[Any] = []  # int for a count, float for a sum, None for an empty bar
+    for i in range(n_categories):
+        parts = [s["values"][i] for s in series if s["values"][i] is not None]
+        totals.append(sum(parts) if parts else None)
+    percent = bool(spec.percent)
+    if percent:
+        series = [
+            {
+                "name": s["name"],
+                "values": [
+                    None
+                    if s["values"][i] is None or not totals[i]
+                    else 100.0 * s["values"][i] / totals[i]
+                    for i in range(n_categories)
+                ],
+            }
+            for s in series
+        ]
+    chart_data.update(
+        series=series,
+        totals=totals,
+        percent=percent,
+        y_label=(f"share of {_y_label(spec)} (%)" if percent else _y_label(spec)),
+    )
+    return chart_data, sampled, n_points
+
+
+# --- stage 20b: flow (sankey) --------------------------------------------------
+
+SANKEY_MAX_LINKS = 60  # the strongest flows stay readable; the rest is disclosed
+
+
+def _render_sankey(df, spec, profile):
+    """Source category → target category with a count / sum weight, as
+    {nodes, links}. Self-loops (source == target) carry no flow and are
+    dropped; only the SANKEY_MAX_LINKS heaviest links are kept and
+    `truncated` says so. Node names are side-prefixed so the two ends never
+    collapse into one node (which would make a cycle out of city → city);
+    `label` is the value as it appears in the column."""
+    src, dst = spec.x, spec.group_by
+    data = _clean(df, spec, [spec.y])
+    keep = [] if spec.y is None else [pl.col(spec.y)]
+    data = data.select(
+        pl.col(src).cast(pl.Utf8).alias("_s"), pl.col(dst).cast(pl.Utf8).alias("_t"), *keep
+    )
+    pairs = data.filter(pl.col("_s") != pl.col("_t"))
+    self_loops = data.height - pairs.height
+    empty = {"nodes": [], "links": [], "truncated": False, "n_links_total": 0, "self_loops": self_loops, "y_label": _y_label(spec)}
+    links = pairs.group_by(["_s", "_t"]).agg(_agg_expr(spec).alias("_v"))
+    # a zero / negative / null weight has no ribbon to draw (a sankey encodes magnitude)
+    links = links.filter(pl.col("_v") > 0)
+    n_links = links.height
+    links = links.sort(["_v", "_s", "_t"], descending=[True, False, False]).head(SANKEY_MAX_LINKS)
+    if not links.height:
+        return empty, False, 0
+
+    rows = [(s, t, v) for s, t, v in links.iter_rows()]
+    # a count stays an int, a sum stays a float: the weights are added as they came
+    out_total: dict[str, Any] = {}
+    in_total: dict[str, Any] = {}
+    for s, t, v in rows:
+        out_total[s] = out_total.get(s, 0) + v
+        in_total[t] = in_total.get(t, 0) + v
+    nodes = [
+        {"name": f"{side}:{label}", "label": label, "column": column, "side": side_name, "value": jsonify_scalar(total)}
+        for side, side_name, column, totals in (("0", "source", src, out_total), ("1", "target", dst, in_total))
+        for label, total in ((v, totals[v]) for v in _order_values(list(totals), column, profile, spec))
+    ]
+    payload = {
+        "nodes": nodes,
+        "links": [{"source": f"0:{s}", "target": f"1:{t}", "value": jsonify_scalar(v)} for s, t, v in rows],
+        "truncated": n_links > len(rows),
+        "n_links_total": n_links,
+        # rows whose source equals its target: no flow, dropped before aggregation
+        "self_loops": self_loops,
+        "y_label": _y_label(spec),
+    }
+    return payload, False, len(rows)
+
+
 _RENDERERS = {
     "line": _render_line,
     "bar": _render_bar,
@@ -639,4 +736,6 @@ _RENDERERS = {
     "hexbin": _render_hexbin,
     "polar_line": _render_bar,  # aggregate around the cycle, natural order
     "rose": _render_bar,
+    "stacked_bar": _render_stacked_bar,
+    "sankey": _render_sankey,
 }

@@ -1,0 +1,66 @@
+{
+  "spec": {
+    "title": "channel share of revenue by region",
+    "type": "stacked_bar",
+    "x": "region",
+    "y": "revenue",
+    "group_by": "channel",
+    "aggregation": "sum",
+    "bins": null,
+    "time_granularity": null,
+    "top_n": null,
+    "sort": null,
+    "percent": true,
+    "reason": "",
+    "priority": 100
+  },
+  "chart_data": {
+    "categories": [
+      "South",
+      "North",
+      "East",
+      "West"
+    ],
+    "series": [
+      {
+        "name": "online",
+        "values": [
+          3.8098554495830785,
+          88.84028304068119,
+          12.531064836482232,
+          37.25228621117186
+        ]
+      },
+      {
+        "name": "partner",
+        "values": [
+          4.393977906476422,
+          1.4135145076357796,
+          80.11730460984393,
+          33.34050608685523
+        ]
+      },
+      {
+        "name": "retail",
+        "values": [
+          91.7961666439405,
+          9.74620245168305,
+          7.351630553673838,
+          29.40720770197292
+        ]
+      }
+    ],
+    "truncated": false,
+    "y_label": "share of sum(revenue) (%)",
+    "totals": [
+      108465.27,
+      107170.45999999999,
+      90830.19,
+      60088.5
+    ],
+    "percent": true
+  },
+  "sampled": false,
+  "n_points": 12,
+  "display_range": null
+}

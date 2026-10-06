@@ -1,0 +1,200 @@
+{
+  "spec": {
+    "title": "revenue from hub to hub",
+    "type": "sankey",
+    "x": "from_hub",
+    "y": "revenue",
+    "group_by": "to_hub",
+    "aggregation": "sum",
+    "bins": null,
+    "time_granularity": null,
+    "top_n": null,
+    "sort": null,
+    "percent": null,
+    "reason": "",
+    "priority": 100
+  },
+  "chart_data": {
+    "nodes": [
+      {
+        "name": "0:alpha",
+        "label": "alpha",
+        "column": "from_hub",
+        "side": "source",
+        "value": 61019.9
+      },
+      {
+        "name": "0:bravo",
+        "label": "bravo",
+        "column": "from_hub",
+        "side": "source",
+        "value": 66699
+      },
+      {
+        "name": "0:charlie",
+        "label": "charlie",
+        "column": "from_hub",
+        "side": "source",
+        "value": 64627.939999999995
+      },
+      {
+        "name": "0:delta",
+        "label": "delta",
+        "column": "from_hub",
+        "side": "source",
+        "value": 61860.73
+      },
+      {
+        "name": "0:echo",
+        "label": "echo",
+        "column": "from_hub",
+        "side": "source",
+        "value": 60556.91
+      },
+      {
+        "name": "1:alpha",
+        "label": "alpha",
+        "column": "to_hub",
+        "side": "target",
+        "value": 73153.39
+      },
+      {
+        "name": "1:bravo",
+        "label": "bravo",
+        "column": "to_hub",
+        "side": "target",
+        "value": 71685.56
+      },
+      {
+        "name": "1:charlie",
+        "label": "charlie",
+        "column": "to_hub",
+        "side": "target",
+        "value": 68035.87
+      },
+      {
+        "name": "1:delta",
+        "label": "delta",
+        "column": "to_hub",
+        "side": "target",
+        "value": 60780.380000000005
+      },
+      {
+        "name": "1:echo",
+        "label": "echo",
+        "column": "to_hub",
+        "side": "target",
+        "value": 41109.28
+      }
+    ],
+    "links": [
+      {
+        "source": "0:bravo",
+        "target": "1:charlie",
+        "value": 20592.1
+      },
+      {
+        "source": "0:bravo",
+        "target": "1:alpha",
+        "value": 19397.41
+      },
+      {
+        "source": "0:charlie",
+        "target": "1:alpha",
+        "value": 18549.16
+      },
+      {
+        "source": "0:charlie",
+        "target": "1:delta",
+        "value": 18397.49
+      },
+      {
+        "source": "0:echo",
+        "target": "1:bravo",
+        "value": 18358.24
+      },
+      {
+        "source": "0:charlie",
+        "target": "1:bravo",
+        "value": 18087.16
+      },
+      {
+        "source": "0:delta",
+        "target": "1:bravo",
+        "value": 17941.28
+      },
+      {
+        "source": "0:echo",
+        "target": "1:alpha",
+        "value": 17701.66
+      },
+      {
+        "source": "0:delta",
+        "target": "1:alpha",
+        "value": 17505.16
+      },
+      {
+        "source": "0:alpha",
+        "target": "1:charlie",
+        "value": 17352.42
+      },
+      {
+        "source": "0:alpha",
+        "target": "1:bravo",
+        "value": 17298.88
+      },
+      {
+        "source": "0:alpha",
+        "target": "1:delta",
+        "value": 16228.06
+      },
+      {
+        "source": "0:bravo",
+        "target": "1:delta",
+        "value": 15979.07
+      },
+      {
+        "source": "0:delta",
+        "target": "1:charlie",
+        "value": 15770.1
+      },
+      {
+        "source": "0:echo",
+        "target": "1:charlie",
+        "value": 14321.25
+      },
+      {
+        "source": "0:bravo",
+        "target": "1:echo",
+        "value": 10730.42
+      },
+      {
+        "source": "0:delta",
+        "target": "1:echo",
+        "value": 10644.19
+      },
+      {
+        "source": "0:echo",
+        "target": "1:delta",
+        "value": 10175.76
+      },
+      {
+        "source": "0:alpha",
+        "target": "1:echo",
+        "value": 10140.539999999999
+      },
+      {
+        "source": "0:charlie",
+        "target": "1:echo",
+        "value": 9594.13
+      }
+    ],
+    "truncated": false,
+    "n_links_total": 20,
+    "self_loops": 86,
+    "y_label": "sum(revenue)"
+  },
+  "sampled": false,
+  "n_points": 20,
+  "display_range": null
+}

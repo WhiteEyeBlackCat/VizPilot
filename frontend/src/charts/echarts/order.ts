@@ -99,7 +99,7 @@ const KIND_LABEL: Record<OrderKind, string> = {
  *  chart has no category axis worth explaining. */
 export function displayOrderNote(result: RenderResult): string | null {
   const { spec } = result;
-  if (spec.type === "bar" || spec.type === "lollipop" || spec.type === "polar_line" || spec.type === "rose") {
+  if (spec.type === "bar" || spec.type === "lollipop" || spec.type === "polar_line" || spec.type === "rose" || spec.type === "stacked_bar") {
     const d = result.chart_data as BarChartData;
     if (d.categories.length < 2) return null;
     const agg = spec.aggregation ? AGG_LABEL[spec.aggregation] : null;

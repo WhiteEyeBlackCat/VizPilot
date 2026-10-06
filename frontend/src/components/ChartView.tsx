@@ -4,7 +4,7 @@ import { EChartsView } from "../charts/echarts/EChartsView";
 import { buildOption, isEmpty } from "../charts/echarts/option";
 import { displayOrderNote } from "../charts/echarts/order";
 import type { VizOption } from "../charts/echarts/echarts";
-import type { BarChartData, RenderResult } from "../types";
+import type { BarChartData, RenderResult, SankeyChartData } from "../types";
 
 const CHART_HEIGHT = 360;
 // the title row the theme reserves (grid.top 56) shrinks to the y-axis name
@@ -47,6 +47,9 @@ export function ChartView({ result, height = CHART_HEIGHT, showTitle = true }: P
   }
 
   const truncated = result.spec.type === "bar" && (result.chart_data as BarChartData).truncated;
+  // stage 20b: a flow keeps only its heaviest links and drops self-loops;
+  // both are disclosed in the payload and said here, never silently
+  const flow = result.spec.type === "sankey" ? (result.chart_data as SankeyChartData) : null;
   const range = result.display_range ?? null;
   const excluded = range ? range.excluded_below + range.excluded_above : 0;
   // stage 18: say which order the category axis is in (ranked vs natural)
@@ -59,6 +62,8 @@ export function ChartView({ result, height = CHART_HEIGHT, showTitle = true }: P
         {orderNote && <span data-order-note>{orderNote}</span>}
         {result.sampled && <span>已抽樣（顯示 {result.n_points} 點）</span>}
         {truncated && <span>類別過多，僅顯示前 {result.spec.top_n ?? 20} 名</span>}
+        {flow?.truncated && <span data-flow-truncated>流向過多，僅顯示最大的 {flow.links.length} 條（共 {flow.n_links_total} 條）</span>}
+        {flow !== null && flow.self_loops > 0 && <span>{flow.self_loops} 筆來源與目標相同（無流向），未納入圖中</span>}
         {range && (
           <span className="text-warning" title={range.reason}>
             顯示範圍 {range.lo}–{range.hi}；另有 {excluded} 筆極端值未在圖中（{range.reason}）

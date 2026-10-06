@@ -144,3 +144,70 @@ def test_hint_only_promotes_an_eligible_chart() -> None:
     assert rose.preferred == "bar" and "rose" not in rose.alternatives
     assert any("not eligible" in n for n in rose.notes)
     assert select_chart("composition", REGION, None, IntentContext()) is None
+
+
+# --- stage 20b: composition / flow ---------------------------------------------------------
+
+
+PART = _role("channel", "nominal", n_categories=3)
+WIDE_PART = _role("sku", "nominal", n_categories=12)
+HUB_A = _role("from_hub", "nominal", n_categories=5)
+HUB_B = _role("to_hub", "nominal", n_categories=5)
+
+
+def _comp_ctx(**kw) -> IntentContext:
+    base = dict(n_rows=600, n_groups=4, n_categories=3, part_to_whole=True, magnitude_measure=True)
+    return IntentContext(**{**base, **kw})
+
+
+def _flow_ctx(**kw) -> IntentContext:
+    base = dict(n_rows=600, n_groups=5, n_categories=5, count_measure=True, flow_pair=True)
+    return IntentContext(**{**base, **kw})
+
+
+def test_composition_and_flow_need_their_flag() -> None:
+    # without the flag the same roles stay a plain group comparison: a stack
+    # and a sankey are claims only a generator with the evidence may make
+    assert classify_intent(REGION, NUM, PART, IntentContext(n_rows=600, n_groups=4, n_categories=3)) == "group_comparison"
+    assert classify_intent(REGION, NUM, PART, _comp_ctx()) == "composition"
+    assert classify_intent(HUB_A, None, HUB_B, _flow_ctx()) == "flow"
+    assert classify_intent(HUB_A, None, HUB_B, _flow_ctx(flow_pair=False)) is None
+
+
+def test_flow_is_decided_before_composition_and_before_the_measure() -> None:
+    assert classify_intent(HUB_A, None, HUB_B, _flow_ctx(part_to_whole=True)) == "flow"
+    # a numeric weight is just as good as a count
+    assert classify_intent(HUB_A, NUM, HUB_B, _flow_ctx(count_measure=False)) == "flow"
+
+
+def test_composition_needs_a_categorical_pair_and_a_measure() -> None:
+    assert classify_intent(X, NUM, PART, _comp_ctx()) == "numeric_relationship"  # numeric x is no bar axis
+    assert classify_intent(DT, NUM, PART, _comp_ctx()) == "trend"
+    assert classify_intent(REGION, None, PART, _comp_ctx(count_measure=False)) is None
+
+
+def test_composition_eligibility_is_bounded_by_the_number_of_parts() -> None:
+    assert eligible_charts("composition", REGION, PART, _comp_ctx()) == ["stacked_bar", "bar"]
+    assert eligible_charts("composition", REGION, WIDE_PART, _comp_ctx(n_categories=12)) == []
+    assert eligible_charts("composition", REGION, PART, _comp_ctx(n_categories=1)) == []
+    assert eligible_charts("composition", REGION, PART, _comp_ctx(n_groups=25)) == []
+    # never a pie, at any size (product rule)
+    assert "pie" not in eligible_charts("composition", REGION, PART, _comp_ctx())
+
+
+def test_flow_eligibility_is_bounded_at_both_ends() -> None:
+    assert eligible_charts("flow", HUB_A, HUB_B, _flow_ctx()) == ["sankey"]
+    assert eligible_charts("flow", HUB_A, HUB_B, _flow_ctx(n_groups=1)) == []
+    assert eligible_charts("flow", HUB_A, HUB_B, _flow_ctx(n_categories=40)) == []
+
+
+def test_stacked_bar_keeps_its_bars_in_a_category_order() -> None:
+    choice = select_chart("composition", REGION, PART, _comp_ctx())
+    assert choice.preferred == "stacked_bar" and choice.alternatives == ("bar",)
+    assert choice.sort == "natural"  # only a ranking sorts by value
+    assert select_chart("composition", LEVEL, PART, _comp_ctx(n_groups=3)).sort == "natural"
+
+
+def test_sankey_has_no_category_axis_to_order() -> None:
+    choice = select_chart("flow", HUB_A, HUB_B, _flow_ctx())
+    assert choice.preferred == "sankey" and choice.alternatives == () and choice.sort is None

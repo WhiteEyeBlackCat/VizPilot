@@ -232,6 +232,74 @@ def test_heatmap_requires_two_numeric_columns() -> None:
     _assert_error(p, "at least 2 numeric columns", type="heatmap")
 
 
+# --- stage 20b: stacked_bar (composition) / sankey (flow) -------------------
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        dict(type="stacked_bar", x="city", y="value", group_by="flag", aggregation="sum"),
+        dict(type="stacked_bar", x="city", group_by="flag", aggregation="count"),
+        dict(type="stacked_bar", x="city", y="value", group_by="flag", aggregation="sum", percent=True),
+        dict(type="stacked_bar", x="city", y="rating", group_by="flag", aggregation="sum", sort="natural"),
+        dict(type="sankey", x="city", group_by="flag", aggregation="count"),
+        dict(type="sankey", x="city", y="value", group_by="flag", aggregation="sum"),
+    ],
+)
+def test_valid_stage20b_specs(profile, kwargs) -> None:
+    assert _errors(profile, **kwargs) == []
+
+
+def test_stacked_bar_requires_the_parts_column(profile) -> None:
+    _assert_error(profile, "requires group_by", type="stacked_bar", x="city", y="value", aggregation="sum")
+
+
+def test_stacked_bar_x_must_be_a_bounded_category(profile) -> None:
+    _assert_error(profile, "must be categorical or boolean", type="stacked_bar", x="value", y="value2", group_by="flag", aggregation="sum")
+    _assert_error(profile, "2..20 categories", type="stacked_bar", x="const_cat", y="value", group_by="flag", aggregation="sum")
+
+
+def test_stacked_bar_parts_are_capped(wide_cat_profile) -> None:
+    # 60 parts is not a composition (and group_by's own 20-category cap also fires)
+    errors = _errors(wide_cat_profile, type="stacked_bar", x="value", y="value", group_by="code", aggregation="sum")
+    assert any("maximum 20" in e for e in errors), errors
+    p = _profile(
+        pl.DataFrame(
+            {
+                "city": ["North", "South", "East"] * 40,
+                "part": [f"p{i % 9}" for i in range(120)],
+                "value": [float(i) for i in range(120)],
+            }
+        )
+    )
+    _assert_error(p, "must have 2..8 parts", type="stacked_bar", x="city", y="value", group_by="part", aggregation="sum")
+
+
+@pytest.mark.parametrize("chart_type", ["stacked_bar", "sankey"])
+def test_composition_rejects_a_mean(profile, chart_type) -> None:
+    _assert_error(profile, "a mean does not compose", type=chart_type, x="city", y="value", group_by="flag", aggregation="mean")
+    _assert_error(profile, "requires aggregation", type=chart_type, x="city", y="value", group_by="flag")
+    _assert_error(profile, "requires aggregation='count'", type=chart_type, x="city", group_by="flag", aggregation=None)
+
+
+def test_sankey_requires_a_target(profile) -> None:
+    _assert_error(profile, "requires group_by", type="sankey", x="city", aggregation="count")
+    _assert_error(profile, "the source) must be categorical", type="sankey", x="value", group_by="city", aggregation="count")
+
+
+def test_sankey_source_and_target_must_differ(profile) -> None:
+    _assert_error(profile, "must be different columns", type="sankey", x="city", group_by="city", aggregation="count")
+
+
+def test_percent_is_stacked_bar_only(profile) -> None:
+    _assert_error(profile, "percent is only valid for stacked_bar", type="bar", x="city", y="value", aggregation="sum", percent=True)
+    _assert_error(profile, "percent is only valid for stacked_bar", type="sankey", x="city", group_by="flag", aggregation="count", percent=False)
+
+
+def test_sankey_has_no_category_axis_to_sort(profile) -> None:
+    _assert_error(profile, "sort is not valid for sankey", type="sankey", x="city", group_by="flag", aggregation="count", sort="value")
+
+
 # --- common rules -----------------------------------------------------------
 
 
