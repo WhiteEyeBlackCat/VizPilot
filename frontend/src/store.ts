@@ -82,6 +82,11 @@ export interface AppState {
   recsFinal: boolean; // the full (LLM) response has replaced the rules-only one
   aiPending: boolean;
   preview: Preview | null;
+  /** id of the newest in-flight render (PREVIEW_REQUESTED); null when nothing
+   *  is pending. A SET_PREVIEW carrying another id is a superseded response
+   *  and is dropped ("latest request wins"). Anything that replaces or clears
+   *  the preview synchronously also resets it to null. */
+  previewRequestId: number | null;
   panelOpen: boolean;
   workspaceByDataset: Record<string, SavedChart[]>;
   explore: ExploreForm;
@@ -98,6 +103,7 @@ export const initialState: AppState = {
   recsFinal: false,
   aiPending: false,
   preview: null,
+  previewRequestId: null,
   panelOpen: false,
   workspaceByDataset: {},
   explore: initialExploreForm,
@@ -113,7 +119,8 @@ export type Action =
   | { type: "PROFILE_LOADED"; datasetId: string; profile: DatasetProfile }
   | { type: "RECS_LOADED"; datasetId: string; recs: RecommendationsResponse; final: boolean }
   | { type: "AI_DONE"; datasetId: string }
-  | { type: "SET_PREVIEW"; datasetId: string; preview: Omit<Preview, "seq"> }
+  | { type: "PREVIEW_REQUESTED"; datasetId: string; requestId: number }
+  | { type: "SET_PREVIEW"; datasetId: string; preview: Omit<Preview, "seq">; requestId?: number }
   | { type: "CLOSE_PREVIEW" }
   | { type: "SET_PANEL_OPEN"; open: boolean }
   | { type: "SAVE_PREVIEW"; key: string; savedAt: string }
@@ -145,6 +152,22 @@ export function isSaved(state: AppState, spec: ChartSpec): boolean {
   return workspaceOf(state, state.meta?.dataset_id).some((c) => specKey(c.result.spec) === key);
 }
 
+/** Client-side half of "latest preview request wins" (the reducer holds the
+ *  other half in previewRequestId). `begin` takes a new request id and
+ *  supersedes every earlier one; `invalidate` supersedes all pending without
+ *  starting one; `isCurrent` tells a finishing render, success or failure,
+ *  whether it may still report. */
+export function createPreviewGate() {
+  let current = 0;
+  return {
+    begin: () => ++current,
+    invalidate: () => {
+      current += 1;
+    },
+    isCurrent: (id: number) => id === current,
+  };
+}
+
 let previewSeq = 0;
 
 export function reducer(state: AppState, action: Action): AppState {
@@ -167,6 +190,7 @@ export function reducer(state: AppState, action: Action): AppState {
         recs: null,
         recsFinal: false,
         aiPending: true,
+        previewRequestId: null,
         preview: null, // the workspace of the previous dataset is kept, keyed by id
         explore: initialExploreForm,
         insightsExploratoryOpen: false,
@@ -185,6 +209,7 @@ export function reducer(state: AppState, action: Action): AppState {
         recsFinal: false,
         aiPending: false,
         preview: null,
+        previewRequestId: null,
         panelOpen: false,
         explore: initialExploreForm,
         insightsExploratoryOpen: false,
@@ -210,18 +235,26 @@ export function reducer(state: AppState, action: Action): AppState {
       if (state.meta?.dataset_id !== action.datasetId) return state;
       return { ...state, aiPending: false };
 
+    case "PREVIEW_REQUESTED":
+      if (state.meta?.dataset_id !== action.datasetId) return state;
+      return { ...state, previewRequestId: action.requestId };
+
     case "SET_PREVIEW":
       if (state.meta?.dataset_id !== action.datasetId) return state; // dataset switched while rendering
+      // latest request wins: an async result is dropped unless it is the
+      // newest request; a synchronous preview (no id) invalidates all pending
+      if (action.requestId !== undefined && action.requestId !== state.previewRequestId) return state;
       previewSeq += 1;
       return {
         ...state,
+        previewRequestId: action.requestId === undefined ? null : state.previewRequestId,
         preview: { ...action.preview, seq: previewSeq },
         panelOpen: true,
         lastExploreSpec: action.preview.source === "explore" ? action.preview.result.spec : state.lastExploreSpec,
       };
 
     case "CLOSE_PREVIEW":
-      return { ...state, preview: null, panelOpen: false };
+      return { ...state, preview: null, previewRequestId: null, panelOpen: false };
 
     case "SET_PANEL_OPEN":
       return { ...state, panelOpen: action.open };

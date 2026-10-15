@@ -10,10 +10,12 @@ import { InsightsPage } from "./pages/InsightsPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { WorkspacePage } from "./pages/WorkspacePage";
 import {
+  createPreviewGate,
   initialState,
   isSaved,
   reducer,
   workspaceOf,
+  type Action,
   type ExploreField,
   type FieldUpdate,
   type Page,
@@ -31,7 +33,24 @@ const PAGE_ORDER: Page[] = ["overview", "insights", "explore", "workspace"];
 const DEFAULT_LAYOUT: Layout = { content: 55, preview: 45 };
 
 export default function App() {
-  const [state, dispatch] = useReducer(reducer, initialState);
+  const [state, rawDispatch] = useReducer(reducer, initialState);
+  // "latest preview request wins": every async render takes a request id; a
+  // newer request or anything that replaces / clears the preview (sync
+  // preview, close, dataset switch) invalidates the pending ones. The reducer
+  // enforces it for results (previewRequestId); this ref lets a superseded
+  // render swallow its error instead of showing it over a newer chart.
+  const previewGate = useRef(createPreviewGate()).current;
+  const dispatch = useCallback((action: Action) => {
+    if (
+      action.type === "CLOSE_PREVIEW" ||
+      action.type === "SELECT_DATASET" ||
+      action.type === "CLEAR_SELECTION" ||
+      (action.type === "SET_PREVIEW" && action.requestId === undefined)
+    ) {
+      previewGate.invalidate();
+    }
+    rawDispatch(action);
+  }, [previewGate]);
   const [route, navigate] = useHashRoute();
   const [newOpen, setNewOpen] = useState(false);
   // three layouts: ≥1280 sidebar + content + resizable preview column;
@@ -114,10 +133,18 @@ export default function App() {
     async (spec: ChartSpec, extra: Omit<Preview, "result" | "seq">) => {
       const id = datasetId;
       if (!id) return;
-      const result = await api.render(id, spec);
-      dispatch({ type: "SET_PREVIEW", datasetId: id, preview: { result, ...extra } });
+      const requestId = previewGate.begin();
+      dispatch({ type: "PREVIEW_REQUESTED", datasetId: id, requestId });
+      let result;
+      try {
+        result = await api.render(id, spec);
+      } catch (e) {
+        if (!previewGate.isCurrent(requestId)) return; // superseded: only the newest request reports errors
+        throw e;
+      }
+      dispatch({ type: "SET_PREVIEW", datasetId: id, preview: { result, ...extra }, requestId });
     },
-    [datasetId],
+    [datasetId, previewGate, dispatch],
   );
 
   const previewRecommendation = useCallback(
