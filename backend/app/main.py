@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -11,6 +12,8 @@ from .datasets.store import DatasetStore
 from .llm.provider import DisabledProvider, OpenAICompatProvider
 from .llm.service import RecommendationService
 from .profiling.profiler import ProfileService
+
+log = logging.getLogger(__name__)
 
 FRONTEND_DIST = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 
@@ -30,12 +33,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.profiles = ProfileService(settings.data_dir, settings.profile_sample_threshold)
     app.state.render_cache = CastedFrameCache()
     if settings.llm_enabled:
+        if not settings.llm_endpoint_is_local:
+            log.warning(
+                "LLM endpoint %s is not on this machine: dataset metadata (column names, "
+                "statistics) will be sent to it; sample rows and example values are %s.",
+                settings.llm_base_url,
+                "INCLUDED (VIZPILOT_LLM_ALLOW_REMOTE_DATA=true)"
+                if settings.llm_allow_remote_data
+                else "withheld (set VIZPILOT_LLM_ALLOW_REMOTE_DATA=true to send them)",
+            )
         provider = OpenAICompatProvider(
             base_url=settings.llm_base_url,
             model=settings.llm_model,
             api_key=settings.llm_api_key,
             timeout_seconds=settings.llm_timeout_seconds,
-            include_sample_rows=settings.llm_include_sample_rows,
+            include_sample_rows=settings.llm_include_sample_rows and settings.llm_may_send_cell_values,
         )
     else:
         provider = DisabledProvider()
