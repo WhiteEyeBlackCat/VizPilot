@@ -38,7 +38,7 @@ export function evidenceRows(i: Insight): { label: string; value: string }[] {
   const e = i.effect;
   if (e && e.value !== null && e.value !== undefined) rows.push({ label: e.label, value: e.value.toFixed(2) });
   if (e && e.n !== null && e.n !== undefined) rows.push({ label: "樣本數", value: nf.format(e.n) });
-  rows.push({ label: "信心", value: SUPPORTED_BADGE[i.supported].label });
+  rows.push({ label: "證據強度", value: SUPPORTED_BADGE[i.supported].label });
   if (i.validation) rows.push({ label: "驗證方式", value: VALIDATION_LABEL[i.validation] ?? i.validation });
   return rows;
 }

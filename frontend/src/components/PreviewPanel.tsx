@@ -9,7 +9,7 @@ import type { ChartSpec, Recommendation, Warning, WarningSeverity } from "../typ
 import { INTENT_LABEL } from "./intentLabels";
 import { ChartView } from "./ChartView";
 import { evidenceRows } from "./InsightList";
-import { specRows } from "./Recommendations";
+import { RELIABILITY_NOTE, specRows } from "./Recommendations";
 import { Badge, type BadgeVariant } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
@@ -63,8 +63,8 @@ function confidenceLine(rec: Recommendation): string | null {
   const c = rec.confidence;
   if (!c) return null;
   return (
-    `信心 ${Math.round(c.overall * 100)}% · 樣本 ${Math.round(c.sample_size * 100)}%` +
-    ` · 缺失 ${Math.round(c.missingness * 100)}% · 使用 ${c.n_effective}/${c.n_total} 列` +
+    `資料可靠度 ${c.overall.toFixed(2)}（樣本係數 ${c.sample_size.toFixed(2)}` +
+    ` · 缺失係數 ${c.missingness.toFixed(2)}；${RELIABILITY_NOTE}）· 使用 ${c.n_effective}/${c.n_total} 列` +
     `（${c.n_source === "exact" ? "精確" : "估計"}）`
   );
 }
@@ -241,7 +241,7 @@ export function PreviewPanel({ preview, saved, variant, mode, open, onToggle, on
                 </p>
               )}
               {!confidence && evidence.length === 0 && (
-                <p className="text-muted-foreground/80">手動建圖沒有推薦信心分數；圖中的統計由後端聚合。</p>
+                <p className="text-muted-foreground/80">手動建圖沒有推薦可靠度分數；圖中的統計由後端聚合。</p>
               )}
               {warnings.length > 0 && (
                 <ul className="mt-1.5 flex flex-wrap gap-1" data-preview-warnings>

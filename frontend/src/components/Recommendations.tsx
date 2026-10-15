@@ -78,11 +78,17 @@ function warningChips(warnings: Warning[] | undefined) {
   );
 }
 
+/** The reliability factor is a heuristic discount (sample size, missing
+ *  values, sentinels / extremes), not a probability that the chart's claim is
+ *  true; it is shown as a 0–1 index, never as a percentage (audit B1). */
+export const RELIABILITY_NOTE = "啟發式折減係數（樣本數、缺失、極端值），不是結論正確的機率";
+
 function confidenceTitle(rec: Recommendation): string {
   const c = rec.confidence!;
   return (
-    `樣本 ${Math.round(c.sample_size * 100)}% · 缺失 ${Math.round(c.missingness * 100)}%` +
-    ` · 使用 ${c.n_effective}/${c.n_total} 列（${c.n_source === "exact" ? "精確" : "估計"}）`
+    `樣本係數 ${c.sample_size.toFixed(2)} · 缺失係數 ${c.missingness.toFixed(2)}` +
+    ` · 使用 ${c.n_effective}/${c.n_total} 列（${c.n_source === "exact" ? "精確" : "估計"}）` +
+    ` — ${RELIABILITY_NOTE}`
   );
 }
 
@@ -188,7 +194,7 @@ export function Recommendations({
             <Tooltip>
               <TooltipTrigger asChild>
                 <span className="cursor-help underline decoration-dotted underline-offset-2">
-                  信心 {Math.round(rec.confidence.overall * 100)}%
+                  資料可靠度 {rec.confidence.overall.toFixed(2)}
                 </span>
               </TooltipTrigger>
               <TooltipContent>{confidenceTitle(rec)}</TooltipContent>
