@@ -29,7 +29,13 @@ from ..profiling.models import (
     NonlinearSignal,
     SubgroupAnomaly,
 )
+from .claims import build_claim, render_claim
 from .coverage import ValidatedHypothesis
+
+# bumped whenever a system prompt or the prompt layout changes: part of the
+# recommendation cache key, so a prompt change never serves wording produced
+# under the previous prompt (audit A6)
+PROMPT_VERSION = "2026-10-a1"
 
 # stage 20a: `coverage.bin_extremes_lines` deliberately describes a bin's x
 # range ("... for x in [12.3, 18.1]") with numbers that are NOT in the
@@ -142,6 +148,13 @@ Hard rules:
 - Do NOT add any factual claim that is not in the supplied evidence, and do NOT change, round \
 differently, or invent numbers. Quote numbers from the evidence as given (you may omit them).
 - Do NOT mention columns that are not listed. Do NOT merge two hypotheses into one claim.
+- State each finding exactly as its "verified finding" line does: the same direction (positive / \
+negative, rises / falls), the same order of groups (which is higher or lower), and every number next \
+to the group it belongs to. The hypothesis text above it is only what was proposed and may be wrong.
+- No causal language: never "causes", "drives", "leads to", "results in", "because of", "due to", \
+"affects", "impacts". The backend measures associations only.
+- No generalisation beyond the evidence: no "every / all / always / consistently" unless the verified \
+finding says it holds in each group, and never about a grouping that is not in the columns listed.
 - One insight per hypothesis_id at most; you may leave a hypothesis out if it adds nothing new.
 - headline: one short plain-language claim (at most ~12 words, no numbers, no column-name \
 jargon where an everyday word exists) that stands alone as a title. \
@@ -485,12 +498,16 @@ def _final_user_content(profile: DatasetProfile, validated: list[ValidatedHypoth
         lines.append(f"- {_describe_column_brief(by_name[name])}")
     lines += ["", "Validated hypotheses (backend-verified; numbers are authoritative):"]
     for v in validated:
+        claim = v.claim if v.claim is not None else build_claim(v)
+        verified = render_claim(claim)
         lines.append(
             f"[{v.id}] {v.statement}\n"
             f"    test: {v.test_type}, columns: {json.dumps(v.columns)}, verdict: {v.verdict}, "
             f"validated by: {v.validation}\n"
             f"    effect: {v.effect_label} = {v.effect_value:.3f} (n={v.n})"
         )
+        if verified:
+            lines.append(f"    verified finding: {verified}.")
         for line in v.evidence_lines[:8]:
             lines.append(f"    - {_STRIP_BIN_RANGE.sub('', line)}")
         for cid, spec in v.chart_candidates:

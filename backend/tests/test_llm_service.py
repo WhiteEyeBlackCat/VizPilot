@@ -246,7 +246,8 @@ def test_insights_capped_and_truncated(profile) -> None:
     # seven wordings of one claim: the hypothesis cap keeps five, the
     # (test, columns) dedup keeps one of those
     assert len(insights) == 1 and insights[0]["supported"] == "strong"
-    assert len(insights[0]["text"]) == 300  # truncation kept
+    # the template is the backend's claim: LLM #1's 400-character statement is never printed
+    assert len(insights[0]["text"]) <= 300 and "xxxx" not in insights[0]["text"]
     reasons = [d["reason"] for d in result["debug"]["dropped"]]
     assert reasons.count("beyond the hypothesis cap") == 2
     assert sum(r.startswith("duplicate of hypothesis") for r in reasons) == 4
@@ -292,7 +293,7 @@ def test_insight_chart_priority_points_to_final_chart(profile) -> None:
     assert insight["effect"]["label"].startswith("adjusted eta-squared") and insight["effect"]["n"] == 60
     # a single finding the tables already answer: no LLM #2, template wording
     assert provider.final_calls == 0
-    assert insight["text"].startswith("value climbs over time (")
+    assert insight["text"].startswith("Mean value rises from ")
 
 
 def test_insight_chart_deduped_into_rules_chart(profile) -> None:

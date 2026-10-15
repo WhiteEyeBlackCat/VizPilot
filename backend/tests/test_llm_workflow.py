@@ -110,7 +110,9 @@ def test_covered_hypothesis_needs_no_probe_and_no_second_call(profile, df) -> No
     assert insight["validation"] == "existing_evidence" and insight["supported"] == "strong"
     assert insight["effect"]["label"].startswith("adjusted eta-squared") and insight["effect"]["value"] >= 0.1
     assert insight["priority"] == 5
-    assert insight["text"].startswith("Segment e sells far more (adjusted eta-squared")
+    # audit A1: the template is the backend's claim, never LLM #1's statement
+    assert insight["text"].startswith("Mean sales is highest for segment e (79.1) and lowest for segment b (49.4)")
+    assert insight["text"].endswith("(adjusted eta-squared of target across groups: 0.84, n=600).")
     assert result["debug"]["probes"] == [] and provider.final_calls == 0
     assert result["debug"]["covered_by_existing_evidence"][0]["verdict"] == "pass"
     assert result["message"] is None
@@ -256,8 +258,8 @@ def test_two_validated_findings_trigger_llm2_and_wording_is_gated(profile, df) -
     assert provider.final_calls == 1
     texts = {i["priority"]: i["text"] for i in result["insights"]}
     assert texts[5] == "Segment e averages far higher sales."  # LLM #2 wording accepted
-    # the second wording named a column that does not exist -> template fallback
-    assert texts[4].startswith("u is U-shaped in x (nonlinear_gap")
+    # the second wording named a column that does not exist -> claim template
+    assert texts[4].startswith("u varies non-linearly with x (U-shaped): mean u ranges from")
     assert len(result["insights"]) == 2  # the invented hypothesis_id never appears
     assert any("unknown tokens" in e for e in result["debug"]["errors"])
 
@@ -356,12 +358,12 @@ def test_llm_numbers_are_stripped_from_the_statement(profile, df) -> None:
     (insight,) = result["insights"]
     assert "0.99" not in insight["text"] and "9999" not in insight["text"]
     # the labelled numbers are stripped; the bare "80%" is an LLM number the
-    # backend never measured, so the neutral wording replaces the statement.
-    # "sales" (the target column) stays lowercase: _neutral() only
-    # capitalises a leading word that is not itself a column name (stage 20a)
-    assert insight["text"].startswith("sales varies by segment (adjusted eta-squared")
+    # backend never measured — the statement is recorded as unusable and the
+    # claim template (never the statement) words the finding
+    assert insight["text"].startswith("Mean sales is highest for segment e")
     (record,) = result["debug"]["wording"]
-    assert record["statement"] == "Segment e sells far more, about 80% more." and record["source"] == "neutral"
+    assert record["statement"] == "Segment e sells far more, about 80% more." and record["source"] == "template"
+    assert any(e.startswith("statement 1: number 80") for e in result["debug"]["errors"])
 
 
 def test_statement_with_unknown_column_token_is_dropped(profile, df) -> None:
@@ -389,7 +391,7 @@ def test_llm2_wording_gate_falls_back_to_template(profile, df, text, problem) ->
     }
     result, _ = _run(profile, df, _two_covered(), final=final)
     texts = {i["priority"]: i["text"] for i in result["insights"]}
-    assert texts[5].startswith("Segment e sells far more (adjusted eta-squared")  # template fallback
+    assert texts[5].startswith("Mean sales is highest for segment e (79.1)")  # claim template fallback
     assert texts[3] == "u follows a U shape in x."  # clean wording accepted
     assert any(problem in e for e in result["debug"]["errors"])
     sources = {w["id"]: w["source"] for w in result["debug"]["wording"]}
@@ -495,18 +497,22 @@ def test_statement_bare_numbers_fall_back_to_neutral_wording(profile, df) -> Non
     result, _ = _run(profile, df, [hyp])
     (insight,) = result["insights"]
     assert "60%" not in insight["text"] and "2.5" not in insight["text"] and "0.99" not in insight["text"]
-    assert insight["text"].startswith("sales varies by segment (adjusted eta-squared")
+    assert insight["text"].startswith("Mean sales is highest for segment e")
     (record,) = result["debug"]["wording"]
-    assert record["source"] == "neutral"
+    assert record["source"] == "template"
     assert any("statement 1: number" in e for e in result["debug"]["errors"])
 
 
-def test_statement_with_backend_number_keeps_template(profile, df) -> None:
+def test_clean_statement_is_still_not_printed_by_the_template(profile, df) -> None:
+    # audit A1: even a statement that passes every gate is LLM #1's
+    # hypothesis, not the verified finding; the template words the claim
     hyp = _h("Segment e sells far more across 600 rows.", "group_difference", {"group": "segment", "target": "sales"}, None, 5)
     result, _ = _run(profile, df, [hyp])
     (insight,) = result["insights"]
-    assert insight["text"].startswith("Segment e sells far more across 600 rows (")
+    assert insight["text"].startswith("Mean sales is highest for segment e (79.1)")
+    assert "across 600 rows" not in insight["text"]
     assert result["debug"]["wording"][0]["source"] == "template"
+    assert not any(e.startswith("statement 1") for e in result["debug"]["errors"])
 
 
 def test_nonlinear_coverage_is_directed_and_matches_the_probe(profile, df) -> None:
@@ -584,7 +590,7 @@ def test_llm1_reason_is_gated_before_it_captions_anything(profile, df) -> None:
     assert provider.final_calls == 1
     by_text = {i["text"][:20]: i for i in result["insights"]}
     assert by_text["Segment e averages f"]["why_it_matters"] == "pricing"
-    assert by_text["u is U-shaped in x ("]["why_it_matters"] is None
+    assert by_text["u varies non-linearl"]["why_it_matters"] is None
     # a clean reason still passes through
     good = _h("Segment e sells far more.", "group_difference", {"group": "segment", "target": "sales"}, None, 5)
     good["reason"] = "segment e behaves like a separate market"
@@ -685,14 +691,15 @@ def pm25_profile(pm25_df):
 
 
 def test_digit_bearing_column_name_passes_the_number_gate(pm25_profile, pm25_df) -> None:
-    # "pm25" must not be read as the number 25; the masked statement should
-    # pass the gate untouched and keep the template wording (not neutral)
+    # "pm25" must not be read as the number 25; the masked statement passes
+    # the gate (no "statement" error) and the claim template words it
     hyp = _h("pm25 varies by station.", "group_difference", {"group": "station", "target": "pm25"}, None, 5)
     result, _ = _run(pm25_profile, pm25_df, [hyp])
     (insight,) = result["insights"]
-    assert insight["text"].startswith("pm25 varies by station (")
+    assert insight["text"].startswith("Mean pm25 is highest for station ")
     (record,) = result["debug"]["wording"]
     assert record["source"] == "template"
+    assert not any(e.startswith("statement 1") for e in result["debug"]["errors"])
 
 
 def test_digit_leading_unknown_column_token_is_dropped(profile, df) -> None:
@@ -711,8 +718,7 @@ def test_real_stray_number_next_to_a_masked_column_is_still_rejected(pm25_profil
     result, _ = _run(pm25_profile, pm25_df, [hyp])
     (insight,) = result["insights"]
     assert "37" not in insight["text"]
-    (record,) = result["debug"]["wording"]
-    assert record["source"] == "neutral"
+    assert any(e.startswith("statement 1: number 37") for e in result["debug"]["errors"])
 
 
 def test_neutral_wording_keeps_column_name_lowercase(pm25_profile, pm25_df) -> None:
@@ -720,12 +726,21 @@ def test_neutral_wording_keeps_column_name_lowercase(pm25_profile, pm25_df) -> N
     # (the leading column name) must stay lowercase, unlike the old
     # core[0].upper() behaviour that produced "Pm25 varies by station"
     hyp = _h("pm25 jumps 9000% at station y.", "group_difference", {"group": "station", "target": "pm25"}, None, 5)
-    result, _ = _run(pm25_profile, pm25_df, [hyp])
+    result, provider = _run(pm25_profile, pm25_df, [hyp])
     (insight,) = result["insights"]
-    assert insight["text"].startswith("pm25 varies by station (")
-    assert "Pm25" not in insight["text"]
-    (record,) = result["debug"]["wording"]
-    assert record["source"] == "neutral"
+    assert "Pm25" not in insight["text"] and "9000" not in insight["text"]
+    # the neutral sentence (still the chart-caption fallback) keeps the case
+    from app.llm.coverage import ValidatedHypothesis
+    from app.llm.service import _neutral
+
+    effect = insight["effect"]
+    v = ValidatedHypothesis(
+        id=1, statement="", reason="", importance=3, test_type="group_difference",
+        columns={"group": "station", "target": "pm25"}, validation="existing_evidence", verdict="pass",
+        effect_label=effect["label"], effect_value=effect["value"], n=effect["n"],
+        evidence_lines=[], evidence={}, chart_candidates=[],
+    )
+    assert _neutral(v).startswith("pm25 varies by station (")
 
 
 def test_llm2_prompt_drops_unquotable_column_mean(profile) -> None:
