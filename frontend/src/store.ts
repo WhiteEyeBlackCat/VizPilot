@@ -20,6 +20,7 @@ import type {
   RecommendationsResponse,
   RenderResult,
 } from "./types";
+import type { PersistedChart } from "./workspaceStorage";
 
 export type Page = "overview" | "insights" | "explore" | "workspace";
 
@@ -89,6 +90,13 @@ export interface AppState {
   previewRequestId: number | null;
   panelOpen: boolean;
   workspaceByDataset: Record<string, SavedChart[]>;
+  /** datasets whose persisted workspace has been merged in (HYDRATE_WORKSPACE).
+   *  Storage is only written for these: writing earlier would overwrite the
+   *  stored charts with the still-empty list. */
+  hydrated: Record<string, boolean>;
+  /** persisted entries that could not be re-rendered; kept out of the UI but
+   *  written back untouched */
+  orphansByDataset: Record<string, PersistedChart[]>;
   explore: ExploreForm;
   insightsExploratoryOpen: boolean;
   /** the last spec generated from Explore for this dataset (shown as a recap) */
@@ -106,6 +114,8 @@ export const initialState: AppState = {
   previewRequestId: null,
   panelOpen: false,
   workspaceByDataset: {},
+  hydrated: {},
+  orphansByDataset: {},
   explore: initialExploreForm,
   insightsExploratoryOpen: false,
   lastExploreSpec: null,
@@ -125,6 +135,7 @@ export type Action =
   | { type: "SET_PANEL_OPEN"; open: boolean }
   | { type: "SAVE_PREVIEW"; key: string; savedAt: string }
   | { type: "REMOVE_SAVED"; datasetId: string; key: string }
+  | { type: "HYDRATE_WORKSPACE"; datasetId: string; charts: SavedChart[]; orphans: PersistedChart[] }
   | { type: "EXPLORE_FIELD"; field: ExploreField; value: FieldUpdate<string> }
   | { type: "SET_EXPLORATORY_OPEN"; open: boolean };
 
@@ -141,6 +152,34 @@ export function specKey(spec: ChartSpec): string {
     spec.time_granularity ?? null,
     spec.top_n ?? null,
   ]);
+}
+
+/** What is stored for a saved chart: the spec (re-rendered on load), never the
+ *  RenderResult data arrays. */
+export function toPersisted(c: SavedChart): PersistedChart {
+  return {
+    key: c.key,
+    spec: c.result.spec,
+    savedAt: c.savedAt,
+    title: c.result.spec.title,
+    ...(c.rec ? { rec: c.rec } : {}),
+    ...(c.insightText ? { insightText: c.insightText } : {}),
+    ...(c.insight ? { insight: c.insight } : {}),
+  };
+}
+
+/** Datasets whose workspace may be written to storage: only hydrated ones
+ *  (writing earlier would replace the stored charts with an empty list). */
+export function persistableDatasets(state: AppState): string[] {
+  return Object.keys(state.hydrated).filter((id) => state.hydrated[id]);
+}
+
+/** The entries to write for a dataset: the visible charts plus the orphans
+ *  that could not be rendered (so they are never lost). */
+export function persistableWorkspace(state: AppState, datasetId: string): PersistedChart[] {
+  const shown = workspaceOf(state, datasetId).map(toPersisted);
+  const keys = new Set(shown.map((c) => c.key));
+  return [...(state.orphansByDataset[datasetId] ?? []).filter((o) => !keys.has(o.key)), ...shown];
 }
 
 export function workspaceOf(state: AppState, datasetId: string | null | undefined): SavedChart[] {
@@ -290,6 +329,29 @@ export function reducer(state: AppState, action: Action): AppState {
 
     case "SET_EXPLORATORY_OPEN":
       return state.insightsExploratoryOpen === action.open ? state : { ...state, insightsExploratoryOpen: action.open };
+
+    case "HYDRATE_WORKSPACE": {
+      if (state.meta?.dataset_id !== action.datasetId) return state; // dataset switched while rendering
+      // charts saved while hydration was in flight stay; persisted ones are
+      // older, so they go first; duplicates (same key or same chart) dropped
+      const existing = workspaceOf(state, action.datasetId);
+      const keys = new Set(existing.map((c) => c.key));
+      const specs = new Set(existing.map((c) => specKey(c.result.spec)));
+      const restored: SavedChart[] = [];
+      for (const c of action.charts) {
+        const sk = specKey(c.result.spec);
+        if (keys.has(c.key) || specs.has(sk)) continue;
+        keys.add(c.key);
+        specs.add(sk);
+        restored.push(c);
+      }
+      return {
+        ...state,
+        workspaceByDataset: { ...state.workspaceByDataset, [action.datasetId]: [...restored, ...existing] },
+        orphansByDataset: { ...state.orphansByDataset, [action.datasetId]: action.orphans },
+        hydrated: { ...state.hydrated, [action.datasetId]: true },
+      };
+    }
 
     case "REMOVE_SAVED": {
       const list = workspaceOf(state, action.datasetId).filter((c) => c.key !== action.key);

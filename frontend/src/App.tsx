@@ -13,6 +13,8 @@ import {
   createPreviewGate,
   initialState,
   isSaved,
+  persistableDatasets,
+  persistableWorkspace,
   reducer,
   workspaceOf,
   type Action,
@@ -22,6 +24,7 @@ import {
   type Preview,
   type SavedChart,
 } from "./store";
+import { hydrateWorkspace, saveWorkspace } from "./workspaceStorage";
 import type { ChartSpec, DatasetMeta, Insight, Recommendation } from "./types";
 import { Button } from "@/components/ui/button";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup, type GroupHandle, type Layout } from "@/components/ui/resizable";
@@ -68,6 +71,9 @@ export default function App() {
   // overwrite the remembered width that is about to be restored
   const restoringRef = useRef(false);
 
+  const hydratedRef = useRef(state.hydrated);
+  hydratedRef.current = state.hydrated;
+
   const { datasets, meta, profile, recs, aiPending, preview, panelOpen } = state;
   const datasetId = meta?.dataset_id ?? null;
   const workspace = workspaceOf(state, datasetId);
@@ -84,6 +90,13 @@ export default function App() {
   const selectDataset = useCallback((m: DatasetMeta) => {
     const id = m.dataset_id;
     dispatch({ type: "SELECT_DATASET", meta: m });
+    // A8: bring the persisted workspace back (re-rendered from the stored
+    // specs); the reducer drops it if the selection moved on meanwhile
+    if (!hydratedRef.current[id]) {
+      hydrateWorkspace(id, api.render)
+        .then(({ charts, orphans }) => dispatch({ type: "HYDRATE_WORKSPACE", datasetId: id, charts, orphans }))
+        .catch(() => dispatch({ type: "HYDRATE_WORKSPACE", datasetId: id, charts: [], orphans: [] }));
+    }
     api
       .profile(id)
       .then((p) => dispatch({ type: "PROFILE_LOADED", datasetId: id, profile: p }))
@@ -97,7 +110,21 @@ export default function App() {
       .recommendations(id, true)
       .then((r) => dispatch({ type: "RECS_LOADED", datasetId: id, recs: r, final: true }))
       .catch(() => dispatch({ type: "AI_DONE", datasetId: id }));
-  }, []);
+  }, [dispatch]);
+
+  // A8 write side: persist a dataset's workspace only once it is hydrated
+  // (an earlier write would replace the stored charts with the empty list)
+  // and only when its list changed
+  const writtenRef = useRef<Record<string, unknown>>({});
+  useEffect(() => {
+    for (const id of persistableDatasets(state)) {
+      const sig = [state.workspaceByDataset[id], state.orphansByDataset[id]];
+      const prev = writtenRef.current[id] as unknown[] | undefined;
+      if (prev && prev[0] === sig[0] && prev[1] === sig[1]) continue;
+      writtenRef.current[id] = sig;
+      saveWorkspace(id, persistableWorkspace(state, id));
+    }
+  }, [state]);
 
   // the hash is the source of truth for the selected dataset; malformed
   // hashes are normalised (replace, no history entry) and an unknown id
