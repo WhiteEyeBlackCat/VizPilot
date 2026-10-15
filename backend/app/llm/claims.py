@@ -333,6 +333,11 @@ def render_claim(claim: Claim) -> str | None:
         ordered = claim.ordered(key)
         top, bottom = ordered[0], ordered[-1]
         word = "Mean" if key == "mean" else "Median"
+        if fmt(_value(top, key)) == fmt(_value(bottom, key)):  # type: ignore[arg-type]
+            # an exact (or rounded) tie: no highest / lowest to name
+            return (
+                f"{word} {c['target']} is equal across the {len(ordered)} {g} groups ({fmt(_value(top, key))})"  # type: ignore[arg-type]
+            )
         text = (
             f"{word} {c['target']} is highest for {g} {top.label} ({fmt(_value(top, key))}) and lowest for "
             f"{g} {bottom.label} ({fmt(_value(bottom, key))}) across {len(ordered)} {g} groups"
@@ -396,75 +401,175 @@ def render_claim(claim: Claim) -> str | None:
     return None
 
 
-# --- the semantic check -------------------------------------------------------------
+# --- the semantic check (fail closed) -------------------------------------------------
+#
+# The gate does not try to understand arbitrary prose. It recognises a small
+# set of assertion forms it can verify against the claim and rejects every
+# sentence that makes an assertion it cannot verify:
+#
+# - non-English text (any non-Latin letter once column names and group labels
+#   are masked), comparison symbols (< > ≤ ≥ ≠ ≈, "=" other than "n = 600" /
+#   "r = 0.95"), causal language, negated assertions -> reject;
+# - every evaluative / ordering / magnitude word (a broad class: comparatives,
+#   superlatives, ranks, "leads", "dominates", "twice", "half", "times", "high",
+#   "low", any other -er / -est adjective, ...) must be one the verifier
+#   recognises for this claim kind AND bound to the groups the evidence ranks
+#   that way; an unrecognised one, one with nothing to bind to, or one next to
+#   an unknown entity (a capitalised name that is not a label, "southern" for
+#   "South") rejects the sentence;
+# - direction words must match the measured direction; for a curve that is not
+#   monotone only the shape's own name is accepted;
+# - universal quantifiers only where every group was estimated with one sign.
+#
+# A rejected sentence costs the LLM's wording, never the finding: the caller
+# falls back to the deterministic claim template.
 
 _CAUSAL = re.compile(
-    r"\b(?:cause[sd]?|causing|causal(?:ly)?|drive[sn]?|driving|drove|driven\s+by|lead(?:s|ing)?\s+to|led\s+to|"
-    r"result(?:s|ed|ing)?\s+in|because\s+of|due\s+to|thanks\s+to|owing\s+to|as\s+a\s+result|"
-    r"make[s]?\s+\w+\s+(?:higher|lower|more|less|rise|fall|increase|decrease|grow|go\s+up|go\s+down)|"
-    r"affect(?:s|ed|ing)?|influenc(?:e|es|ed|ing)|impact(?:s|ed|ing)?|determin(?:e|es|ed|ing)|"
-    r"boost(?:s|ed|ing)?|trigger(?:s|ed|ing)?|produce[sd]?|responsible\s+for|consequence)\b",
+    r"\b(?:cause[sd]?|causing|causal(?:ly)?|drive[sn]?|driving|drove|driver[s]?|lead(?:s|ing)?\s+to|led\s+to|"
+    r"result(?:s|ed|ing)?\s+in|because|due\s+to|thanks\s+to|owing\s+to|as\s+a\s+result|"
+    r"make[s]?\s+\S+\s+(?:higher|lower|more|less|rise|fall|increase|decrease|grow|go\s+up|go\s+down)|"
+    r"affect(?:s|ed|ing)?|influenc(?:e|es|ed|ing)|impact(?:s|ed|ing)?|determin(?:e|es|ed|ing|ant)|"
+    r"boost(?:s|ed|ing)?|trigger(?:s|ed|ing)?|produce[sd]?|responsible\s+for|consequence[s]?|"
+    r"explain(?:s|ed|ing)?|shapes(?!\s+of\b)|shaped\s+by|shaping|come[s]?\s+from|came\s+from|stem(?:s|med|ming)?\s+from|"
+    r"effect\s+(?:of|on)|effects\s+(?:of|on)|contribut(?:e|es|ed|ing)|depend(?:s|ed|ing)?\s+on|"
+    r"generat(?:e|es|ed|ing)\s+\S+\s+as|yield(?:s|ed)?|leads?\s+\S+\s+to|"
+    r"push(?:es|ed)?|rais(?:e|es|ed|ing)|lift(?:s|ed)?|lower(?:s|ed)(?=\s+(?:#|the\b)))(?![a-z])",
     re.IGNORECASE,
 )
+# a column doing something to a column: "z raises w", "z increases w"
+_COLUMN_VERB = re.compile(r"#+\s+(?:increas|decreas|reduc|rais|lower|push|lift|boost|driv|chang|alter)\w*\s+#+")
+_SYMBOL = re.compile(r"[<>≤≥≠≈]")
+_STAT_EQ = re.compile(r"(?:\b(?:n|r|rho|r2|r²|eta|eta-squared|eta²|η²|ks|d|p|spread|effect)|#)\s*$", re.IGNORECASE)
+_NEGATION = {"not", "no", "none", "never", "neither", "nor", "without", "nothing", "nobody", "nowhere", "cannot"}
 
-# comparatives: polarity +1 (higher) / -1 (lower); "verb" forms compare their
-# subject to their object without "than"
-_COMPARATIVE = re.compile(
-    r"\b(?P<word>higher|more|greater|larger|bigger|above|exceed(?:s|ed|ing)?|outsell(?:s|ing)?|outsold|"
-    r"outperform(?:s|ed|ing)?|surpass(?:es|ed|ing)?|beat(?:s)?|tops|"
-    r"lower|less|fewer|smaller|below|trail(?:s|ed|ing)?|lag(?:s|ged|ging)?|underperform(?:s|ed|ing)?|"
-    r"stronger|weaker|steeper|flatter|tighter|looser|wider|narrower)\b",
-    re.IGNORECASE,
-)
-_HIGH_WORDS = {
-    "higher", "more", "greater", "larger", "bigger", "above", "stronger", "steeper", "tighter", "wider",
+# phrase normalisation (same length, padded): idioms -> one verifiable word
+_PHRASES = [
+    (r"\bnot\s+(?:the\s+)?(?:same|equal|identical|uniform)\b", "differs"),
+    (r"\b(?:falls?|fell|falling)\s+short\s+of\b", "trails"),
+    (r"\blag(?:s|ged|ging)?\s+behind\b", "trails"),
+    (r"\b(?:edges?|edged)\s+out\b", "outsells"),
+    (r"\b(?:comes?|came|coming)\s+out\s+on\s+top\b", "highest"),
+    (r"\bon\s+top\b", "top"),
+    (r"\bstands?\s+out\b", "highest"),
+    (r"\bbottoms?\s+out\b", "lowest"),
+    (r"\bahead\s+of\b", "above"),
+    (r"\bout-?(?:earns?|paces?|strips?|ranks?)\b|\bovertakes?\b|\beclipses?\b|\boutstrips?\b|\boutpaces?\b", "exceeds"),
+    (r"\b(?:goes|go|went|gone|going)\s+up\b|\bpick(?:s|ed)?\s+up\b|\bmoves?\s+together\b|\bin\s+step\b", "rises"),
+    (r"\b(?:goes|go|went|gone|going)\s+down\b", "falls"),
+    (r"\banti-?correlat\w*\b", "negative"),
+    (r"\bmoves?\s+opposite\b|\bopposite\s+directions?\b|\bopposite\b", "negative"),
+    (r"\bnon-?linear(?:ly)?\b|\bcurvilinear\b", "curved"),
+]
+
+_COMP_UP = {
+    "higher", "more", "greater", "larger", "bigger", "above", "exceed", "exceeds", "exceeded", "exceeding",
+    "outsell", "outsells", "outsold", "outselling", "outperform", "outperforms", "outperformed", "surpass",
+    "surpasses", "surpassed", "beat", "beats", "tops", "topped",
 }
-_VERB_COMPARATIVES = ("above", "below", "exceed", "outsell", "outsold", "outperform", "surpass", "beat", "tops", "trail", "lag", "underperform")
-_LOW_PREFIXES = ("lower", "less", "fewer", "smaller", "below", "trail", "lag", "underperform", "weaker", "flatter", "looser", "narrower")
-_STRENGTH_WORDS = ("stronger", "weaker", "steeper", "flatter", "tighter", "looser")
-_SPREAD = re.compile(r"\b(?:spread|variab\w*|dispersion|wider|narrower|iqr|std|standard\s+deviation|volatil\w*|range)\b", re.IGNORECASE)
-_MEDIAN = re.compile(r"\bmedian\b", re.IGNORECASE)
-_SUPERLATIVE = re.compile(
-    r"\b(?P<word>highest|largest|biggest|greatest|the\s+most|maximum|lowest|smallest|fewest|the\s+least|minimum|"
-    r"strongest|weakest|steepest|flattest|widest|narrowest)\b",
-    re.IGNORECASE,
-)
-_SUPER_LOW = ("lowest", "smallest", "fewest", "least", "minimum", "weakest", "flattest", "narrowest")
-_REFERENCE = re.compile(r"\b(?:than|compared\s+(?:to|with)|relative\s+to|versus|vs\.?)(?=\W|$)", re.IGNORECASE)
-_POS = re.compile(
-    r"\b(?:positive(?:ly)?|increas(?:e|es|ed|ing)|ris(?:e|es|ing)|rose|grow(?:s|ing|n)?|grew|climb(?:s|ed|ing)?|"
-    r"go(?:es)?\s+up|went\s+up|move[s]?\s+together|upward|in\s+step)\b",
-    re.IGNORECASE,
-)
-_NEG = re.compile(
-    r"\b(?:negative(?:ly)?|decreas(?:e|es|ed|ing)|declin(?:e|es|ed|ing)|fall(?:s|ing)?|fell|drop(?:s|ped|ping)?|"
-    r"go(?:es)?\s+down|went\s+down|downward|invers(?:e|ely)|shrink(?:s|ing)?|shrank)\b",
-    re.IGNORECASE,
-)
-_AFTER = re.compile(r"\b(?:after|since|later|afterwards|recent(?:ly)?|from\s+then\s+on|now)\b", re.IGNORECASE)
-_BEFORE = re.compile(r"\b(?:before|earlier|previously|prior)\b", re.IGNORECASE)
-_SCOPE_ALL = re.compile(r"\b(?:overall|pooled|aggregate|combined|across\s+all\s+rows)\b", re.IGNORECASE)
+_COMP_DOWN = {
+    "lower", "less", "fewer", "smaller", "below", "trail", "trails", "trailed", "trailing", "lag", "lags",
+    "lagged", "underperform", "underperforms", "underperformed",
+}
+_VERB_COMP = {"above", "below", "exceed", "exceeds", "exceeded", "exceeding", "outsell", "outsells", "outsold",
+              "outselling", "outperform", "outperforms", "outperformed", "surpass", "surpasses", "surpassed", "beat",
+              "beats", "tops", "topped", "trail", "trails", "trailed", "trailing", "lag", "lags", "lagged",
+              "underperform", "underperforms", "underperformed"}
+_SUP_UP = {"highest", "largest", "biggest", "greatest", "most", "top", "first", "leader", "leaders", "leads", "lead",
+           "leading", "best", "maximum", "max", "peak", "peaks", "peaked", "dominates", "dominate", "dominated",
+           "dominant", "dominating"}
+_SUP_DOWN = {"lowest", "smallest", "least", "fewest", "bottom", "last", "worst", "minimum", "min", "trough"}
+_STRENGTH = {"stronger": 1, "steeper": 1, "tighter": 1, "weaker": -1, "flatter": -1, "looser": -1}
+_STRENGTH_SUP = {"strongest": 1, "steepest": 1, "tightest": 1, "weakest": -1, "flattest": -1, "loosest": -1}
+_SPREAD_COMP = {"wider": 1, "narrower": -1}
+_SPREAD_SUP = {"widest": 1, "narrowest": -1}
+_RANK = {"second": 2, "third": 3, "fourth": 4, "fifth": 5, "sixth": 6, "2nd": 2, "3rd": 3, "4th": 4, "5th": 5}
+_MAG = {"double": 2.0, "doubles": 2.0, "doubled": 2.0, "twice": 2.0, "triple": 3.0, "tripled": 3.0, "triples": 3.0,
+        "thrice": 3.0, "half": 0.5, "halved": 0.5, "halves": 0.5, "times": None, "fold": None}
+_INTENSITY = {"high": 1, "large": 1, "big": 1, "strong": 1, "huge": 1, "massive": 1, "elevated": 1, "hefty": 1,
+              "sizable": 1, "sizeable": 1, "low": -1, "small": -1, "weak": -1, "tiny": -1, "modest": -1, "poor": -1,
+              "slight": -1, "limited": -1, "depressed": -1}
+_EQUAL = {"same", "equal", "similar", "identical", "comparable", "alike", "uniform", "equally", "similarly"}
+_OTHER_EVAL = {"percent", "percentage", "ratio", "rank", "ranks", "ranked", "ranking", "outlier", "record",
+               "premium", "advantage", "majority", "minority", "multiple", "%", "upper", "superior", "inferior",
+               "standout", "winner", "loser", "excel", "excels", "excelled", "underdog", "laggard", "champion"}
+_HEDGE = {"roughly", "about", "nearly", "almost", "around", "approximately", "some", "close", "circa", "approx"}
+_GAP_WORDS = {"gap", "gaps", "difference", "differences", "differ", "differs", "differed", "distance", "contrast",
+              "separation", "spread"}
+# -er / -est words that are not comparatives (anything else ending so is a
+# comparative the verifier does not know -> rejected)
+_ER_EXCEPTIONS = {
+    "other", "others", "another", "under", "over", "never", "ever", "however", "whether", "either", "neither",
+    "rather", "after", "per", "number", "numbers", "water", "customer", "customers", "order", "orders", "member",
+    "members", "quarter", "quarters", "winter", "summer", "center", "centre", "together", "enter", "cluster",
+    "clusters", "filter", "register", "offer", "offers", "consider", "cover", "partner", "partners", "user", "users",
+    "paper", "letter", "interest", "test", "tests", "rest", "forest", "suggest", "request", "contest", "invest",
+    "harvest", "manager", "managers", "worker", "workers", "power", "tower", "owner", "owners", "provider",
+    "providers", "buyer", "buyers", "seller", "sellers", "retailer", "retailers", "dealer", "dealers", "player",
+    "players", "computer", "matter", "master", "chapter", "character", "parameter", "meter", "later", "earlier",
+    "whatever", "whenever", "wherever", "remainder", "answer", "consumer", "consumers", "shopper", "shoppers",
+    "subscriber", "subscribers", "visitor", "worker", "teacher", "number", "factor", "sector", "vector", "border",
+    "corner", "weather", "temper", "transfer", "chamber", "december", "november", "october", "september", "proper",
+    "super", "per", "hour", "her", "their", "water", "paper", "ber", "fever", "cancer", "gender", "tier", "server",
+    "servers", "header", "folder", "marker", "scatter", "counter", "encounter", "barrier", "carrier", "supplier",
+    "suppliers", "manufacturer", "driver", "drivers", "chester", "manchester", "hamster", "monster", "longer",
+    "differ", "deliver", "delivers", "gather", "wonder", "discover", "remember", "render", "suffer", "prefer",
+    "refer", "alter", "offer", "together", "further", "farther", "latest", "honest", "modest", "digest", "biggest", "interest", "pest", "chest", "nest", "west", "best", "least",
+    "most", "against", "amongst", "midst", "est", "guest", "quest", "protest", "arrest", "behest", "conquest",
+}
+_SIGN_POS = {
+    "positive", "positively", "increase", "increases", "increased", "increasing", "rise", "rises", "rising", "rose",
+    "risen", "grow", "grows", "growing", "grew", "grown", "climb", "climbs", "climbed", "climbing", "surge",
+    "surges", "surged", "surging", "jump", "jumps", "jumped", "spike", "spikes", "spiked", "soar", "soars", "soared",
+    "upward", "upwards", "tracks", "track", "tracking", "gain", "gains", "gained", "accelerate", "accelerates",
+    "accelerated", "rebound", "rebounds", "rebounded", "recover", "recovers", "recovered",
+}
+_SIGN_NEG = {
+    "negative", "negatively", "decrease", "decreases", "decreased", "decreasing", "decline", "declines", "declined",
+    "declining", "fall", "falls", "falling", "fell", "fallen", "drop", "drops", "dropped", "dropping", "dip",
+    "dips", "dipped", "dipping", "plunge", "plunges", "plunged", "sink", "sinks", "sank", "slump", "slumps",
+    "slumped", "shrink", "shrinks", "shrank", "downward", "downwards", "inverse", "inversely", "collapse",
+    "collapsed", "tumble", "tumbled", "slide", "slid", "contract", "contracted", "slows", "slowed", "slowing",
+}
+_SHAPE_ONLY = {"monotone", "monotonic", "monotonically", "linear", "linearly", "steadily", "steady", "trough",
+               "valley", "hump", "plateau", "plateaus", "flattens", "saturates", "minimal", "maximal", "extreme", "extremes", "minimised", "minimized",
+               "maximised", "maximized", "minimum", "maximum", "bowl", "convex", "concave", "turning"}
+_AFTER_WORDS = {"after", "since", "later", "afterwards", "recent", "recently", "now", "subsequently", "then"}
+_BEFORE_WORDS = {"before", "earlier", "previously", "prior", "initially", "formerly"}
+_SCOPE_ALL = re.compile(r"\b(?:overall|pooled|aggregate|combined|across\s+all\s+rows|whole\s+table|all\s+rows)\b")
+_NUMBER_WORDS = r"(?:two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|\d+)"
 _QUANT_NOUN = re.compile(
-    r"\b(?P<q>every|each|all)\s+(?:of\s+)?(?:the\s+|its\s+|their\s+)?(?:\d+\s+)?(?P<noun>[a-z][a-z0-9_]*)", re.IGNORECASE
+    rf"\b(?P<q>every|each|all)\s+(?:of\s+)?(?:the\s+|its\s+|their\s+|these\s+|those\s+)?(?:{_NUMBER_WORDS}\s+)?(?P<noun>[a-z][a-z0-9_]*)"
 )
 _QUANT_WORD = re.compile(
     r"\b(?:always|everywhere|without\s+exception|universal(?:ly)?|invariabl[ey]|consistent(?:ly)?|uniform(?:ly)?|"
-    r"same\s+direction|regardless\s+of|across\s+the\s+board|in\s+all\s+cases)\b",
-    re.IGNORECASE,
+    r"same\s+direction|regardless\s+of|irrespective\s+of|no\s+matter|across\s+the\s+board|in\s+all\s+cases|"
+    r"hand\s+in\s+hand|hold[s]?\s+across|hold[s]?\s+in\s+(?:every|each|all)|same\s+way|similar\s+way|"
+    r"(?:the\s+)?same\s+(?:in|for|across)|alike)\b"
 )
-_ALL_OTHER = re.compile(r"\b(?:every|all(?:\s+the)?|any)\s+other\b", re.IGNORECASE)
-_GENERIC_GROUP_NOUNS = {"group", "groups", "category", "categories", "subgroup", "subgroups", "segment", "segments", "level", "levels", "class", "classes"}
-_CLAUSE_BREAK = re.compile(r"[.;!?](?=\s|$)|\b(?:but|while|whereas|although|though|however|yet)\b", re.IGNORECASE)
-_SEGMENT_BREAK = re.compile(r"[.;!?,](?=\s|$)|\b(?:but|while|whereas|although|though|however|yet)\b", re.IGNORECASE)
+_ACROSS = re.compile(r"\bacross\s+(?:the\s+)?(?:" + _NUMBER_WORDS + r"\s+)?(?P<noun>[a-z][a-z0-9_]*)")
+_ALL_OTHER = re.compile(r"\b(?:every|all(?:\s+the)?|any)\s+other\b")
+_GENERIC_GROUP_NOUNS = {"group", "groups", "category", "categories", "subgroup", "subgroups", "segment", "segments",
+                        "level", "levels", "class", "classes"}
+_SENTENCE_BREAK = re.compile(r"[.;!?:](?=\s|$)|\n")
+_CLAUSE_BREAK = re.compile(r"[.;!?:](?=\s|$)|\n|\b(?:but|while|whereas|although|though|however|yet)\b")
+_SEGMENT_BREAK = re.compile(r"[.;!?,](?=\s|$)|\n|\b(?:but|while|whereas|although|though|however|yet)\b")
 _NUMBER = re.compile(r"(?<![\w.])-?\d+(?:\.\d+)?")
 _WORDTOK = re.compile(r"[A-Za-z0-9_]+")
+_TOKEN = re.compile(r"[a-z]+(?:'[a-z]+)?|\d+(?:\.\d+)?|%")
+_REFERENCE = re.compile(r"\b(?:than|compared\s+(?:to|with)|relative\s+to|versus|vs\.?)(?=\W|$)")
+_SHAPE_PHRASES = {
+    "u_shape": r"\bu[\s-]?shaped?\b|\bu[\s-]shape\b|\bu-?curve\b",
+    "inverted_u": r"\binverted[\s-]?u(?:[\s-]?shaped?)?\b|\bhump[\s-]?shaped\b",
+    "multi_peak": r"\b(?:several|multiple|many)\s+peaks\b",
+}
 # labels that are too ambiguous to find as bare words in prose
 _STOP = {
     "a", "an", "i", "the", "of", "in", "on", "at", "to", "or", "and", "is", "it", "as", "be", "by", "for", "no",
     "not", "yes", "all", "any", "one", "two", "none", "other", "others", "rest", "high", "low", "higher", "lower",
     "more", "less", "most", "least", "same", "new", "old", "up", "down", "top", "bottom", "total", "average",
     "mean", "median", "group", "groups", "n", "r", "vs", "true", "false", "null", "na", "unknown", "each",
-    "every", "than", "with", "per", "from", "this", "that", "these", "those", "s", "t", "d", "m",
+    "every", "than", "with", "per", "from", "this", "that", "these", "those", "s", "t", "d", "m", "first", "last",
+    "best", "worst", "u",
 }
 
 
@@ -475,6 +580,13 @@ class _Hit:
     label: str
 
 
+@dataclass
+class _Tok:
+    word: str
+    start: int
+    end: int
+
+
 def _lower(text: str) -> str:
     # length-preserving case fold (str.lower can change the length of a few
     # characters, which would shift every span)
@@ -483,15 +595,21 @@ def _lower(text: str) -> str:
     return re.sub(r"\b(?:e\.g\.|i\.e\.)", lambda m: " " * len(m.group(0)), out)
 
 
+def _is_lexicon(word: str) -> bool:
+    return any(
+        word in s
+        for s in (_COMP_UP, _COMP_DOWN, _SUP_UP, _SUP_DOWN, _STRENGTH, _STRENGTH_SUP, _RANK, _MAG, _INTENSITY,
+                  _EQUAL, _OTHER_EVAL, _SIGN_POS, _SIGN_NEG)
+    )
+
+
 def _ambiguous(label: str, column_names: set[str]) -> bool:
     low = label.lower()
     if low in _STOP or low in column_names:
         return True
     if re.fullmatch(r"-?\d+(?:\.\d+)?", low):
         return True
-    if _COMPARATIVE.fullmatch(low) or _SUPERLATIVE.fullmatch(low) or _POS.fullmatch(low) or _NEG.fullmatch(low):
-        return True
-    return False
+    return _is_lexicon(low) or _eval_class(low) is not None
 
 
 def _find_labels(low: str, claim: Claim, column_names: set[str]) -> list[_Hit]:
@@ -526,15 +644,9 @@ def _find_labels(low: str, claim: Claim, column_names: set[str]) -> list[_Hit]:
     return out
 
 
-def _spans(low: str, breaker: re.Pattern[str]) -> list[tuple[int, int]]:
-    cuts = [0] + [m.end() for m in breaker.finditer(low)] + [len(low)]
+def _spans(text: str, breaker: re.Pattern[str]) -> list[tuple[int, int]]:
+    cuts = [0] + [m.end() for m in breaker.finditer(text)] + [len(text)]
     return [(a, b) for a, b in zip(cuts, cuts[1:]) if b > a]
-
-
-def _negated(low: str, start: int) -> bool:
-    window = low[max(0, start - 25) : start]
-    words = _WORDTOK.findall(window)[-3:]
-    return any(w in ("not", "no", "never", "neither", "nor", "without") for w in words) or "n't" in window[-12:]
 
 
 def _word_gap(low: str, a: int, b: int) -> int:
@@ -542,64 +654,186 @@ def _word_gap(low: str, a: int, b: int) -> int:
     return len(_WORDTOK.findall(low[lo:hi]))
 
 
+def _eval_class(word: str) -> tuple[str, Any] | None:
+    """The evaluative class of one word, or None for a word that asserts no
+    order / magnitude / level. Unknown -er / -est adjectives are ("unknown", w)."""
+    if word in _COMP_UP:
+        return ("comp", 1)
+    if word in _COMP_DOWN:
+        return ("comp", -1)
+    if word in _SUP_UP:
+        return ("sup", 1)
+    if word in _SUP_DOWN:
+        return ("sup", -1)
+    if word in _STRENGTH:
+        return ("strength_comp", _STRENGTH[word])
+    if word in _STRENGTH_SUP:
+        return ("strength_sup", _STRENGTH_SUP[word])
+    if word in _SPREAD_COMP:
+        return ("spread_comp", _SPREAD_COMP[word])
+    if word in _SPREAD_SUP:
+        return ("spread_sup", _SPREAD_SUP[word])
+    if word in _RANK:
+        return ("rank", _RANK[word])
+    if word in _MAG:
+        return ("mag", _MAG[word])
+    if word in _INTENSITY:
+        return ("intensity", _INTENSITY[word])
+    if word in _EQUAL:
+        return ("equal", 0)
+    if word == "between":
+        return ("between", 0)
+    if word == "followed":
+        return ("followed", 0)
+    if word in _OTHER_EVAL:
+        return ("unknown", word)
+    if word not in _ER_EXCEPTIONS and len(word) > 4 and (word.endswith("er") or word.endswith("est")):
+        return ("unknown", word)
+    return None
+
+
+def _sign_of(word: str) -> int | None:
+    if word in _SIGN_POS:
+        return 1
+    if word in _SIGN_NEG:
+        return -1
+    return None
+
+
+@dataclass
+class _Text:
+    """One text prepared for the gate: lower-cased, idioms normalised, column
+    names masked with '#', labels with '§' (positions preserved)."""
+
+    raw: str
+    low: str  # lower-cased with idioms normalised (labels / columns intact)
+    norm: str  # low with labels and columns masked
+    labels: list[_Hit]
+    tokens: list[_Tok]
+    claim: Claim | None
+
+
+def _prepare(text: str, claim: Claim | None, names: set[str]) -> _Text:
+    low = _lower(text)
+    if claim is not None and claim.kind == "nonlinear_relationship" and claim.shape in _SHAPE_PHRASES:
+        # the shape's own name is the one shape wording a curve accepts
+        low = re.sub(_SHAPE_PHRASES[claim.shape], lambda m: " " * len(m.group(0)), low)
+    for pattern, word in _PHRASES:
+        low = re.sub(pattern, lambda m, w=word: w.ljust(len(m.group(0))) if len(m.group(0)) >= len(w) else m.group(0), low)
+    labels = _find_labels(low, claim, names) if claim is not None else []
+    chars = list(low)
+    for h in labels:
+        for i in range(h.start, h.end):
+            chars[i] = "§"
+    norm = "".join(chars)
+    for name in sorted((n for n in names if n), key=len, reverse=True):
+        norm = re.sub(r"(?<![\w])" + re.escape(name.lower()) + r"(?![\w])", lambda m: "#" * len(m.group(0)), norm)
+    tokens = [_Tok(m.group(0), m.start(), m.end()) for m in _TOKEN.finditer(norm)]
+    return _Text(text, low, norm, labels, tokens, claim)
+
+
+def _unknown_entities(t: _Text, start: int, end: int) -> list[str]:
+    """Names in a sentence that the claim does not know: a capitalised word
+    (not the sentence's first word) that is neither a label nor a column, or a
+    word derived from a label ("southern" for "South")."""
+    out: list[str] = []
+    labels = [g.label.lower() for g in t.claim.groups] if t.claim is not None else []
+    all_words = re.findall(r"[A-Za-z][A-Za-z'-]*", t.raw)
+    title_case = len(all_words) >= 3 and sum(w[0].isupper() for w in all_words) >= 0.6 * len(all_words)
+    first = True
+    for m in re.finditer(r"[A-Za-z][A-Za-z'-]*", t.raw[start:end]):
+        s = start + m.start()
+        if t.norm[s] in "#§":
+            first = False
+            continue
+        word = m.group(0)
+        lw = word.lower()
+        derived = any(len(lab) >= 4 and lw != lab and lw.startswith(lab) for lab in labels)
+        capitalised = not first and not title_case and word[0].isupper()
+        if derived or (capitalised and not _is_lexicon(lw) and lw not in ("i", "ks", "sd")):
+            out.append(word)
+        first = False
+    return out
+
+
 def semantic_problem(text: str, claim: Claim | None, column_names: set[str] | None = None) -> str | None:
-    """None when every comparative / direction / quantifier / causal word and
-    every label-bound number in `text` agrees with the claim."""
+    """None when `text` asserts only what the claim supports (see above)."""
     if not text or not text.strip():
         return None
-    names = {n.lower() for n in (column_names or set())}
-    low = _lower(text)
-    m = _CAUSAL.search(low)
+    names = {n.lower() for n in (column_names or set())} | (
+        {c.lower() for c in claim.columns.values()} if claim is not None else set()
+    )
+    t = _prepare(text, claim, names)
+    if any(ch.isalpha() and not ch.isascii() for ch in t.norm):
+        return "text is not in English (only English wording can be verified)"
+    m = _SYMBOL.search(t.norm)
     if m:
-        return f"causal language '{m.group(0)}' is not supported by an associational test"
+        return f"comparison symbol '{m.group(0)}' cannot be verified"
+    for m in re.finditer("=", t.norm):
+        if not _STAT_EQ.search(t.norm[: m.start()]):
+            return "'=' outside a statistic ('n = ...', 'r = ...') cannot be verified"
+    m = _CAUSAL.search(t.norm) or _COLUMN_VERB.search(t.norm)
+    if m:
+        return f"causal language '{m.group(0).strip()}' is not supported by an associational test"
     if claim is None:
-        return _claimless_problem(low)
-
-    labels = _find_labels(low, claim, names)
-    problem = _quantifier_problem(low, claim, names)
+        return _claimless_problem(t)
+    problem = _quantifier_problem(t, claim)
     if problem:
         return problem
-    for start, end in _spans(low, _CLAUSE_BREAK):
-        clause_labels = [h for h in labels if start <= h.start < end]
-        problem = _clause_problem(low, start, end, clause_labels, claim)
+    for start, end in _spans(t.norm, _SENTENCE_BREAK):
+        problem = _sentence_problem(t, start, end, claim)
         if problem:
             return problem
-    for start, end in _spans(low, _SEGMENT_BREAK):
-        problem = _binding_problem(low, start, end, [h for h in labels if start <= h.start < end], labels, claim)
+    for start, end in _spans(t.norm, _SEGMENT_BREAK):
+        problem = _binding_problem(t, start, end, claim)
         if problem:
             return problem
     return None
 
 
-def _claimless_problem(low: str) -> str | None:
+def _words(t: _Text, start: int, end: int) -> list[_Tok]:
+    return [k for k in t.tokens if start <= k.start < end]
+
+
+def _claimless_problem(t: _Text) -> str | None:
     """Free text with no claim behind it (a bare LLM chart suggestion's
-    caption): nothing can be checked, so no word that asserts a fact."""
-    for pattern, what in ((_COMPARATIVE, "comparison"), (_SUPERLATIVE, "superlative"), (_QUANT_WORD, "generalisation")):
-        m = pattern.search(low)
-        if m:
-            return f"unverifiable {what} '{m.group(0)}' in unvalidated text"
-    m = _QUANT_NOUN.search(low)
+    caption or title): nothing can be checked, so no word that asserts."""
+    for k in t.tokens:
+        if _eval_class(k.word) is not None or _sign_of(k.word) is not None:
+            return f"unverifiable assertion '{k.word}' in unvalidated text"
+    m = _QUANT_WORD.search(t.norm) or _QUANT_NOUN.search(t.norm)
     if m:
         return f"unverifiable generalisation '{m.group(0)}' in unvalidated text"
     return None
 
 
-def _quantifier_problem(low: str, claim: Claim, names: set[str]) -> str | None:
+def _group_nouns(claim: Claim) -> set[str]:
     gcol = (claim.group_column or "").lower()
-    group_nouns = set(_GENERIC_GROUP_NOUNS)
+    nouns = set(_GENERIC_GROUP_NOUNS)
     if gcol:
-        group_nouns |= {gcol, gcol + "s", gcol + "es"}
-    m = _QUANT_WORD.search(low)
+        nouns |= {gcol, gcol + "s", gcol + "es"}
+    return nouns
+
+
+def _quantifier_problem(t: _Text, claim: Claim) -> str | None:
+    text = t.low
+    nouns = _group_nouns(claim)
+    m = _QUANT_WORD.search(text)
     if m and not claim.universal_ok:
         return f"'{m.group(0)}' is not supported: the evidence does not show one consistent direction in every group"
-    for m in _QUANT_NOUN.finditer(low):
-        noun = m.group("noun").lower()
-        before = low[max(0, m.start() - 4) : m.start()]
+    relationship = claim.kind in ("grouped_relationship", "sign_flip", "slope_difference")
+    if relationship and not claim.universal_ok:
+        m = _ACROSS.search(text)
+        if m and (m.group("noun") in nouns or m.group("noun").rstrip("s") in nouns):
+            return f"'{m.group(0)}' is not supported: the claim was not established in every group"
+    for m in _QUANT_NOUN.finditer(text):
+        noun = m.group("noun")
+        before = text[max(0, m.start() - 4) : m.start()]
         if before.strip().endswith("of") and claim.comparisons_ok:
             continue  # "the highest of all segments": a superlative's scope, checked as a superlative
         if noun == "other" and claim.comparisons_ok:
             continue  # "outsells every other segment": checked as a top / bottom comparison
-        if noun in group_nouns or noun.rstrip("s") in group_nouns:
+        if noun in nouns or noun.rstrip("s") in nouns:
             if claim.universal_ok:
                 continue
             return f"'{m.group(0)}' is not supported: the claim was not established in every {claim.group_column or 'group'}"
@@ -607,126 +841,356 @@ def _quantifier_problem(low: str, claim: Claim, names: set[str]) -> str | None:
     return None
 
 
-def _comparatives(low: str, start: int, end: int) -> list[tuple[int, int, int, str]]:
-    """(position, end, polarity, word) for the comparatives in a clause."""
-    out = []
-    for m in _COMPARATIVE.finditer(low, start, end):
-        word = m.group("word").lower()
-        polarity = -1 if word.startswith(_LOW_PREFIXES) else 1
-        out.append((m.start(), m.end(), polarity, word))
-    return out
+def _sentence_problem(t: _Text, start: int, end: int, claim: Claim) -> str | None:
+    words = _words(t, start, end)
+    evals = [(k, _eval_class(k.word)) for k in words if _eval_class(k.word) is not None]
+    if claim.kind == "nonlinear_relationship":
+        # a curve accepts its shape name only (removed in _prepare); any other shape word is unverified
+        evals += [(k, ("unknown", k.word)) for k in words if k.word in _SHAPE_ONLY and _eval_class(k.word) is None]
+    signs = [(k, _sign_of(k.word)) for k in words if _sign_of(k.word) is not None]
+    if claim.kind not in ("group_difference", "distribution_difference"):
+        # "the relationship between z and w": "between" only orders groups
+        evals = [(k, c) for k, c in evals if c[0] != "between"]
+    if not evals and not signs:
+        return None
+    if any(k.word in _NEGATION or k.word.endswith("n't") for k in words) or "n't" in t.low[start:end]:
+        return "a negated comparison or direction cannot be verified"
+    labels = [h for h in t.labels if start <= h.start < end]
+    unknown = _unknown_entities(t, start, end)
+    if unknown:
+        return f"assertion about '{unknown[0]}', which is not a group of this finding"
+    for k, cls in evals:
+        if cls[0] == "unknown":
+            return f"'{cls[1]}' is not an assertion the backend can verify"
+    if claim.kind in ("group_difference", "distribution_difference"):
+        return _group_sentence(t, start, end, claim, evals, signs, labels)
+    if claim.kind in ("grouped_relationship", "sign_flip", "slope_difference"):
+        return _relationship_sentence(t, start, end, claim, evals, signs, labels)
+    if claim.kind == "nonlinear_relationship":
+        return _curve_sentence(t, start, end, claim, evals, signs)
+    if claim.kind == "time_pattern":
+        return _time_sentence(t, start, end, claim, evals, signs)
+    word = (evals or signs)[0][0].word
+    return f"'{word}' cannot be verified for a {claim.kind} finding"
 
 
-def _dimension(clause: str, words: list[str]) -> str:
-    if any(w.startswith(_STRENGTH_WORDS) for w in words):
-        return "strength"
-    if _SPREAD.search(clause):
-        return "spread"
-    return "level"
+# -- group differences ------------------------------------------------------------------
 
 
-def _clause_problem(low: str, start: int, end: int, labels: list[_Hit], claim: Claim) -> str | None:
-    clause = low[start:end]
-    comps = _comparatives(low, start, end)
-    supers = [
-        (m.start(), m.end(), -1 if m.group("word").lower().split()[-1] in _SUPER_LOW else 1, m.group("word").lower())
-        for m in _SUPERLATIVE.finditer(low, start, end)
-    ]
-    pos = [(m.start(), 1) for m in _POS.finditer(low, start, end)]
-    neg = [(m.start(), -1) for m in _NEG.finditer(low, start, end)]
-    for at, _end, _p, word in comps + supers:
-        if _negated(low, at):
-            return f"negated comparison '{word}' cannot be verified"
-    for at, _p in pos + neg:
-        if _negated(low, at):
-            return "negated direction word cannot be verified"
+def _values(claim: Claim, key: str) -> dict[str, float]:
+    return {g.label: float(_value(g, key)) for g in claim.ordered(key)}  # type: ignore[arg-type]
 
-    relationship = claim.kind in ("grouped_relationship", "sign_flip", "slope_difference")
-    signs = sorted(pos + neg)
-    if len(signs) == 2 and claim.direction != "nonmonotone" and (relationship or claim.kind == "nonlinear_relationship"):
-        # "w falls as z rises": one word moves x, the other y — the
-        # relationship's sign is their product
-        signs = [(signs[0][0], signs[0][1] * signs[1][1])]
-    # comparatives that are really direction statements: "higher z comes with
-    # higher w" (two comparatives, no reference) on a relationship / curve, or
-    # "higher after ... than before" on a time pattern
-    if comps and claim.kind in ("grouped_relationship", "sign_flip", "slope_difference", "nonlinear_relationship"):
-        level = [c for c in comps if not c[3].startswith(_STRENGTH_WORDS)]
-        if level:
-            if len(level) == 2 and not _REFERENCE.search(clause):
-                signs.append((level[1][0], level[0][2] * level[1][2]))
-                comps = [c for c in comps if c not in level]
-            else:
-                return f"comparison '{level[0][3]}' cannot be bound to a measured quantity of this relationship"
-    if comps and claim.kind == "time_pattern":
-        after, before = bool(_AFTER.search(clause)), bool(_BEFORE.search(clause))
-        if after == before:
-            return f"comparison '{comps[0][3]}' over time does not say which period is meant"
-        for at, _e, polarity, _w in comps:
-            signs.append((at, polarity if after else -polarity))
-        comps = []
 
-    if signs:
-        problem = _sign_problem(low, clause, signs, labels, claim)
+def _middle(values: dict[str, float]) -> float:
+    ordered = sorted(values.values())
+    n = len(ordered)
+    return ordered[n // 2] if n % 2 else (ordered[n // 2 - 1] + ordered[n // 2]) / 2
+
+
+def _keys_for(claim: Claim, clause: str, dim: str) -> list[str]:
+    if dim == "spread":
+        return ["iqr"] if any(_num(_value(g, "iqr")) for g in claim.groups) else ["std"]
+    if re.search(r"\bmedian\b", clause):
+        return ["median"]
+    if claim.kind == "distribution_difference":
+        return ["median", "mean"]  # "higher" on a distribution: both locations must agree
+    return [claim.order_key or "mean"]
+
+
+def _group_sentence(t, start, end, claim, evals, signs, labels) -> str | None:
+    if not claim.comparisons_ok:
+        word = (evals or signs)[0][0].word
+        return f"'{word}' cannot be verified: no per-group values for this finding"
+    text = t.norm[start:end]
+    # a direction word is only verifiable as "rises from A to B"
+    for k, polarity in signs:
+        m = re.match(r"\s+from\s+", t.norm[k.end : end])
+        a = next((h for h in labels if h.start > k.end), None)
+        b = next((h for h in labels if a is not None and h.start > a.end), None)
+        if not m or a is None or b is None or not re.search(r"\bto\s*$", t.norm[a.end : b.start]):
+            return f"direction word '{k.word}' cannot be verified for a {claim.kind} finding"
+        for key in _keys_for(claim, text, "level"):
+            values = _values(claim, key)
+            if a.label in values and b.label in values and (values[b.label] - values[a.label]) * polarity <= 0:
+                return f"'{k.word} from {a.label} to {b.label}' contradicts the {key} order"
+    if not evals:
+        return None
+    if any(cls[0] == "equal" for _, cls in evals):
+        return "a claim of equality between groups contradicts a validated difference"
+    if any(cls[0] in ("strength_comp", "strength_sup") for _, cls in evals):
+        evals = [(k, ("comp" if cls[0] == "strength_comp" else "sup", cls[1])) if cls[0].startswith("strength") else (k, cls)
+                 for k, cls in evals]
+    dim = "spread" if any(cls[0].startswith("spread") for _, cls in evals) or re.search(
+        r"\b(?:spread|variab\w*|dispersion|iqr|std|standard\s+deviation|volatil\w*)\b", text) else "level"
+    evals = [(k, (cls[0].replace("spread_", ""), cls[1])) for k, cls in evals]
+    gap_context = any(k.word in _GAP_WORDS for k in _words(t, start, end))
+    if not labels:
+        # nothing to bind an order to: only the size of the (validated) gap may be described
+        if gap_context and all(cls[0] in ("intensity", "sup") and cls[1] > 0 for _, cls in evals):
+            return None
+        return f"'{evals[0][0].word}' is not bound to a group, so it cannot be verified"
+    for key in _keys_for(claim, text, dim):
+        problem = _order_check(t, start, end, claim, evals, labels, key, gap_context)
         if problem:
             return problem
-
-    if comps or supers:
-        if not claim.comparisons_ok:
-            word = (comps or supers)[0][3]
-            return f"comparison '{word}' cannot be verified for a {claim.kind} finding"
-        words = [c[3] for c in comps] + [s[3] for s in supers]
-        dim = _dimension(clause, words)
-        if relationship:
-            if dim != "strength":
-                return f"comparison '{words[0]}' between groups of a relationship is not a measured quantity"
-            keys = ["abs_corr"]
-        elif dim == "strength":
-            return f"'{words[0]}' does not apply to a {claim.kind} finding"
-        elif dim == "spread":
-            keys = ["iqr"] if any(_num(_value(g, "iqr")) for g in claim.groups) else ["std"]
-        elif _MEDIAN.search(clause):
-            keys = ["median"]
-        elif claim.kind == "distribution_difference":
-            keys = ["median", "mean"]  # "higher" on a distribution: both locations must agree
-        else:
-            keys = [claim.order_key or "mean"]
-        for key in keys:
-            problem = _order_problem(low, start, end, comps, supers, labels, claim, key)
-            if problem:
-                return problem
     return None
 
 
-def _sign_problem(low: str, clause: str, signs: list[tuple[int, int]], labels: list[_Hit], claim: Claim) -> str | None:
+def _order_check(t, start, end, claim, evals, labels, key, gap_context) -> str | None:
+    values = _values(claim, key)
+    if len(values) < 2:
+        return f"no per-group {key} to compare"
+    ordered = sorted(values, key=lambda lab: -values[lab])
+    middle = _middle(values)
+    # "the gap is largest between A and B" / "a large gap between A and B"
+    if gap_context:
+        m = re.search(r"\bbetween\b", t.norm[start:end])
+        if m:
+            at = start + m.end()
+            pair = [h for h in labels if h.start >= at][:2]
+            if len(pair) == 2:
+                if any(cls[0] == "sup" for _, cls in evals):
+                    want = set(claim.ks_pair or []) if claim.kind == "distribution_difference" and claim.ks_pair else {ordered[0], ordered[-1]}
+                    if {pair[0].label, pair[1].label} != want:
+                        return f"the largest gap is not between {pair[0].label} and {pair[1].label}"
+                labels = [h for h in labels if h not in pair]
+                evals = [(k, c) for k, c in evals if c[0] not in ("sup", "intensity", "between")]
+                if not labels or not evals:
+                    return None
+    clauses = _spans(t.norm[start:end], re.compile(r"\b(?:but|while|whereas|although|though|however|yet)\b|;"))
+    prev_subjects: list[_Hit] = []
+    for cs, ce in clauses:
+        cs, ce = start + cs, start + ce
+        c_labels = [h for h in labels if cs <= h.start < ce]
+        c_evals = [(k, c) for k, c in evals if cs <= k.start < ce]
+        if not c_evals:
+            prev_subjects = c_labels[:1] or prev_subjects
+            continue
+        problem, prev_subjects = _clause_order(t, cs, ce, claim, c_evals, c_labels, values, ordered, middle, key, prev_subjects)
+        if problem:
+            return problem
+    return None
+
+
+def _clause_order(t, cs, ce, claim, evals, labels, values, ordered, middle, key, prev_subjects):
+    comps = [(k, c) for k, c in evals if c[0] == "comp"]
+    sups = [(k, c) for k, c in evals if c[0] == "sup"]
+    ranks = [(k, c) for k, c in evals if c[0] == "rank"]
+    mags = [(k, c) for k, c in evals if c[0] == "mag"]
+    intens = [(k, c) for k, c in evals if c[0] == "intensity"]
+    betweens = [(k, c) for k, c in evals if c[0] == "between"]
+    followed = [(k, c) for k, c in evals if c[0] == "followed"]
+    if any(lab.label not in values for lab in labels):
+        return f"no {key} for every group named", prev_subjects
+    if not labels and not prev_subjects:
+        return f"'{evals[0][0].word}' is not bound to a group, so it cannot be verified", prev_subjects
+    labels_or_prev = labels or prev_subjects
+
+    def above(a: str, b: str, polarity: int) -> bool:
+        return (values[a] - values[b]) * polarity > 0
+
+    # ranks: "North East is second", "the second-lowest"
+    for k, (_, rank) in ranks:
+        nxt = next((c for kk, c in sups if kk.start > k.start and _word_gap(t.norm, k.end, kk.start) <= 1), None)
+        polarity = nxt[1] if nxt else 1
+        sups = [(kk, c) for kk, c in sups if not (kk.start > k.start and _word_gap(t.norm, k.end, kk.start) <= 1)]
+        h = _nearest(t, labels_or_prev, k.start, prefer_before=True)
+        if h is None:
+            return f"'{k.word}' is not bound to a group", prev_subjects
+        order = ordered if polarity > 0 else ordered[::-1]
+        if rank > len(order) or values[order[rank - 1]] != values[h.label]:
+            return f"{h.label} is not {k.word} in {key}", prev_subjects
+    # superlatives
+    if sups:
+        distinct = []
+        for h in labels_or_prev:
+            if all(h.label != d.label for d in distinct):
+                distinct.append(h)
+        if len(distinct) == len(sups):
+            pairs = list(zip(sups, distinct))
+        else:
+            pairs = []
+            for s in sups:
+                h = _nearest(t, labels_or_prev, s[0].start, prefer_before=False)
+                if h is None or _word_gap(t.norm, s[0].start, h.start) > 8:
+                    return f"'{s[0].word}' is not bound to a group", prev_subjects
+                pairs.append((s, h))
+        for (k, (_, polarity)), h in pairs:
+            want = ordered[0] if polarity > 0 else ordered[-1]
+            if values[h.label] != values[want]:
+                return f"'{k.word}' is bound to {h.label}, but the {key} {'top' if polarity > 0 else 'bottom'} is {want}", prev_subjects
+    # between: "North East sits between South and West"
+    for k, _ in betweens:
+        before = [h for h in labels_or_prev if h.start < k.start]
+        after = [h for h in labels if h.start > k.start][:2]
+        if not before or len(after) < 2:
+            return "'between' is not bound to three groups", prev_subjects
+        x, a, b = values[before[-1].label], values[after[0].label], values[after[1].label]
+        if not min(a, b) < x < max(a, b):
+            return f"{before[-1].label} is not between {after[0].label} and {after[1].label} in {key}", prev_subjects
+    # "followed by": the groups listed from the one before it are in order
+    for k, _ in followed:
+        seq = [h for h in labels_or_prev if h.start < k.start][-1:] + [h for h in labels if h.start > k.start]
+        polarity = -1 if any(c[1] < 0 for _, c in sups) else 1
+        for a, b in zip(seq, seq[1:]):
+            if a.label != b.label and not above(a.label, b.label, polarity):
+                return f"{b.label} does not follow {a.label} in the {key} order", prev_subjects
+    # comparatives and magnitudes: subjects vs references
+    subjects, refs = _subjects_refs(t, cs, ce, labels, comps + mags)
+    if (comps or mags) and not subjects:
+        subjects = prev_subjects
+    if comps:
+        polarities = {c[1] for _, c in comps}
+        if len(polarities) > 1:
+            return "comparisons of opposite direction in one clause cannot be verified", prev_subjects
+        polarity = polarities.pop()
+        every_other = _ALL_OTHER.search(t.norm, cs, ce) is not None
+        for s in subjects:
+            for r in refs:
+                if r.label != s.label and not above(s.label, r.label, polarity):
+                    return f"comparison of {s.label} and {r.label} contradicts the {key} order", prev_subjects
+            if not refs:
+                if every_other:
+                    want = ordered[0] if polarity > 0 else ordered[-1]
+                    if values[s.label] != values[want]:
+                        return f"{s.label} is not {'above' if polarity > 0 else 'below'} every other group in {key}", prev_subjects
+                elif (values[s.label] - middle) * polarity <= 0:
+                    return f"{s.label} is not {'above' if polarity > 0 else 'below'} the other groups in {key}", prev_subjects
+        if not subjects:
+            for r in refs:
+                if (middle - values[r.label]) * polarity <= 0:
+                    return f"the other groups are not {'above' if polarity > 0 else 'below'} {r.label} in {key}", prev_subjects
+    for k, (_, factor) in mags:
+        if factor is None:  # "N times" / "N-fold": the number before it
+            m = re.search(r"(\d+(?:\.\d+)?)\s*-?\s*$", t.norm[cs : k.start])
+            if not m:
+                return f"'{k.word}' without a factor cannot be verified", prev_subjects
+            factor = float(m.group(1))
+        if len(subjects) != 1 or len(refs) != 1:
+            return f"'{k.word}' needs exactly one group compared with one other", prev_subjects
+        a, b = values[subjects[0].label], values[refs[0].label]
+        if b == 0:
+            return f"'{k.word}' cannot be verified against a zero {key}", prev_subjects
+        ratio = a / b
+        tolerance = 0.15 if any(w.word in _HEDGE for w in _words(t, cs, ce)) else 0.07
+        if comps and next(iter({c[1] for _, c in comps}), 1) > 0:
+            ok = ratio >= factor * (1 - tolerance)
+        elif comps:
+            ok = ratio <= factor * (1 + tolerance)
+        else:
+            ok = abs(ratio / factor - 1) <= tolerance
+        if not ok:
+            return f"{subjects[0].label} is not '{k.word}' {refs[0].label} in {key} (ratio {ratio:.2f})", prev_subjects
+    # "high" / "low" bound to a group: above / below the middle
+    for k, (_, polarity) in intens:
+        h = _nearest(t, labels_or_prev, k.start, prefer_before=True)
+        if h is None:
+            return f"'{k.word}' is not bound to a group", prev_subjects
+        if (values[h.label] - middle) * polarity <= 0:
+            return f"{h.label} is not '{k.word}' relative to the other groups in {key}", prev_subjects
+    return None, (subjects or labels[:1] or prev_subjects)
+
+
+def _nearest(t: _Text, labels: list[_Hit], at: int, prefer_before: bool) -> _Hit | None:
+    """The label closest to a word (in words between them); ties go to the
+    label before it when `prefer_before`."""
+    if not labels:
+        return None
+    return min(labels, key=lambda h: (_word_gap(t.norm, h.end if h.start < at else at, at if h.start < at else h.start),
+                                      (h.start > at) if prefer_before else (h.start < at)))
+
+
+def _subjects_refs(t: _Text, cs: int, ce: int, labels: list[_Hit], items) -> tuple[list[_Hit], list[_Hit]]:
+    if not items:
+        return list(labels), []
+    ref = _REFERENCE.search(t.norm, cs, ce)
+    if ref is not None:
+        marker = ref.group(0)
+        if marker == "than":
+            return [h for h in labels if h.start < ref.start()], [h for h in labels if h.start > ref.start()]
+        after = [h for h in labels if h.start > ref.start()]
+        refs = after[:1]
+        return [h for h in labels if h not in refs], refs
+    pivot_tok = next((k for k, c in items if k.word in _VERB_COMP or c[0] == "mag"), None)
+    if pivot_tok is not None:
+        return [h for h in labels if h.start < pivot_tok.start], [h for h in labels if h.start > pivot_tok.start]
+    return list(labels), []
+
+
+# -- relationships ----------------------------------------------------------------------
+
+
+def _relationship_sentence(t, start, end, claim, evals, signs, labels) -> str | None:
+    signs = [(k.start, p) for k, p in signs]
+    level = [(k, c) for k, c in evals if c[0] == "comp"]
+    strength = [(k, c) for k, c in evals if c[0] in ("strength_comp", "strength_sup")]
+    intens = [(k, c) for k, c in evals if c[0] == "intensity"]
+    other = [(k, c) for k, c in evals if c[0] not in ("comp", "strength_comp", "strength_sup", "intensity", "between")]
+    if other:
+        return f"'{other[0][0].word}' cannot be bound to a measured quantity of this relationship"
+    if intens and labels:
+        return f"'{intens[0][0].word}' about a single group's relationship cannot be verified"
+    if level:
+        # "higher z goes with higher w": two comparatives are one direction
+        if len(level) == 2 and not _REFERENCE.search(t.norm, start, end):
+            signs.append((level[1][0].start, level[0][1][1] * level[1][1][1]))
+        else:
+            return f"comparison '{level[0][0].word}' cannot be bound to a measured quantity of this relationship"
+    signs = _collapse_pairs(t, start, end, sorted(signs))
+    if signs:
+        problem = _sign_problem(t, start, end, signs, labels, claim)
+        if problem:
+            return problem
+    for k, (cls, polarity) in strength:
+        problem = _strength_check(t, start, end, k, cls, polarity, labels, claim)
+        if problem:
+            return problem
+    return None
+
+
+def _collapse_pairs(t: _Text, start: int, end: int, signs: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Per clause, two direction words are one statement about the pair:
+    "w falls as z rises" moves x one way and y the other -> negative."""
+    out: list[tuple[int, int]] = []
+    for cs, ce in _clauses(t, start, end):
+        c = [s for s in signs if cs <= s[0] < ce]
+        out += [(c[0][0], c[0][1] * c[1][1])] if len(c) == 2 else c
+    return out
+
+
+def _clauses(t: _Text, start: int, end: int) -> list[tuple[int, int]]:
+    return [(start + a, start + b) for a, b in _spans(t.norm[start:end], _CLAUSE_BREAK)]
+
+
+def _sign_problem(t: _Text, start: int, end: int, signs: list[tuple[int, int]], labels: list[_Hit], claim: Claim) -> str | None:
     if not claim.signs_ok:
         return f"direction word cannot be verified for a {claim.kind} finding"
-    if claim.direction == "nonmonotone":
-        polarities = {p for _, p in signs}
-        if len(polarities) == 1:
-            return f"a single direction is stated for a {claim.shape} curve"
-        return None
-    if claim.simpson and _SCOPE_ALL.search(clause):
+    if claim.simpson and _SCOPE_ALL.search(t.norm, start, end):
         return "direction stated for the pooled data, which runs against every group"
-    if claim.direction in ("positive", "negative") and claim.kind not in ("sign_flip",):
+    if claim.direction in ("positive", "negative") and claim.kind != "sign_flip":
         expected = 1 if claim.direction == "positive" else -1
-        bound = {h.label: _nearest_sign(h, signs) for h in labels}
-        for at, polarity in signs:
+        for _, polarity in signs:
             if polarity != expected:
                 return f"direction word contradicts the measured {claim.direction} direction"
-        for label, polarity in bound.items():
-            fact = next((g for g in claim.groups if g.label == label), None)
+        for h in labels:
+            polarity = _nearest_sign(h, signs)
+            fact = next((g for g in claim.groups if g.label == h.label), None)
             if fact is not None and fact.sign() is not None and fact.sign() != polarity:
-                return f"direction stated for {label} does not match its correlation"
+                return f"direction stated for {h.label} does not match its correlation"
         return None
-    # mixed directions: each direction word must be bound to the groups it holds for
-    if not labels:
-        return "a single direction is stated for a relationship whose direction differs between groups"
-    for h in labels:
-        polarity = _nearest_sign(h, signs)
-        fact = next((g for g in claim.groups if g.label == h.label), None)
-        if fact is None or fact.sign() != polarity:
-            return f"direction stated for {h.label} does not match its correlation"
+    # mixed directions: each direction must be bound, clause by clause, to the groups it holds for
+    for cs, ce in _clauses(t, start, end):
+        c_signs = [s for s in signs if cs <= s[0] < ce]
+        c_labels = [h for h in labels if cs <= h.start < ce]
+        if not c_signs:
+            continue
+        if not c_labels:
+            return "a single direction is stated for a relationship whose direction differs between groups"
+        for h in c_labels:
+            polarity = _nearest_sign(h, c_signs)
+            fact = next((g for g in claim.groups if g.label == h.label), None)
+            if fact is None or fact.sign() != polarity:
+                return f"direction stated for {h.label} does not match its correlation"
     return None
 
 
@@ -734,120 +1198,155 @@ def _nearest_sign(h: _Hit, signs: list[tuple[int, int]]) -> int:
     return min(signs, key=lambda s: (abs(s[0] - h.start), s[0] > h.start))[1]
 
 
-def _order_problem(
-    low: str,
-    start: int,
-    end: int,
-    comps: list[tuple[int, int, int, str]],
-    supers: list[tuple[int, int, int, str]],
-    labels: list[_Hit],
-    claim: Claim,
-    key: str,
-) -> str | None:
-    ordered = claim.ordered(key)
-    if len(ordered) < 2:
-        return f"no per-group {key} to compare"
-    value = {g.label: float(_value(g, key)) for g in ordered}  # type: ignore[arg-type]
-    middle = sorted(value.values())[len(value) // 2] if len(value) % 2 else (
-        sum(sorted(value.values())[len(value) // 2 - 1 : len(value) // 2 + 1]) / 2
-    )
-    if comps:
-        polarities = {c[2] for c in comps}
-        if len(polarities) > 1:
-            return "comparisons of opposite direction in one clause cannot be verified"
-        polarity = polarities.pop()
-        ref = _REFERENCE.search(low, start, end)
-        if ref is not None:
-            marker = ref.group(0).lower()
-            if marker == "than":
-                subjects = [h for h in labels if h.start < ref.start()]
-                refs = [h for h in labels if h.start > ref.start()]
-            else:
-                after = [h for h in labels if h.start > ref.start()]
-                refs = after[:1]
-                subjects = [h for h in labels if h not in refs]
-        elif any(c[3].startswith(_VERB_COMPARATIVES) for c in comps):
-            pivot = comps[0][0]
-            subjects = [h for h in labels if h.start < pivot]
-            refs = [h for h in labels if h.start > pivot]
-        else:
-            subjects, refs = list(labels), []
-        for s in subjects:
-            if s.label not in value:
-                return f"{s.label} has no {key} to compare"
-            for r in refs:
-                if r.label == s.label or r.label not in value:
-                    continue
-                if (value[s.label] - value[r.label]) * polarity <= 0:
-                    return f"comparison of {s.label} and {r.label} contradicts the {key} order"
-            if not refs and _ALL_OTHER.search(low, start, end):
-                # "e outsells every other segment" is a top / bottom claim
-                want = ordered[0].label if polarity > 0 else ordered[-1].label
-                if value[s.label] != value[want]:
-                    return f"{s.label} is not {'above' if polarity > 0 else 'below'} every other group in {key}"
-            elif not refs and (value[s.label] - middle) * polarity <= 0:
-                return f"{s.label} is not {'above' if polarity > 0 else 'below'} the other groups in {key}"
-        if not subjects:
-            for r in refs:
-                if r.label in value and (middle - value[r.label]) * polarity <= 0:
-                    return f"the other groups are not {'above' if polarity > 0 else 'below'} {r.label} in {key}"
-    if supers and labels:
-        top, bottom = ordered[0].label, ordered[-1].label
-        distinct: list[_Hit] = []
-        for h in labels:
-            if all(h.label != d.label for d in distinct):
-                distinct.append(h)
-        if len(distinct) == len(supers):
-            # "highest in e and lowest in b" / "e has the highest, b the lowest":
-            # as many superlatives as labels pair up in order of mention
-            pairs = list(zip(supers, distinct))
-        else:
-            # otherwise each superlative binds the label nearest to it
-            pairs = []
-            for s in supers:
-                h = min(labels, key=lambda h: (_word_gap(low, s[0], h.start), h.start < s[0]))
-                if _word_gap(low, s[0], h.start) <= 8:
-                    pairs.append((s, h))
-        for s, h in pairs:
-            want = top if s[2] > 0 else bottom
-            if h.label != want and value.get(h.label) != value.get(want):
-                return f"'{s[3]}' is bound to {h.label}, but the {key} {'top' if s[2] > 0 else 'bottom'} is {want}"
+def _strength_check(t, start, end, k, cls, polarity, labels, claim) -> str | None:
+    values = {g.label: abs(g.corr) for g in claim.groups if g.corr is not None}
+    if len(values) < 2:
+        return f"'{k.word}' cannot be verified: fewer than two estimated groups"
+    c_labels = [h for h in labels if any(cs <= h.start < ce and cs <= k.start < ce for cs, ce in _clauses(t, start, end))]
+    if not c_labels:
+        return f"'{k.word}' is not bound to a group"
+    if any(h.label not in values for h in c_labels):
+        return f"'{k.word}' names a group without an estimated correlation"
+    ordered = sorted(values, key=lambda lab: -values[lab])
+    if cls == "strength_sup":
+        h = _nearest(t, c_labels, k.start, prefer_before=False)
+        want = ordered[0] if polarity > 0 else ordered[-1]
+        if values[h.label] != values[want]:
+            return f"'{k.word}' is bound to {h.label}, but it is {want}"
+        return None
+    ref = _REFERENCE.search(t.norm, start, end)
+    subjects = [h for h in c_labels if ref is None or h.start < ref.start()]
+    refs = [h for h in c_labels if ref is not None and h.start > ref.start()]
+    if not refs:
+        return f"'{k.word}' without a group to compare with cannot be verified"
+    for s in subjects:
+        for r in refs:
+            if (values[s.label] - values[r.label]) * polarity <= 0:
+                return f"the relationship in {s.label} is not '{k.word}' than in {r.label}"
     return None
 
 
-def _binding_problem(
-    low: str, start: int, end: int, labels: list[_Hit], all_labels: list[_Hit], claim: Claim
-) -> str | None:
-    """A number next to a group label must be that group's own number."""
+# -- curves and time --------------------------------------------------------------------
+
+
+def _curve_sentence(t, start, end, claim, evals, signs) -> str | None:
+    evals = [(k, c) for k, c in evals if c[0] != "between"]
+    if not evals and not signs:
+        return None
+    words = {k.word for k in _words(t, start, end)}
+    if claim.direction == "nonmonotone":
+        # only the shape's own name (removed in _prepare) describes a curve
+        # that turns: any direction, extremum or order word is unverifiable
+        word = (evals or signs)[0][0].word
+        return f"'{word}' cannot be verified for a {claim.shape} curve; only its shape name can"
+    if claim.direction not in ("positive", "negative"):
+        word = (evals or signs)[0][0].word
+        return f"'{word}' cannot be verified for a curve without a direction"
+    if words & _SHAPE_ONLY:
+        return f"shape word '{sorted(words & _SHAPE_ONLY)[0]}' does not match the measured {claim.shape} curve"
+    level = [(k, c) for k, c in evals if c[0] == "comp"]
+    other = [(k, c) for k, c in evals if c[0] != "comp"]
+    if other:
+        return f"'{other[0][0].word}' cannot be verified for this curve"
+    s = [(k.start, p) for k, p in signs]
+    if level:
+        if len(level) == 2 and not _REFERENCE.search(t.norm, start, end):
+            s.append((level[1][0].start, level[0][1][1] * level[1][1][1]))
+        else:
+            return f"comparison '{level[0][0].word}' cannot be verified for this curve"
+    s.sort()
+    if len(s) == 2:
+        s = [(s[0][0], s[0][1] * s[1][1])]
+    expected = 1 if claim.direction == "positive" else -1
+    if any(p != expected for _, p in s):
+        return f"direction word contradicts the measured {claim.direction} direction"
+    return None
+
+
+def _time_sentence(t, start, end, claim, evals, signs) -> str | None:
+    evals = [(k, c) for k, c in evals if c[0] != "between"]
+    if not evals and not signs:
+        return None
+    if not claim.signs_ok or claim.change is None:
+        word = (evals or signs)[0][0].word
+        return f"'{word}' cannot be verified: no measured direction over time"
+    expected = 1 if claim.direction == "positive" else -1
+    words = _words(t, start, end)
+    s = [p for _, p in signs]
+    for k, cls in evals:
+        if cls[0] == "comp":
+            # "higher after ... (than before)": the period named first after the comparative
+            period = next((w.word for w in words if w.start > k.start and (w.word in _AFTER_WORDS or w.word in _BEFORE_WORDS)), None)
+            if period is None:
+                period = next((w.word for w in reversed(words) if w.start < k.start and (w.word in _AFTER_WORDS or w.word in _BEFORE_WORDS)), None)
+            if period is None:
+                return f"comparison '{k.word}' over time does not say which period is meant"
+            s.append(cls[1] if period in _AFTER_WORDS else -cls[1])
+        elif cls[0] == "mag" and cls[1] is not None:
+            before, after = claim.change["before"], claim.change["after"]
+            if before == 0 or abs((after / before) / cls[1] - 1) > 0.15:
+                return f"'{k.word}' does not match the measured change ({fmt(before)} to {fmt(after)})"
+            s.append(1 if cls[1] > 1 else -1)
+        else:
+            return f"'{k.word}' cannot be verified for a change over time"
+    if any(p != expected for p in s):
+        return f"direction word contradicts the measured {'rise' if expected > 0 else 'fall'}"
+    return None
+
+
+# -- numbers next to labels ---------------------------------------------------------------
+
+
+def _binding_problem(t: _Text, start: int, end: int, claim: Claim) -> str | None:
+    """A number next to a group label must be that group's own number; a
+    number in parentheses belongs to the label before it."""
+    labels = [h for h in t.labels if start <= h.start < end]
     if not labels:
         return None
     from .service import _number_supported  # the number gate's own rounding rule
 
-    inside = [(h.start, h.end) for h in all_labels]
+    low = t.low
+    inside = [(h.start, h.end) for h in t.labels]
     facts = {g.label: g for g in claim.groups}
-    others_of = lambda label: {x for g in claim.groups if g.label != label for x in g.own_numbers()}  # noqa: E731
+
+    def others_of(label: str) -> set[float]:
+        return {x for g in claim.groups if g.label != label for x in g.own_numbers()}
+
+    def check(token: str, label: str) -> str | None:
+        fact = facts.get(label)
+        if fact is None or _number_supported(token, set(fact.own_numbers())):
+            return None
+        if _number_supported(token, others_of(label)):
+            return f"number {token} belongs to another group, not {label}"
+        return None
+
     paired: set[int] = set()
-    # "e is higher than a (79.1 vs 50.5)": a parenthesis with several numbers
-    # pairs them, in order, with the labels mentioned before it
     for p in re.finditer(r"\(([^()]*)\)", low[start:end]):
-        p_start = start + p.start()
-        numbers = [n for n in _NUMBER.finditer(low, p_start, start + p.end()) if not any(a <= n.start() < b for a, b in inside)]
-        if len(numbers) < 2:
+        p_start, p_end = start + p.start(), start + p.end()
+        numbers = [n for n in _NUMBER.finditer(low, p_start, p_end) if not any(a <= n.start() < b for a, b in inside)]
+        if not numbers:
             continue
         before: list[str] = []
         for h in labels:
             if h.start < p_start and h.label not in before:
                 before.append(h.label)
-        if len(before) != len(numbers):
-            continue  # no one-to-one pairing: the nearest-label rule below decides
-        for n, label in zip(numbers, before):
+        inner = [h for h in labels if p_start <= h.start < p_end]
+        if inner:
+            continue  # "(South 200.0)": the nearest-label rule below decides
+        if len(numbers) >= 2 and len(before) == len(numbers):
+            pairs = list(zip(numbers, before))  # "e higher than a (79.1 vs 50.5)"
+        elif len(numbers) == 1 and before:
+            pairs = [(numbers[0], before[-1])]  # "South (200.0)", "the lowest (99.1)" -> the label before
+        else:
+            continue
+        for n, label in pairs:
             paired.add(n.start())
-            token = n.group(0)
-            if label in facts and not _number_supported(token, set(facts[label].own_numbers())) and _number_supported(token, others_of(label)):
-                return f"number {token} belongs to another group, not {label}"
+            problem = check(n.group(0), label)
+            if problem:
+                return problem
     for m in _NUMBER.finditer(low, start, end):
         if m.start() in paired or any(a <= m.start() < b for a, b in inside):
-            continue  # paired above, or the number is the label itself ("segment 2")
+            continue
         best: tuple[int, bool, _Hit] | None = None
         for h in labels:
             gap = _word_gap(low, h.end, m.start()) if h.start < m.start() else _word_gap(low, m.end(), h.start)
@@ -856,13 +1355,7 @@ def _binding_problem(
                 best = (gap, after, h)
         if best is None:
             continue
-        label = best[2].label
-        fact = facts.get(label)
-        if fact is None:
-            continue
-        token = m.group(0)
-        if _number_supported(token, set(fact.own_numbers())):
-            continue
-        if _number_supported(token, others_of(label)):
-            return f"number {token} belongs to another group, not {label}"
+        problem = check(m.group(0), best[2].label)
+        if problem:
+            return problem
     return None

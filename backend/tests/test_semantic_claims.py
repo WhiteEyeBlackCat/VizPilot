@@ -227,7 +227,9 @@ def test_numeric_labels_never_misfire() -> None:
     claim = build_claim(_v("group_difference", {"group": "grp", "target": "y"}, {"groups": groups}))
     # bare numbers are not taken for labels: "3 groups", "n=100" do not bind
     assert semantic_problem("The 3 groups differ (n=100 each).", claim) is None
-    assert semantic_problem("Group 2 has the highest mean y.", claim) is None  # "Group" is not the column: unchecked
+    # "Group" is not the column, so "2" is not found as a label: a superlative
+    # bound to nothing cannot be verified and fails closed
+    assert "not bound to a group" in semantic_problem("Group 2 has the highest mean y.", claim)
     # with the column name the label is found and checked
     assert semantic_problem("grp 2 has the highest mean y.", claim) is None
     assert "the mean top is 2" in semantic_problem("grp 3 has the highest mean y.", claim)
@@ -261,8 +263,11 @@ def test_coverage_and_probe_evidence_shapes_give_the_same_claim() -> None:
 
 def test_unverifiable_claim_types_accept_only_plain_wording() -> None:
     claim = build_claim(_v("interaction", {"factor1": "f", "factor2": "h", "target": "t"}, {"strength": 0.2}))
-    assert semantic_problem("The effect of f on t depends on h.", claim) is None
-    for text in ("t is highest when f is high.", "t rises with f.", "This holds in every h.", "f drives t."):
+    assert semantic_problem("How t varies with f differs between levels of h.", claim) is None
+    # "effect of" / "depends on" are causal wording when the LLM writes them
+    # (the backend's own neutral interaction sentence is not LLM text)
+    for text in ("t is highest when f is high.", "t rises with f.", "This holds in every h.", "f drives t.",
+                 "The effect of f on t depends on h."):
         assert semantic_problem(text, claim) is not None, text
 
 

@@ -135,6 +135,7 @@ class RecommendationService:
         self._cache: dict[tuple, tuple[dict[str, Any], float | None]] = {}  # key -> (payload, expires_at)
         self._lock = threading.Lock()
         self._key_locks: dict[tuple, threading.Lock] = {}
+        self._generation: dict[tuple, int] = {}  # builds stored per key (refresh coalescing)
 
     def _cache_key(self, profile: DatasetProfile, use_llm: bool) -> tuple:
         """Rules-only results depend on the profile alone; LLM results also on
@@ -178,6 +179,10 @@ class RecommendationService:
         the workflow trace under "debug"; it is stripped unless asked for.
         `refresh` rebuilds and replaces the cache entry."""
         cache_key = self._cache_key(profile, use_llm)
+        # the entry generation seen when the request arrived: a refresh that
+        # waited for another build of the same key takes that fresher result
+        # instead of building again (N concurrent refreshes -> one build)
+        seen = self._generation.get(cache_key, 0)
         cached = None if refresh else self._fresh(cache_key)
         if cached is None:
             # per-key lock: an in-flight LLM build must not block the llm=false
@@ -185,11 +190,13 @@ class RecommendationService:
             with self._lock:
                 key_lock = self._key_lock(cache_key)
             with key_lock:
-                cached = None if refresh else self._fresh(cache_key)
+                replaced = self._generation.get(cache_key, 0) != seen
+                cached = None if refresh and not replaced else self._fresh(cache_key)
                 if cached is None:
                     cached, transient = self._build_traced(profile, use_llm, df)
                     expires_at = self._clock() + FAILURE_TTL_SECONDS if transient else None
                     self._cache[cache_key] = (cached, expires_at)
+                    self._generation[cache_key] = self._generation.get(cache_key, 0) + 1
         if include_debug:
             return cached
         return {k: v for k, v in cached.items() if k != "debug"}
