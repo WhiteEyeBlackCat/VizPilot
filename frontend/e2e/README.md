@@ -56,8 +56,8 @@ panel (`[data-preview-panel]`), Save as the only way into the workspace:
    800px viewport: top bar navigation, preview as a bottom drawer
 9. outliers: `display_range` note in the panel and the suspected-sentinel
    quality flag on the Overview; dataset switch clears the preview and keeps
-   per-dataset workspaces; reload keeps the route (the workspace is in-memory
-   and starts empty)
+   per-dataset workspaces; reload keeps the route and restores the saved
+   charts from localStorage (A8: specs re-rendered on dataset select)
 10. hash normalisation: an unknown dataset id or `#/garbage` → empty state,
     `#/d/<id>/bogus` → `/overview` (replaced, no history entry)
 11. tiny_dataset warning chips + empty-top notice, sales_basic derived-column

@@ -183,6 +183,15 @@ describe("HYDRATE_WORKSPACE", () => {
     expect(persistableWorkspace(removed, "d1").map((c) => c.key)).toEqual(["gone"]);
   });
 
+  it("a deleted chart is not resurrected from an orphaned copy of the same spec", () => {
+    // the stored copy failed to re-render once (orphan "o"); the user saved the
+    // same chart again under a new key, then deleted it
+    const s = run([hydrate("d1", [saved("again", "x")], [persisted("o", "x"), persisted("other", "y")])], selected());
+    expect(persistableWorkspace(s, "d1").map((c) => c.key)).toEqual(["other", "again"]); // no duplicate x
+    const removed = reducer(s, { type: "REMOVE_SAVED", datasetId: "d1", key: "again" });
+    expect(persistableWorkspace(removed, "d1").map((c) => c.key)).toEqual(["other"]);
+  });
+
   it("SAVE_PREVIEW still refuses a duplicate spec after hydration", () => {
     const base = run([hydrate("d1", [saved("a", "x")])], selected());
     const withPreview: AppState = { ...base, preview: { result: rendered(spec("x")), source: "explore", seq: 1 } };

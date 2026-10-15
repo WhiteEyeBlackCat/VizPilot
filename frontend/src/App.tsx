@@ -24,7 +24,7 @@ import {
   type Preview,
   type SavedChart,
 } from "./store";
-import { hydrateWorkspace, saveWorkspace } from "./workspaceStorage";
+import { hydrateWorkspace, loadWorkspace, saveWorkspace } from "./workspaceStorage";
 import type { ChartSpec, DatasetMeta, Insight, Recommendation } from "./types";
 import { Button } from "@/components/ui/button";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup, type GroupHandle, type Layout } from "@/components/ui/resizable";
@@ -95,7 +95,9 @@ export default function App() {
     if (!hydratedRef.current[id]) {
       hydrateWorkspace(id, api.render)
         .then(({ charts, orphans }) => dispatch({ type: "HYDRATE_WORKSPACE", datasetId: id, charts, orphans }))
-        .catch(() => dispatch({ type: "HYDRATE_WORKSPACE", datasetId: id, charts: [], orphans: [] }));
+        // unexpected failure: keep every stored entry as an orphan so the
+        // next write cannot replace the stored list with this session's saves
+        .catch(() => dispatch({ type: "HYDRATE_WORKSPACE", datasetId: id, charts: [], orphans: loadWorkspace(id) }));
     }
     api
       .profile(id)
@@ -298,6 +300,8 @@ export default function App() {
       variant={wide ? "side" : "drawer"}
       mode={panelMode}
       open={panelOpen}
+      // collapsing only hides the panel; unlike CLOSE_PREVIEW it does not
+      // cancel a render in flight, so a newer result reopens it (A4, intended)
       onToggle={() => dispatch({ type: "SET_PANEL_OPEN", open: !panelOpen })}
       onClose={() => dispatch({ type: "CLOSE_PREVIEW" })}
       onSave={savePreview}

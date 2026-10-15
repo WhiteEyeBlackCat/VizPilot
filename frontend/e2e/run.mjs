@@ -787,8 +787,8 @@ try {
     if ((await workspaceCount()) !== 1) fail("workspace of air_quality was lost on switch");
   }
 
-  // ---- reload keeps the route (the workspace is in-memory by design and
-  // starts empty after a reload) ---------------------------------------
+  // ---- reload keeps the route; the workspace is restored from localStorage
+  // (A8) -----------------------------------------------------------------
   {
     await gotoPage("Workspace");
     const hash = await currentHash();

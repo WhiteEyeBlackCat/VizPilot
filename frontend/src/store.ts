@@ -175,11 +175,17 @@ export function persistableDatasets(state: AppState): string[] {
 }
 
 /** The entries to write for a dataset: the visible charts plus the orphans
- *  that could not be rendered (so they are never lost). */
+ *  that could not be rendered (so they are never lost). An orphan that is the
+ *  same chart as a visible one (same key or same spec) is dropped, so a chart
+ *  the user later deletes cannot come back from its orphaned copy. */
 export function persistableWorkspace(state: AppState, datasetId: string): PersistedChart[] {
   const shown = workspaceOf(state, datasetId).map(toPersisted);
   const keys = new Set(shown.map((c) => c.key));
-  return [...(state.orphansByDataset[datasetId] ?? []).filter((o) => !keys.has(o.key)), ...shown];
+  const specs = new Set(shown.map((c) => specKey(c.spec)));
+  const orphans = (state.orphansByDataset[datasetId] ?? []).filter(
+    (o) => !keys.has(o.key) && !specs.has(specKey(o.spec)),
+  );
+  return [...orphans, ...shown];
 }
 
 export function workspaceOf(state: AppState, datasetId: string | null | undefined): SavedChart[] {
@@ -331,6 +337,10 @@ export function reducer(state: AppState, action: Action): AppState {
       return state.insightsExploratoryOpen === action.open ? state : { ...state, insightsExploratoryOpen: action.open };
 
     case "HYDRATE_WORKSPACE": {
+      // Known window (A8): until this lands the dataset is not writable, so a
+      // chart saved during hydration is persisted only once hydration ends, and
+      // the user may save a copy of a stored chart before it shows up (the copy
+      // wins the dedupe below). Cross-tab edits are last-writer-wins.
       if (state.meta?.dataset_id !== action.datasetId) return state; // dataset switched while rendering
       // charts saved while hydration was in flight stay; persisted ones are
       // older, so they go first; duplicates (same key or same chart) dropped
@@ -354,12 +364,20 @@ export function reducer(state: AppState, action: Action): AppState {
     }
 
     case "REMOVE_SAVED": {
+      const removed = workspaceOf(state, action.datasetId).find((c) => c.key === action.key);
       const list = workspaceOf(state, action.datasetId).filter((c) => c.key !== action.key);
+      // an orphaned stored copy of the same chart must not resurrect it on reload
+      const removedSpec = removed ? specKey(removed.result.spec) : null;
+      const orphans = state.orphansByDataset[action.datasetId];
+      const keptOrphans =
+        orphans && removedSpec !== null ? orphans.filter((o) => specKey(o.spec) !== removedSpec) : orphans;
       const viewingRemoved =
         state.preview?.source === "workspace" && state.preview.savedKey === action.key;
       return {
         ...state,
         workspaceByDataset: { ...state.workspaceByDataset, [action.datasetId]: list },
+        orphansByDataset:
+          keptOrphans === orphans ? state.orphansByDataset : { ...state.orphansByDataset, [action.datasetId]: keptOrphans ?? [] },
         preview: viewingRemoved ? null : state.preview,
         panelOpen: viewingRemoved ? false : state.panelOpen,
       };
