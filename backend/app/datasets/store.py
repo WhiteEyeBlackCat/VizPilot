@@ -1,6 +1,7 @@
 import json
 import os
 import uuid
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -17,16 +18,18 @@ class DatasetNotFoundError(KeyError):
 class DatasetStore:
     """Persists each dataset as {data_dir}/{id}.parquet + {id}.json metadata.
 
-    The in-memory caches are deliberately unbounded: this is a single-user
-    local tool with short sessions (stage1 critique #6). A restarted process
-    lazily reloads datasets from disk on first access.
+    Metadata is small and cached without bound. DataFrames are held in an LRU
+    of at most `max_cached_frames` entries: parquet on disk is the source of
+    truth, so an evicted frame is simply re-read on its next access (a long
+    session with many uploads no longer keeps every dataset resident).
     """
 
-    def __init__(self, data_dir: Path) -> None:
+    def __init__(self, data_dir: Path, max_cached_frames: int = 4) -> None:
         self._data_dir = data_dir
         data_dir.mkdir(parents=True, exist_ok=True)
+        self._max_cached_frames = max(1, max_cached_frames)
         self._meta_cache: dict[str, Metadata] = {}
-        self._df_cache: dict[str, pl.DataFrame] = {}
+        self._df_cache: OrderedDict[str, pl.DataFrame] = OrderedDict()
 
     def save(self, df: pl.DataFrame, filename: str) -> Metadata:
         dataset_id = uuid.uuid4().hex
@@ -45,7 +48,7 @@ class DatasetStore:
         tmp_path.write_text(json.dumps(meta, ensure_ascii=False))
         os.replace(tmp_path, json_path)
         self._meta_cache[dataset_id] = meta
-        self._df_cache[dataset_id] = df
+        self._cache_df(dataset_id, df)
         return meta
 
     def get_meta(self, dataset_id: str) -> Metadata:
@@ -57,12 +60,22 @@ class DatasetStore:
         return self._meta_cache[dataset_id]
 
     def get_df(self, dataset_id: str) -> pl.DataFrame:
-        if dataset_id not in self._df_cache:
-            path = self._parquet_path(dataset_id)
-            if not path.is_file():
-                raise DatasetNotFoundError(dataset_id)
-            self._df_cache[dataset_id] = pl.read_parquet(path)
-        return self._df_cache[dataset_id]
+        df = self._df_cache.get(dataset_id)
+        if df is not None:
+            self._df_cache.move_to_end(dataset_id)
+            return df
+        path = self._parquet_path(dataset_id)
+        if not path.is_file():
+            raise DatasetNotFoundError(dataset_id)
+        df = pl.read_parquet(path)
+        self._cache_df(dataset_id, df)
+        return df
+
+    def _cache_df(self, dataset_id: str, df: pl.DataFrame) -> None:
+        self._df_cache[dataset_id] = df
+        self._df_cache.move_to_end(dataset_id)
+        while len(self._df_cache) > self._max_cached_frames:
+            self._df_cache.popitem(last=False)
 
     def list_meta(self) -> list[Metadata]:
         metas = [

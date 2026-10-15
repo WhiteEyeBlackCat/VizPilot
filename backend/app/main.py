@@ -26,7 +26,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["*"],
     )
     app.state.settings = settings
-    app.state.store = DatasetStore(settings.data_dir)
+    app.state.store = DatasetStore(settings.data_dir, settings.max_cached_frames)
     app.state.profiles = ProfileService(settings.data_dir, settings.profile_sample_threshold)
     app.state.render_cache = CastedFrameCache()
     if settings.llm_enabled:
