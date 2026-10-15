@@ -71,6 +71,12 @@ class OpenAICompatProvider:
             base_url=base_url.rstrip("/"), headers=headers, timeout=timeout_seconds, transport=transport
         )
 
+    @property
+    def cache_identity(self) -> tuple:
+        """Everything about this provider that changes what the LLM says:
+        part of the recommendation cache key (audit A6)."""
+        return ("openai_compat", self._model, str(self._client.base_url), self._include_sample_rows)
+
     def generate_hypotheses(
         self, profile: DatasetProfile, rule_candidates: list[Recommendation]
     ) -> tuple[HypothesisResponse, LLMUsage]:

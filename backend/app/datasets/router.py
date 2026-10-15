@@ -117,6 +117,7 @@ def get_recommendations(
     request: Request,
     llm: bool = Query(default=True),  # ?llm=false forces the rules-only path
     debug: bool = Query(default=False),  # ?debug=1 adds the LLM workflow trace (stage 17.3)
+    refresh: bool = Query(default=False),  # ?refresh=1 rebuilds and replaces the cached result
 ) -> dict[str, Any]:
     _check_dataset_id(dataset_id)
     try:
@@ -125,7 +126,7 @@ def get_recommendations(
         raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found") from None
     profile = request.app.state.profiles.get(dataset_id, df)
     use_llm = bool(_settings(request).llm_enabled and llm)
-    return request.app.state.recommendations.get(profile, use_llm, df=df, include_debug=debug)
+    return request.app.state.recommendations.get(profile, use_llm, df=df, include_debug=debug, refresh=refresh)
 
 
 def _spec_errors(errors: list[str]) -> HTTPException:
