@@ -268,6 +268,6 @@ def test_hallucinated_hypotheses_are_caught_and_numbers_are_never_the_llms() -> 
     assert "87" not in insight["text"] and "12000" not in insight["text"] and "12,000" not in insight["text"]
     assert 0.8 < insight["effect"]["value"] < 0.87 and "0.84" in insight["text"] and "n=600" in insight["text"]
     (wording,) = result["debug"]["wording"]
-    assert wording["source"] == "neutral"
+    assert wording["source"] == "template"  # the claim, not the (rejected) statement
     assert any("number 87 is not in the validated evidence" in e for e in result["debug"]["errors"])
     assert provider.final_calls == 0

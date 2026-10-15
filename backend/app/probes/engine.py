@@ -82,6 +82,9 @@ THRESHOLDS: dict[str, dict[str, float]] = {
     # weak is half of it — filled per result
 }
 KS_MAX_GROUPS = 8  # pairwise KS over the largest groups only
+# a per-group |r| below this carries no direction: it neither supports a
+# "positive"/"negative" reading nor makes the groups' directions "mixed"
+NEAR_ZERO_CORR = 0.10
 # the line granularity that draws the same buckets the evidence was computed on
 _BUCKET_GRANULARITY: dict[TimeBucket, str] = {"day": "day", "month": "month", "year": "month"}
 _BIN = "__probe_bin"
@@ -386,6 +389,26 @@ def _group_correlations(frame: pl.DataFrame, x: str, y: str, group: str) -> list
     return entries
 
 
+def relationship_direction(corrs: list[float | None]) -> dict[str, Any]:
+    """Direction facts of per-group correlations (None = not estimated).
+
+    `same_sign`: every estimated correlation has the same strict sign.
+    `direction`: "positive" / "negative" when every group with |r| >=
+    NEAR_ZERO_CORR points the same way, "mixed" when they disagree, "none"
+    when no group carries a direction. Near-zero groups never vote."""
+    measured = [c for c in corrs if c is not None]
+    directional = [c for c in measured if abs(c) >= NEAR_ZERO_CORR]
+    signs = {c > 0 for c in directional}
+    if not directional:
+        direction = "none"
+    elif len(signs) > 1:
+        direction = "mixed"
+    else:
+        direction = "positive" if signs == {True} else "negative"
+    same_sign = bool(measured) and (all(c > 0 for c in measured) or all(c < 0 for c in measured))
+    return {"same_sign": same_sign, "direction": direction}
+
+
 def _overall_corr(frame: pl.DataFrame, x: str, y: str) -> float | None:
     return _finite(frame.select(_finite_expr(x), _finite_expr(y)).drop_nulls().select(pl.corr(x, y)).item())
 
@@ -431,6 +454,10 @@ def _grouped_relationship(frame: pl.DataFrame, profile: DatasetProfile, req: Pro
             "spread": round(max(corrs) - min(corrs), 6),
             "weakest_group": min(valid, key=lambda e: (abs(e["corr"]), e["group"]))["group"],
             "strongest_group": max(valid, key=lambda e: (abs(e["corr"]), e["group"]))["group"],
+            # the claim is "the relationship holds inside every group": its
+            # direction, and the groups too small to say anything about
+            **relationship_direction(corrs),
+            "unmeasured_groups": [e["group"] for e in entries if e["corr"] is None],
         }
     )
     return _finish(
@@ -481,6 +508,8 @@ def _slope_difference(frame: pl.DataFrame, profile: DatasetProfile, req: ProbeRe
         "n_min": n_min,
         "strongest_group": max(valid, key=lambda e: (abs(e["corr"]), e["group"]))["group"],
         "weakest_group": min(valid, key=lambda e: (abs(e["corr"]), e["group"]))["group"],
+        **relationship_direction(corrs),
+        "unmeasured_groups": [e["group"] for e in entries if e["corr"] is None],
     }
     return _finish(
         profile,

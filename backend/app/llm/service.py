@@ -17,7 +17,8 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from types import SimpleNamespace
+from typing import Any, Callable, Literal
 
 import polars as pl
 from pydantic import ValidationError
@@ -45,7 +46,7 @@ from ..charts.rules import (
 from ..charts.spec import ChartSpec, validate_spec
 from ..probes import MAX_PROBES, ProbeCache, ProbeRejected, ProbeRequest, ProbeResult, run_probes
 from ..probes.schemas import PROBE_ROLES
-from ..profiling.models import DatasetProfile
+from ..profiling.models import PROFILE_VERSION, DatasetProfile
 from ..probes.engine import MIN_ROWS
 from .coverage import (
     CoverageHit,
@@ -59,6 +60,8 @@ from .coverage import (
     required_roles,
     suggest_chart,
 )
+from .claims import Claim, build_claim, render_claim, semantic_problem
+from .prompts import PROMPT_VERSION
 from .provider import LLMError, LLMProvider
 from .schemas import FinalInsight, FinalResponse, Hypothesis, HypothesisResponse, LLMChartSuggestion, LLMUsage
 
@@ -71,6 +74,10 @@ MAX_HEADLINE_CHARS = 120  # stage 18: headline shown collapsed; longer ones are 
 UNVERIFIED_NOTE = "hypothesis not verified against the data"
 FALLBACK_MESSAGE = "AI suggestions unavailable ({reason}); showing rule-based recommendations."
 NO_PATTERNS_MESSAGE = "No strong non-definitional and analytically useful patterns were found."
+# audit A6: a result built while the LLM was unreachable is cached this long
+# (seconds, monotonic clock) instead of for the process lifetime
+FAILURE_TTL_SECONDS = 60.0
+MAX_KEY_LOCKS = 256  # bound on the per-key lock table (idle locks are pruned past it)
 # stage 20a: a column-like token may start with a digit ("2023_sales") and
 # still be a hallucinated column name, so the leading character is no longer
 # restricted to a letter — only the presence of an underscore matters.
@@ -109,15 +116,54 @@ def _supported_label(level: VerificationLevel) -> Supported:
 
 
 class RecommendationService:
-    def __init__(self, provider: LLMProvider, probe_cache: ProbeCache | None = None) -> None:
+    def __init__(
+        self,
+        provider: LLMProvider,
+        probe_cache: ProbeCache | None = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._provider = provider
         self._probe_cache = probe_cache or ProbeCache()
-        # merged results per (dataset_id, llm_used); profiles are immutable so
-        # entries never expire (D5). Per-key locks prevent duplicate LLM calls
-        # for the same key without serializing unrelated requests.
-        self._cache: dict[tuple[str, bool], dict[str, Any]] = {}
+        # merged results per key (see _cache_key); profiles are immutable so a
+        # deterministic result never expires (D5). A result produced while
+        # the LLM was unreachable (transport error / timeout on either call)
+        # is kept only FAILURE_TTL_SECONDS, so a recovered LLM is used again
+        # without a restart while a dead one is not hammered on every request.
+        # Per-key locks prevent duplicate LLM calls for the same key without
+        # serializing unrelated requests.
+        self._clock = clock
+        self._cache: dict[tuple, tuple[dict[str, Any], float | None]] = {}  # key -> (payload, expires_at)
         self._lock = threading.Lock()
-        self._key_locks: dict[tuple[str, bool], threading.Lock] = {}
+        self._key_locks: dict[tuple, threading.Lock] = {}
+
+    def _cache_key(self, profile: DatasetProfile, use_llm: bool) -> tuple:
+        """Rules-only results depend on the profile alone; LLM results also on
+        the model / endpoint answering and on the prompts that asked it."""
+        if not use_llm:
+            return (profile.dataset_id, False, PROFILE_VERSION)
+        return (profile.dataset_id, True, PROFILE_VERSION, PROMPT_VERSION, _provider_identity(self._provider))
+
+    def _fresh(self, key: tuple) -> dict[str, Any] | None:
+        entry = self._cache.get(key)
+        if entry is None:
+            return None
+        payload, expires_at = entry
+        if expires_at is not None and self._clock() >= expires_at:
+            return None
+        return payload
+
+    def _key_lock(self, key: tuple) -> threading.Lock:
+        """Called under self._lock. The lock table is bounded: past
+        MAX_KEY_LOCKS entries the idle ones are dropped (a dropped lock only
+        costs a possible duplicate build of one key, never a wrong result)."""
+        lock = self._key_locks.get(key)
+        if lock is None:
+            if len(self._key_locks) >= MAX_KEY_LOCKS:
+                for k, existing in list(self._key_locks.items()):
+                    if not existing.locked():
+                        del self._key_locks[k]
+            lock = self._key_locks[key] = threading.Lock()
+        return lock
 
     def get(
         self,
@@ -125,32 +171,44 @@ class RecommendationService:
         use_llm: bool,
         df: pl.DataFrame | None = None,
         include_debug: bool = False,
+        refresh: bool = False,
     ) -> dict[str, Any]:
         """`df` is only needed for targeted probes (the LLM path); without it,
         hypotheses that need a probe are dropped. The cached payload carries
-        the workflow trace under "debug"; it is stripped unless asked for."""
-        cache_key = (profile.dataset_id, use_llm)
-        cached = self._cache.get(cache_key)
+        the workflow trace under "debug"; it is stripped unless asked for.
+        `refresh` rebuilds and replaces the cache entry."""
+        cache_key = self._cache_key(profile, use_llm)
+        cached = None if refresh else self._fresh(cache_key)
         if cached is None:
             # per-key lock: an in-flight LLM build must not block the llm=false
             # escape hatch or other datasets
             with self._lock:
-                key_lock = self._key_locks.setdefault(cache_key, threading.Lock())
+                key_lock = self._key_lock(cache_key)
             with key_lock:
-                if cache_key not in self._cache:
-                    self._cache[cache_key] = self._build(profile, use_llm, df)
-                cached = self._cache[cache_key]
+                cached = None if refresh else self._fresh(cache_key)
+                if cached is None:
+                    cached, transient = self._build_traced(profile, use_llm, df)
+                    expires_at = self._clock() + FAILURE_TTL_SECONDS if transient else None
+                    self._cache[cache_key] = (cached, expires_at)
         if include_debug:
             return cached
         return {k: v for k, v in cached.items() if k != "debug"}
 
     def _build(self, profile: DatasetProfile, use_llm: bool, df: pl.DataFrame | None) -> dict[str, Any]:
+        return self._build_traced(profile, use_llm, df)[0]
+
+    def _build_traced(
+        self, profile: DatasetProfile, use_llm: bool, df: pl.DataFrame | None
+    ) -> tuple[dict[str, Any], bool]:
+        """The payload, and whether an LLM call failed in transport (LLMError:
+        timeout, HTTP / connection / parse failure, misconfiguration). Gate
+        rejections of what the LLM said are deterministic and not transient."""
         rules = recommend_charts(profile)
         # dataset-level notes (columns the rule engine left out for
         # missingness, derived columns it demoted) ride along on every path
         dataset_warnings = excluded_column_warnings(profile) + derived_column_warnings(profile)
         if not use_llm:
-            return _shape(rules, [], None, dataset_warnings, None)
+            return _shape(rules, [], None, dataset_warnings, None), False
 
         trace = _Trace()
         started = time.perf_counter()
@@ -161,8 +219,9 @@ class RecommendationService:
             trace.llm_calls = 1
             trace.errors.append(f"llm1: {exc.category}")
             trace.latency_ms["total"] = _ms(started)
-            return _shape(rules, [], FALLBACK_MESSAGE.format(reason=exc.category), dataset_warnings, trace)
+            return _shape(rules, [], FALLBACK_MESSAGE.format(reason=exc.category), dataset_warnings, trace), True
         trace.record_call("llm1", usage)
+        transient = False
 
         workflow = _Workflow(profile, rules, df, self._probe_cache, trace)
         validated = workflow.validate(response)
@@ -177,6 +236,7 @@ class RecommendationService:
                 trace.llm_calls += 1
                 trace.errors.append(f"llm2: {exc.category}")
                 final = None
+                transient = True
 
         merged, insights = workflow.finish(validated, final, response)
         message = None
@@ -188,7 +248,18 @@ class RecommendationService:
         trace.latency_ms["total"] = _ms(started)
         trace.validated = len(validated)
         trace.insights = len(insights)
-        return _shape(merged, insights, message, dataset_warnings, trace)
+        return _shape(merged, insights, message, dataset_warnings, trace), transient
+
+
+def _provider_identity(provider: Any) -> tuple:
+    """What answers the LLM calls: a provider's `cache_identity` (model,
+    endpoint, prompt options) or, for a provider without one, its class."""
+    identity = getattr(provider, "cache_identity", None)
+    if callable(identity):
+        identity = identity()
+    if identity is None:
+        return (type(provider).__name__,)
+    return tuple(identity) if isinstance(identity, (tuple, list)) else (str(identity),)
 
 
 # --- workflow trace (debug payload) -------------------------------------------------
@@ -668,7 +739,7 @@ class _Workflow:
             candidates.append((f"h{c.id}c1", backend_chart))
         if c.chart is not None and all(_key(c.chart) != _key(s) for _, s in candidates):
             candidates.append((f"h{c.id}c{len(candidates) + 1}", c.chart))
-        return ValidatedHypothesis(
+        validated = ValidatedHypothesis(
             id=c.id,
             statement=c.hypothesis.statement.strip(),
             reason=c.hypothesis.reason.strip(),
@@ -684,6 +755,10 @@ class _Workflow:
             evidence=dict(hit.evidence),
             chart_candidates=candidates,
         )
+        # the backend's own statement of the finding, from the evidence only:
+        # what the wording gate checks LLM text against and what the template says
+        validated.claim = build_claim(validated, self.profile)
+        return validated
 
     # -- stage 3: targeted probes ----------------------------------------------------------
 
@@ -786,7 +861,9 @@ class _Workflow:
             why = words["why_it_matters"] if words and words["why_it_matters"] else self._gated_reason(v, names)
             headline = words["headline"] if words and words["headline"] else None
             priority = max(1, min(5, int(words["priority"] if words else v.importance)))
-            self.trace.wording.append({"id": v.id, "statement": v.statement, "final_text": text, "source": source})
+            self.trace.wording.append(
+                {"id": v.id, "statement": v.statement, "final_text": text, "source": source, "claim": claim_of(v).as_dict()}
+            )
             rows.append(
                 {
                     "headline": headline,
@@ -804,6 +881,18 @@ class _Workflow:
         for item in response.charts:  # bare chart suggestions, per-item tolerant
             suggestion = _parse_suggestion(item)
             if suggestion is not None:
+                # a bare chart has no validated claim behind it: its caption may
+                # describe, never assert (no causal / comparative / universal words)
+                problem = semantic_problem(suggestion.reason, None) if suggestion.reason else None
+                if problem:
+                    self.trace.errors.append(f"chart '{suggestion.title}': {problem} — caption dropped")
+                    suggestion = suggestion.model_copy(update={"reason": ""})
+                problem = semantic_problem(suggestion.title, None) if suggestion.title else None
+                if problem:
+                    self.trace.errors.append(f"chart '{suggestion.title}': {problem} — neutral title used")
+                    suggestion = suggestion.model_copy(
+                        update={"title": _neutral_title(SimpleNamespace(x=suggestion.x, y=suggestion.y, group_by=suggestion.group_by))}
+                    )
                 self.merger.integrate(suggestion)
 
         merged, final_priority = self._merge()
@@ -826,15 +915,16 @@ class _Workflow:
         return merged, insights
 
     def _fallback_text(self, v: ValidatedHypothesis, names: set[str]) -> tuple[str, str]:
-        """Without accepted LLM #2 wording the statement is used only if it
-        passes the same gate (its bare numbers and dates must be backend
-        numbers); otherwise a neutral, number-free sentence built from the
-        test and the backend effect."""
+        """Without accepted LLM #2 wording the finding is worded by the
+        backend from its verified claim (audit A1): LLM #1's statement is
+        never printed — it is a hypothesis, and its direction, causal
+        wording or scope may be wrong even when the effect is real. The
+        statement still goes through the gate so the trace says why it
+        would not have been usable."""
         problem = _wording_problem(v.statement, v, names)
-        if problem is None:
-            return _template(v), "template"
-        self.trace.errors.append(f"statement {v.id}: {problem} — neutral wording used")
-        return _neutral(v), "neutral"
+        if problem is not None:
+            self.trace.errors.append(f"statement {v.id}: {problem} — claim wording used")
+        return _template(v)
 
     def _integrate_candidates(self, v: ValidatedHypothesis) -> SpecKey | None:
         """The backend chart first, the LLM's own chart as fallback; both go
@@ -844,8 +934,14 @@ class _Workflow:
         for _, spec in v.chart_candidates:
             spec = spec.model_copy()
             # LLM-written reasons (the chart's own or the hypothesis') are free
-            # text: only one that passes the wording gate may caption the chart
-            reason = self._first_gated(v, names, spec.reason, v.reason, v.statement) or _neutral(v)
+            # text: only one that passes the wording gate (numbers + claim
+            # semantics) may caption the chart; LLM #1's statement never does
+            reason = self._first_gated(v, names, spec.reason, v.reason) or _caption(v)
+            # an LLM chart's title is free text too ("Segment a outsells e")
+            problem = semantic_problem(spec.title, claim_of(v), names)
+            if problem:
+                self.trace.errors.append(f"chart title {v.id}: {problem} — neutral title used")
+                spec.title = _neutral_title(spec)
             result = self.merger.integrate_spec(spec, priority, reason)
             if result is not None:
                 return result[0]
@@ -892,7 +988,9 @@ class _Workflow:
             if item.chart_id is not None and str(item.chart_id) not in chart_ids:
                 logger.warning("LLM #2 insight %d names unknown chart %r — chart id ignored", hid, item.chart_id)
             v = by_id[hid]
-            problem = _wording_problem(item.text + " " + item.why_it_matters, v, names)
+            # text and why_it_matters are checked one by one so a sentence
+            # boundary between them is never lost to the concatenation
+            problem = _wording_problem(item.text, v, names) or _wording_problem(item.why_it_matters, v, names)
             if problem:
                 logger.warning("LLM #2 insight %d rejected: %s — template used", hid, problem)
                 self.trace.errors.append(f"llm2 insight {hid}: {problem}")
@@ -983,7 +1081,17 @@ def _wording_problem(text: str, v: ValidatedHypothesis, names: set[str]) -> str 
     for token in _NUMBER.findall(masked):
         if not _number_supported(token, evidence_numbers):
             return f"number {token} is not in the validated evidence"
-    return None
+    # audit A1: the words must say what the evidence says — direction, order,
+    # number-to-group binding, scope; no causal claim (llm/claims.py)
+    return semantic_problem(text, claim_of(v), names)
+
+
+def claim_of(v: ValidatedHypothesis) -> Claim:
+    """The hypothesis' verified claim (built by the workflow; rebuilt from the
+    evidence for a hand-made ValidatedHypothesis)."""
+    if v.claim is None:
+        v.claim = build_claim(v)
+    return v.claim
 
 
 # evidence keys whose numeric value may be quoted verbatim
@@ -1122,11 +1230,31 @@ def _neutral(v: ValidatedHypothesis) -> str:
     return f"{sentence} ({detail}{v.effect_label}: {v.effect_value:.2f}, n={v.n})."
 
 
-def _template(v: ValidatedHypothesis) -> str:
-    """Deterministic wording when LLM #2 is not called (or failed): the
-    statement plus the backend's number."""
-    statement = v.statement.rstrip(".")
-    return f"{statement} ({v.effect_label}: {v.effect_value:.2f}, n={v.n})."
+def _template(v: ValidatedHypothesis) -> tuple[str, str]:
+    """Deterministic wording when LLM #2 is not called, failed or was
+    rejected: the verified claim rendered by the backend (direction, order
+    and numbers from the evidence) plus the effect; the neutral sentence when
+    the claim carries nothing more specific. Never LLM #1's statement."""
+    sentence = render_claim(claim_of(v))
+    if sentence is None:
+        return _neutral(v), "neutral"
+    return f"{sentence} ({v.effect_label}: {v.effect_value:.2f}, n={v.n}).", "template"
+
+
+def _neutral_title(spec: Any) -> str:
+    """A title that only names the axes, for an LLM title that asserts something."""
+    title = f"{spec.y} by {spec.x}" if spec.y and spec.x else str(spec.x or spec.y or "Chart")
+    return f"{title} and {spec.group_by}" if spec.group_by else title
+
+
+def _caption(v: ValidatedHypothesis) -> str:
+    """Chart caption when no LLM reason passes the gate: the neutral sentence
+    unless it overstates the claim (e.g. "related within every group" for a
+    relationship whose direction flips), then the claim wording."""
+    neutral = _neutral(v)
+    if semantic_problem(neutral, claim_of(v)) is None:
+        return neutral
+    return _template(v)[0]
 
 
 def _probe_lines(result: ProbeResult) -> list[str]:

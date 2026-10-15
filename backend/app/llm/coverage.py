@@ -21,7 +21,7 @@ from typing import Any, Literal
 from ..charts.confidence import assess
 from ..charts.rules import _EvidenceIndex, slope_spread_threshold
 from ..charts.spec import ChartSpec, validate_spec
-from ..probes.engine import MIN_ROWS, THRESHOLDS, TOP_CONFIDENCE_FLOOR
+from ..probes.engine import MIN_ROWS, THRESHOLDS, TOP_CONFIDENCE_FLOOR, relationship_direction
 from ..probes.schemas import PROBE_ROLES
 from ..profiling.models import DatasetProfile
 
@@ -29,9 +29,9 @@ Verdict = Literal["pass", "weak", "fail"]
 Validation = Literal["existing_evidence", "probe"]
 
 # grouped_relationship: the x-y relationship holds inside every group — the
-# effect is the weakest per-group |corr|. The engine owns the numbers once it
-# ships the probe (stage 17.2 revision); until then the same constants live here.
-GROUPED_THRESHOLDS = THRESHOLDS.get("grouped_relationship", {"pass": 0.3, "weak": 0.15})
+# effect is the weakest per-group |corr|. The probe engine owns the thresholds
+# (THRESHOLDS["grouped_relationship"]); coverage reads the same numbers.
+GROUPED_THRESHOLDS = THRESHOLDS["grouped_relationship"]
 
 
 @dataclass
@@ -64,6 +64,9 @@ class ValidatedHypothesis:
     evidence_lines: list[str]
     evidence: dict[str, Any]
     chart_candidates: list[tuple[str, ChartSpec]]  # (id, spec), backend chart first
+    # backend-only verified claim (llm/claims.py), built from `evidence` by the
+    # workflow; never sent to the client except inside the debug trace
+    claim: Any = field(default=None, repr=False, compare=False)
 
 
 def _verdict(value: float, thresholds: dict[str, float]) -> Verdict:
@@ -150,7 +153,13 @@ def check_coverage(test_type: str, columns: dict[str, str], profile: DatasetProf
                     effect_value=het.spread,
                     n=profile.profiled_rows or profile.n_rows,
                     evidence_lines=lines,
-                    evidence={"groups": het.corrs, "spread": het.spread, "threshold": threshold},
+                    evidence={
+                        "groups": het.corrs,
+                        "spread": het.spread,
+                        "threshold": threshold,
+                        **relationship_direction(list(het.corrs.values())),
+                        "unmeasured_groups": [k for k, v in het.corrs.items() if v is None],
+                    },
                     n_min_group=het.n_min,
                 )
             if cond is None:
@@ -162,7 +171,12 @@ def check_coverage(test_type: str, columns: dict[str, str], profile: DatasetProf
                 effect_value=cond.corr_spread,
                 n=sum(g.n for g in cond.groups),
                 evidence_lines=_conditional_lines(cond) + [f"spread {cond.corr_spread:.2f} vs threshold {threshold:.2f}"],
-                evidence={"groups": [g.model_dump() for g in cond.groups], "spread": cond.corr_spread},
+                evidence={
+                    "groups": [g.model_dump() for g in cond.groups],
+                    "spread": cond.corr_spread,
+                    **relationship_direction([g.corr for g in cond.groups]),
+                    "unmeasured_groups": [g.group for g in cond.groups if g.corr is None],
+                },
                 n_min_group=cond.n_min,
             )
         # grouped_relationship: weakest |corr| across groups with a correlation
@@ -172,16 +186,30 @@ def check_coverage(test_type: str, columns: dict[str, str], profile: DatasetProf
         if len(corrs) < 2:
             return None
         weakest = min(abs(c) for c in corrs)
-        consistent = all(c > 0 for c in corrs) or all(c < 0 for c in corrs)
+        direction = relationship_direction([g.corr for g in cond.groups])
+        consistent = direction["same_sign"]
+        unmeasured = [g.group for g in cond.groups if g.corr is None]
+        lines = _conditional_lines(cond) + [
+            f"weakest |corr| {weakest:.2f}" + ("" if consistent else "; the sign differs between groups")
+        ]
+        if unmeasured:
+            lines.append(f"not estimated (too few rows): {', '.join(unmeasured)}")
         return CoverageHit(
             verdict=_verdict(weakest, GROUPED_THRESHOLDS),
             effect_label="minimum |correlation| across groups",
             effect_value=weakest,
             n=sum(g.n for g in cond.groups),
-            evidence_lines=_conditional_lines(cond)
-            + [f"weakest |corr| {weakest:.2f}" + ("" if consistent else "; the sign differs between groups")],
-            evidence={"groups": [g.model_dump() for g in cond.groups], "min_abs_corr": weakest, "same_sign": consistent},
-            n_min_group=cond.n_min,
+            evidence_lines=lines,
+            evidence={
+                "groups": [g.model_dump() for g in cond.groups],
+                "min_abs_corr": weakest,
+                **direction,
+                "unmeasured_groups": unmeasured,
+            },
+            # "holds inside every group" is only as strong as the smallest
+            # group, including one too small to estimate (layer 2's n_min only
+            # counts the estimated groups; the probe counts all of them)
+            n_min_group=min(g.n for g in cond.groups),
         )
 
     if test_type == "nonlinear_relationship":
