@@ -446,6 +446,10 @@ export interface ColumnQuality {
   suspected_sentinels: SentinelCandidate[];
   sentinel_row_count: number;
   robust_range: RobustRange | null;
+  // MAD == 0 regime only (>= half the values on one value); additive, optional
+  mode_value?: number | null;
+  mode_share?: number | null;
+  concentration?: "constant" | "concentrated" | "mode_dominated" | null;
 }
 
 export type DerivedKind = "product" | "product_discount" | "sum" | "difference" | "ratio" | "near_copy" | "bucket";

@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 # Bump whenever the profile schema or inference rules change: cached
 # {id}.profile.json files with a different version are recomputed.
-PROFILE_VERSION = 14  # v14: ColumnProfile.categories (full label set of small categoricals for role detection, stage 19.2); v13: dispersion compared groups / F-test p-value / definitional flag, bucket derived kind (stage 19.2); v12: dispersion evidence (stage 19.1); v11: layer-2 shapes/strength (stage 17.1b); v10: evidence layer 2 (stage 17.1)
+PROFILE_VERSION = 15  # v15: mode-dominated (MAD == 0) robust path — ColumnQuality.mode_value/mode_share/concentration, sentinels + off-mode fences without z (audit 2026-10); v14: ColumnProfile.categories (full label set of small categoricals for role detection, stage 19.2); v13: dispersion compared groups / F-test p-value / definitional flag, bucket derived kind (stage 19.2); v12: dispersion evidence (stage 19.1); v11: layer-2 shapes/strength (stage 17.1b); v10: evidence layer 2 (stage 17.1)
 
 SemanticType = Literal["numeric", "categorical", "datetime", "boolean", "text", "id", "unknown"]
 Frequency = Literal["daily", "weekly", "monthly", "irregular", "unknown"]
@@ -43,7 +43,9 @@ class SentinelCandidate(BaseModel):
 
 class RobustRange(BaseModel):
     """Display-range hint: Tukey far-out fences (q1 - 3 IQR, q3 + 3 IQR)
-    intersected with the data range. Raw min/max stay on ColumnProfile."""
+    intersected with the data range. Raw min/max stay on ColumnProfile.
+    Mode-dominated columns (MAD == 0): the fences of the off-mode values,
+    widened to the mode; the sentinel-free [min, max] when there are none."""
 
     lo: float
     hi: float
@@ -77,6 +79,13 @@ class ColumnQuality(BaseModel):
     suspected_sentinels: list[SentinelCandidate] = []
     sentinel_row_count: int = 0
     robust_range: RobustRange | None = None
+    # MAD == 0 regime only (at least half the finite values on one value, the
+    # median): that value, its share of the finite values, and an
+    # informational label — "constant" (no other value), "concentrated"
+    # (share >= 0.9) or "mode_dominated". None for every other column.
+    mode_value: float | None = None
+    mode_share: float | None = None
+    concentration: Literal["constant", "concentrated", "mode_dominated"] | None = None
 
 
 class ColumnProfile(BaseModel):
