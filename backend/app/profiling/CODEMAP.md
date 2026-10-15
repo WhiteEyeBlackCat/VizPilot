@@ -23,7 +23,7 @@ generated_at: 2026-09-15
 |---|---|---|
 | `DatasetProfile`, `ColumnProfile`, `Evidence`, `EvidenceLayer2` | `models.py` | L:489, L:82, L:474, L:464 |
 | `DispersionEffect` (stage 19.1 / 19.2) | `models.py` | L:228 |
-| `PROFILE_VERSION` (14) | `models.py` | L:7 |
+| `PROFILE_VERSION` (15) | `models.py` | L:7 |
 | `CATEGORY_LABELS_MAX`, `ColumnProfile.categories` (stage 19.2 role-detection labels) | `models.py` | L:26, L:112 |
 | `ProfileService` (cache + per-dataset lock + atomic json) | `profiler.py` | L:187 |
 | `profile_dataset` | `profiler.py` | L:34 |
