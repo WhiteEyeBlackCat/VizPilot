@@ -445,6 +445,8 @@ _NEGATION = {"not", "no", "none", "never", "neither", "nor", "without", "nothing
 # phrase normalisation (same length, padded): idioms -> one verifiable word
 _PHRASES = [
     (r"\bnot\s+(?:the\s+)?(?:same|equal|identical|uniform)\b", "differs"),
+    (r"\bfrom\s+(?:the\s+)?(?:highest|top|most)\s+to\s+(?:the\s+)?(?:lowest|bottom|least)\b", "descending"),
+    (r"\bfrom\s+(?:the\s+)?(?:lowest|bottom|least)\s+to\s+(?:the\s+)?(?:highest|top|most)\b", "ascending"),
     (r"\b(?:falls?|fell|falling)\s+short\s+of\b", "trails"),
     (r"\blag(?:s|ged|ging)?\s+behind\b", "trails"),
     (r"\bbehind\b", "below"),
@@ -458,7 +460,7 @@ _PHRASES = [
     (r"\b(?:goes|go|went|gone|going)\s+up\b|\bpick(?:s|ed)?\s+up\b|\bmoves?\s+together\b|\bin\s+step\b", "rises"),
     (r"\b(?:goes|go|went|gone|going)\s+down\b", "falls"),
     (r"\banti-?correlat\w*\b", "negative"),
-    (r"\bmoves?\s+opposite\b|\bopposite\s+directions?\b|\bopposite\b", "negative"),
+    (r"\bmoves?\s+opposite\b|\b(?:opposite|different|contrary)\s+directions?\b|\bopposite\b", "negative"),
     (r"\bnon-?linear(?:ly)?\b|\bcurvilinear\b", "curved"),
 ]
 
@@ -799,6 +801,91 @@ def semantic_problem(text: str, claim: Claim | None, column_names: set[str] | No
         problem = _binding_problem(t, start, end, claim)
         if problem:
             return problem
+    return _time_number_problem(t, claim) or _sequence_problem(t, claim)
+
+
+_ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_PERIOD_AFTER = re.compile(r"\b(?:after|since|later|afterwards|subsequently|now|recent(?:ly)?|second\s+half)\b")
+_PERIOD_BEFORE = re.compile(r"\b(?:before|earlier|previously|prior|initially|formerly|first\s+half)\b")
+
+
+def _time_number_problem(t: _Text, claim: Claim) -> str | None:
+    """A level shift's two means must be bound to the right periods: "from A
+    to B" means A before and B after; a number next to "before" / "after"
+    belongs to that period. A before/after mean that is not bound is
+    unverifiable."""
+    if claim.kind != "time_pattern" or not claim.change:
+        return None
+    from .service import _number_supported
+
+    before, after = claim.change["before"], claim.change["after"]
+    text = _ISO_DATE_RE.sub(lambda m: " " * len(m.group(0)), t.norm)
+    numbers = [m for m in _NUMBER.finditer(text)]
+
+    def which(token: str) -> str | None:
+        b, a = _number_supported(token, {before}), _number_supported(token, {after})
+        return "before" if b and not a else "after" if a and not b else None
+
+    bound: set[int] = set()
+    for m in re.finditer(r"\bfrom\s+(-?\d+(?:\.\d+)?)\s+to\s+(-?\d+(?:\.\d+)?)", text):
+        first, second = which(m.group(1)), which(m.group(2))
+        if first == "after" or second == "before":
+            return f"'from {m.group(1)} to {m.group(2)}' reverses the measured change ({fmt(before)} to {fmt(after)})"
+        bound |= {m.start(1), m.start(2)}
+    for m in numbers:
+        if m.start() in bound:
+            continue
+        period = which(m.group(0))
+        if period is None:
+            continue
+        segment = next(((a, b) for a, b in _spans(text, _SEGMENT_BREAK) if a <= m.start() < b), (0, len(text)))
+        words = [(w.start(), "after") for w in _PERIOD_AFTER.finditer(text, *segment)] + [
+            (w.start(), "before") for w in _PERIOD_BEFORE.finditer(text, *segment)]
+        if not words:
+            return f"number {m.group(0)} is a period mean but no period is named for it"
+        nearest = min(words, key=lambda w: (_word_gap(text, min(w[0], m.start()), max(w[0], m.start())), w[0] < m.start()))
+        if nearest[1] != period:
+            return f"number {m.group(0)} is the {period} mean, not the {nearest[1]} mean"
+    return None
+
+
+_UP_ORDER = re.compile(r"\b(?:highest|most|largest|biggest|greatest|top|leads|leader|best|higher|more|greater|larger|descending)\b")
+_DOWN_ORDER = re.compile(r"\b(?:lowest|least|smallest|fewest|bottom|worst|lower|less|fewer|smaller|ascending)\b")
+
+
+def _sequence_problem(t: _Text, claim: Claim) -> str | None:
+    """A list of groups read as an order ("North, then North East, then West",
+    "..., followed by ...", "by region: North, South, West") must follow the
+    evidence order in the direction the text states; with no stated direction
+    the order is unverifiable."""
+    if claim.kind not in ("group_difference", "distribution_difference") or not claim.comparisons_ok:
+        return None
+    for start, end in _spans(t.norm, re.compile(r"[.;!?](?=\s|$)|\n")):
+        seg = t.norm[start:end]
+        hits = [h for h in t.labels if start <= h.start < end]
+        order: list[str] = []
+        for h in hits:
+            if h.label not in order:
+                order.append(h.label)
+        listed = re.search(r":", seg) is not None and len(order) >= 3
+        if len(order) < 2 or not (re.search(r"\b(?:then|followed)\b", seg) or listed):
+            continue
+        if re.search(r"\bfrom\s+(?:the\s+)?(?:highest|top|most)\b", seg):
+            direction = 1
+        elif re.search(r"\bfrom\s+(?:the\s+)?(?:lowest|bottom|least)\b", seg):
+            direction = -1
+        else:
+            up, down = bool(_UP_ORDER.search(seg)), bool(_DOWN_ORDER.search(seg))
+            if up == down:
+                return "a list of groups without one stated direction cannot be verified as an order"
+            direction = 1 if up else -1
+        key = claim.order_key or "mean"
+        values = {g.label: _value(g, key) for g in claim.groups}
+        seq = [values.get(lab) for lab in order]
+        if any(v is None for v in seq):
+            return "a listed group has no value to order"
+        if any((a - b) * direction < 0 for a, b in zip(seq, seq[1:])):
+            return f"the listed order {', '.join(order)} contradicts the {key} order"
     return None
 
 
@@ -1077,6 +1164,9 @@ def _clause_order(t, cs, ce, claim, evals, labels, values, ordered, middle, key,
             if not m:
                 return f"'{k.word}' without a factor cannot be verified", prev_subjects
             factor = float(m.group(1))
+        as_as = re.search(r"\bas\s+\w+\s+(?:in|for)\s+§+\s+as\s+(?:in|for)\s+§", t.norm[k.end : ce])
+        if not subjects and len(refs) == 2 and as_as:
+            subjects, refs = refs[:1], refs[1:]  # "twice as high in South as in North"
         if len(subjects) != 1 or len(refs) != 1:
             return f"'{k.word}' needs exactly one group compared with one other", prev_subjects
         a, b = values[subjects[0].label], values[refs[0].label]
@@ -1150,7 +1240,7 @@ def _relationship_sentence(t, start, end, claim, evals, signs, labels) -> str | 
             signs.append((level[1][0].start, level[0][1][1] * level[1][1][1]))
         else:
             return f"comparison '{level[0][0].word}' cannot be bound to a measured quantity of this relationship"
-    signs = _collapse_pairs(t, start, end, sorted(signs))
+    signs = _collapse_pairs(t, start, end, sorted(signs), labels)
     if signs:
         problem = _sign_problem(t, start, end, signs, labels, claim)
         if problem:
@@ -1162,13 +1252,18 @@ def _relationship_sentence(t, start, end, claim, evals, signs, labels) -> str | 
     return None
 
 
-def _collapse_pairs(t: _Text, start: int, end: int, signs: list[tuple[int, int]]) -> list[tuple[int, int]]:
+def _collapse_pairs(
+    t: _Text, start: int, end: int, signs: list[tuple[int, int]], labels: list[_Hit] | None = None
+) -> list[tuple[int, int]]:
     """Per clause, two direction words are one statement about the pair:
-    "w falls as z rises" moves x one way and y the other -> negative."""
+    "w falls as z rises" moves x one way and y the other -> negative. Not when
+    groups sit between them ("positive in north and negative in east"): then
+    each word speaks for the groups that follow it."""
     out: list[tuple[int, int]] = []
     for cs, ce in _clauses(t, start, end):
         c = [s for s in signs if cs <= s[0] < ce]
-        out += [(c[0][0], c[0][1] * c[1][1])] if len(c) == 2 else c
+        between = len(c) == 2 and any(c[0][0] < h.start < c[1][0] for h in (labels or []))
+        out += [(c[0][0], c[0][1] * c[1][1])] if len(c) == 2 and not between else c
     return out
 
 
@@ -1201,7 +1296,10 @@ def _sign_problem(t: _Text, start: int, end: int, signs: list[tuple[int, int]], 
         if not c_labels:
             return "a single direction is stated for a relationship whose direction differs between groups"
         for h in c_labels:
-            polarity = _nearest_sign(h, c_signs)
+            # a direction word speaks for the groups after it, up to the next one;
+            # groups before every direction word take the nearest
+            preceding = [sg for sg in c_signs if sg[0] < h.start]
+            polarity = preceding[-1][1] if preceding else _nearest_sign(h, c_signs)
             fact = next((g for g in claim.groups if g.label == h.label), None)
             if fact is None or fact.sign() != polarity:
                 return f"direction stated for {h.label} does not match its correlation"
@@ -1436,7 +1534,7 @@ needed worthwhile relevant guide guides guiding should could may might
 llm ai model says suggests suggested suggestion chart charts plot plots view axis bar bars line lines scatter
 histogram box boxes heatmap own month months year years day days week weeks date dates mid early late start
 beginning january february march april may june july august september october november december
-hour hours weekday weekdays weekend weekends level timeline reason reasons
+hour hours weekday weekdays weekend weekends level timeline reason reasons descending ascending order
 """.split())
 
 _LEXICON_WORDS = frozenset(
