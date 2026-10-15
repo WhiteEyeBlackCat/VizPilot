@@ -37,6 +37,7 @@ import type {
   TwoStateChartData,
 } from "../../types";
 import type { VizOption } from "./echarts";
+import { esc } from "./escape";
 import { barOrder, boxOrder } from "./order";
 import {
   axisBase,
@@ -361,8 +362,8 @@ function scatterOption(result: RenderResult): VizOption {
       formatter: (p) => {
         const item = Array.isArray(p) ? p[0] : p;
         const [x, y] = item.value as Pair;
-        const head = d.series.length > 1 ? `${item.seriesName}<br/>` : "";
-        return `${head}${xName}: ${fmt(x)}<br/>${d.y_label}: ${fmt(y)}`;
+        const head = d.series.length > 1 ? `${esc(item.seriesName)}<br/>` : "";
+        return `${head}${esc(xName)}: ${fmt(x)}<br/>${esc(d.y_label)}: ${fmt(y)}`;
       },
     },
     xAxis: { ...axisBase, type: "value", scale: true, ...xAxisName(xName) },
@@ -467,8 +468,8 @@ function histogramOption(result: RenderResult): VizOption {
       formatter: (p) => {
         const item = Array.isArray(p) ? p[0] : p;
         const [lo, hi, count] = item.value as HistogramBin;
-        const head = grouped ? `${item.seriesName}<br/>` : "";
-        return `${head}[${formatNumber(lo)}, ${formatNumber(hi)})<br/>${d.y_label}: ${count}`;
+        const head = grouped ? `${esc(item.seriesName)}<br/>` : "";
+        return `${head}[${formatNumber(lo)}, ${formatNumber(hi)})<br/>${esc(d.y_label)}: ${count}`;
       },
     },
     xAxis: {
@@ -516,7 +517,7 @@ function boxOption(result: RenderResult): VizOption {
         const item = Array.isArray(p) ? p[0] : p;
         const g = groups[item.dataIndex];
         return (
-          `${g.name}<br/>` +
+          `${esc(g.name)}<br/>` +
           `upper fence: ${fmt(g.upper_fence)}<br/>Q3: ${fmt(g.q3)}<br/>median: ${fmt(g.median)}<br/>` +
           `Q1: ${fmt(g.q1)}<br/>lower fence: ${fmt(g.lower_fence)}<br/>` +
           `mean: ${fmt(g.mean)} · n=${g.count}`
@@ -538,7 +539,7 @@ function boxOption(result: RenderResult): VizOption {
         formatter: (p) => {
           const item = Array.isArray(p) ? p[0] : p;
           const [name, v] = item.value as [string, number];
-          return `${name}<br/>outlier: ${fmt(v)}`;
+          return `${esc(name)}<br/>outlier: ${fmt(v)}`;
         },
       },
     });
@@ -556,7 +557,7 @@ function boxOption(result: RenderResult): VizOption {
         formatter: (p) => {
           const item = Array.isArray(p) ? p[0] : p;
           const [name, v] = item.value as [string, number];
-          return `${name}<br/>mean: ${fmt(v)}`;
+          return `${esc(name)}<br/>mean: ${fmt(v)}`;
         },
       },
     });
@@ -626,8 +627,8 @@ function heatmapOption(result: RenderResult): VizOption {
       formatter: (p) => {
         const item = Array.isArray(p) ? p[0] : p;
         const [j, i, v] = item.value as HeatmapCell;
-        const head = matrix ? `${result.spec.x}: ${d.columns[j]} · ${result.spec.group_by}: ${rows[i]}` : `${d.columns[i]} × ${d.columns[j]}`;
-        return `${head}<br/>${d.y_label}: ${matrix ? formatNumber(v) : v.toFixed(3)}`;
+        const head = matrix ? `${esc(result.spec.x)}: ${esc(d.columns[j])} · ${esc(result.spec.group_by)}: ${esc(rows[i])}` : `${esc(d.columns[i])} × ${esc(d.columns[j])}`;
+        return `${head}<br/>${esc(d.y_label)}: ${matrix ? formatNumber(v) : v.toFixed(3)}`;
       },
     },
     xAxis: {
@@ -662,7 +663,7 @@ function heatmapOption(result: RenderResult): VizOption {
 // --- dispatch ---------------------------------------------------------------
 
 const fmt = (v: number | string | null | undefined): string =>
-  v === null || v === undefined ? "—" : typeof v === "number" ? formatNumber(v) : String(v);
+  v === null || v === undefined ? "—" : typeof v === "number" ? formatNumber(v) : esc(v);
 
 export function buildOption(result: RenderResult): VizOption {
   switch (result.spec.type) {
@@ -750,7 +751,7 @@ export function densityOption(result: RenderResult, kind: "violin" | "raincloud"
   const grid = d.grid;
   const ridge = kind === "ridgeline";
   const tooltipFor = (g: BoxGroup) =>
-    `${g.name}<br/>median: ${fmt(g.median)} · Q1 ${fmt(g.q1)} · Q3 ${fmt(g.q3)}<br/>mean: ${fmt(g.mean)} · n=${g.count}`;
+    `${esc(g.name)}<br/>median: ${fmt(g.median)} · Q1 ${fmt(g.q1)} · Q3 ${fmt(g.q3)}<br/>mean: ${fmt(g.mean)} · n=${g.count}`;
   // the value axis must span the data (grid + whiskers): a custom series
   // carries no values ECharts could scale from, so the extent is explicit —
   // verifier round 1 found the axis auto-scaled to the group indices
@@ -892,7 +893,7 @@ export function dotIntervalOption(result: RenderResult): VizOption {
       formatter: (p) => {
         const item = Array.isArray(p) ? p[0] : p;
         const g = d.groups[item.dataIndex];
-        return `${g.name}<br/>mean: ${fmt(g.mean)}<br/>95% interval: ${fmt(g.lo)} – ${fmt(g.hi)} · n=${g.n}`;
+        return `${esc(g.name)}<br/>mean: ${fmt(g.mean)}<br/>95% interval: ${fmt(g.lo)} – ${fmt(g.hi)} · n=${g.n}`;
       },
     },
     xAxis: catAxis(names, result.spec.x ?? ""),
@@ -982,11 +983,11 @@ export function dumbbellOption(result: RenderResult): VizOption {
         const items = (Array.isArray(p) ? p : [p]).filter((it) => it.seriesType === "scatter");
         if (items.length === 0) return "";
         const i = items[0].dataIndex;
-        const lines = d.series.map((s) => `${s.name}: ${fmt(s.values[i])}`);
+        const lines = d.series.map((s) => `${esc(s.name)}: ${fmt(s.values[i])}`);
         const va = a.values[i];
         const vb = b.values[i];
         const delta = va !== null && vb !== null ? `<br/>Δ ${fmt(vb - va)}` : "";
-        return `${d.categories[i]}<br/>${lines.join("<br/>")}${delta}`;
+        return `${esc(d.categories[i])}<br/>${lines.join("<br/>")}${delta}`;
       },
     },
     xAxis: catAxis(d.categories, result.spec.x ?? ""),
@@ -1018,7 +1019,7 @@ export function slopegraphOption(result: RenderResult): VizOption {
       formatter: (p) => {
         const items = Array.isArray(p) ? p : [p];
         const state = d.states[items[0].dataIndex];
-        return `${state}<br/>` + items.map((it) => `${it.seriesName}: ${fmt(it.value as number)}`).join("<br/>");
+        return `${esc(state)}<br/>` + items.map((it) => `${esc(it.seriesName)}: ${fmt(it.value as number)}`).join("<br/>");
       },
     },
     xAxis: { ...axisBase, type: "category", data: d.states, boundaryGap: false, ...xAxisName(result.spec.group_by ?? ""), splitLine: { show: true, lineStyle: { color: COLORS.axisLine } } },
@@ -1079,7 +1080,7 @@ export function hexbinOption(result: RenderResult): VizOption {
       formatter: (p) => {
         const item = Array.isArray(p) ? p[0] : p;
         const [cx, cy, count] = item.value as [number, number, number];
-        return `${result.spec.x}: ≈ ${formatNumber(cx)}<br/>${result.spec.y}: ≈ ${formatNumber(cy)}<br/>count: ${count}`;
+        return `${esc(result.spec.x)}: ≈ ${formatNumber(cx)}<br/>${esc(result.spec.y)}: ≈ ${formatNumber(cy)}<br/>count: ${count}`;
       },
     },
     xAxis: { ...axisBase, type: "value", scale: true, ...xAxisName(result.spec.x ?? "") },
@@ -1181,11 +1182,11 @@ export function stackedBarOption(result: RenderResult): VizOption {
         const items = Array.isArray(p) ? p : [p];
         if (items.length === 0) return "";
         const i = items[0].dataIndex;
-        const lines = items.map((it) => `${it.marker ?? ""}${it.seriesName}: ${fmt(it.value as number | null)}${d.percent ? " %" : ""}`);
+        const lines = items.map((it) => `${it.marker ?? ""}${esc(it.seriesName)}: ${fmt(it.value as number | null)}${d.percent ? " %" : ""}`);
         // a 100 % stack still names the magnitude it is a share of
         const total = totals[i];
         const foot = total === null ? "" : `<br/>${d.percent ? "總計" : "合計"} ${fmt(total)}`;
-        return `${categories[i]}<br/>${lines.join("<br/>")}${foot}`;
+        return `${esc(categories[i])}<br/>${lines.join("<br/>")}${foot}`;
       },
     },
     xAxis: catAxis(categories, result.spec.x ?? ""),
@@ -1239,11 +1240,11 @@ export function sankeyOption(result: RenderResult): VizOption {
         const item = Array.isArray(p) ? p[0] : p;
         if (item.dataType === "edge") {
           const link = item.data as SankeyLink;
-          return `${label.get(link.source) ?? link.source} → ${label.get(link.target) ?? link.target}<br/>${d.y_label}: ${fmt(link.value)}`;
+          return `${esc(label.get(link.source) ?? link.source)} → ${esc(label.get(link.target) ?? link.target)}<br/>${esc(d.y_label)}: ${fmt(link.value)}`;
         }
         const node = d.nodes.find((n) => n.name === item.name);
-        if (!node) return String(item.name);
-        return `${node.label}（${node.column}）<br/>${d.y_label}: ${fmt(node.value)}`;
+        if (!node) return esc(item.name);
+        return `${esc(node.label)}（${esc(node.column)}）<br/>${esc(d.y_label)}: ${fmt(node.value)}`;
       },
     },
     series: [series],
