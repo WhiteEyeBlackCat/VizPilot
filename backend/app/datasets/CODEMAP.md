@@ -27,7 +27,7 @@ generated_at: 2026-09-15
 |---|---|---|---|
 | `router.py` | API | `← charts/render.py, charts/spec.py, config.py, serialization.py \| → main.py` | Endpoints: `GET /health`, `POST/GET /datasets`, `GET /datasets/{id}`, `/preview`, `/profile`, `/recommendations?llm=`, `POST /charts/render`; unified 422 `{detail:{errors:[…]}}`. |
 | `loader.py` | Loader | — | Extension-dispatched Polars/Pandas readers; `LoaderError` for corrupt/empty files. |
-| `store.py` | Store | — | In-memory index + Parquet file per dataset id under the data dir. |
+| `store.py` | Store | — | In-memory index + Parquet file per dataset id under the data dir; DataFrames in an LRU of `max_cached_frames` (audit C2). |
 
 ## File Dependencies
 

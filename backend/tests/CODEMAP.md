@@ -14,6 +14,8 @@ generated_at: 2026-09-15
 | HTTP contract (upload, 422 shapes, render) | Tests | `test_upload.py`, `test_render.py`, `test_spec.py` | `../app/datasets/router.py` |
 | LLM merge / insight state machine | Tests | `test_llm_service.py`, `test_llm_provider.py` | `conftest.py` |
 | Two-stage workflow: gate, coverage, probes, LLM #2 trigger, wording gate | Tests | `test_llm_workflow.py` (`TwoStageFake`, `_planted`, `_h`) | `test_probes.py` |
+| Wording gate attacks / allowlist / claim templates (audit A1/A2) | Tests | `test_wording_attacks.py`, `test_wording_allowlist.py`, `test_semantic_claims.py` | `app/llm/claims.py` |
+| LLM cache lifecycle, data sharing, frame LRU (audit A6/C1/C2) | Tests | `test_llm_cache.py`, `test_privacy.py`, `test_store.py` | `app/llm/service.py`, `app/config.py` |
 | Planted end-to-end scenarios with known right answers (sales formula, hour_like, noise, tiny, hallucination) | Tests | `test_insight_benchmark.py` | `test_llm_workflow.py`, `test_recommendation_quality.py` |
 | Semantic roles, intent classifier, chart eligibility guards (stage 19) | Tests | `test_roles.py`, `test_intent.py` | `test_intent_pipeline.py` (planted month / region / hexbin / dumbbell / ridgeline / tiny / noise cases) |
 | New renderers and category order (density, dot interval, two-state, hexbin, matrix, polar) | Tests | `test_render_stage19.py` | `test_render.py` |

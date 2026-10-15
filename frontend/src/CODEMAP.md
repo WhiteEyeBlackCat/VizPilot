@@ -11,6 +11,8 @@ generated_at: 2026-09-15
 |---|---|---|---|
 | Understand app shell, data fetching sequence after selecting a dataset, panel layout | Shell | `App.tsx` | `store.ts`, `lib/router.ts` |
 | Understand global state, actions, save semantics (`specKey`, `isSaved`) | State | `store.ts` | `components/PreviewPanel.tsx` |
+| Understand preview latest-request-wins (`PREVIEW_REQUESTED`, `createPreviewGate`) | State | `store.ts` | `App.tsx` `previewSpec`, `store.test.ts` |
+| Understand workspace persistence (localStorage, hydrate, orphans) | Persistence | `workspaceStorage.ts` | `store.ts` `HYDRATE_WORKSPACE`, `workspaceStorage.test.ts` |
 | Understand API endpoints called and error type | API Client | `api.ts` | backend `datasets/router.py` |
 | Understand TS shapes of profile/recommendation/render payloads | Types | `types.ts` | `.claude/CONTRACTS.md` |
 | Change how a chart looks | Chart Layer | `charts/CODEMAP.md` | — |
@@ -42,7 +44,8 @@ generated_at: 2026-09-15
 | File | Domain | Deps | Function |
 |---|---|---|---|
 | `App.tsx` | Shell | `← components/*, pages/*, lib/* \| → main.tsx` | Loads datasets; on select fetches profile + recs(llm=false) + recs(llm=true) in parallel; routes pages; keeps panel group mounted; `previewRecommendation(rec, insight?)` / `previewInsight` link a chart to its finding. |
-| `store.ts` | State | `→ 8 files (foundational); rg "from \"../store\"\|@/store" frontend/src -l` | `AppState`/`Action`/`reducer`; per-dataset workspace; explore form (`ExploreForm.stack` is the stage-20b 100 %-stack toggle). `Preview.insight` / `SavedChart.insight` carry the finding a chart supports (stage 18). |
+| `store.ts` | State | `→ 8 files (foundational); rg "from \"../store\"\|@/store" frontend/src -l` | `AppState`/`Action`/`reducer`; per-dataset workspace; explore form (`ExploreForm.stack` is the stage-20b 100 %-stack toggle). Audit A4: `previewRequestId` + `createPreviewGate` — the newest render request wins. Audit A8: `hydrated` / `orphansByDataset`, `persistableWorkspace`. `Preview.insight` / `SavedChart.insight` carry the finding a chart supports (stage 18). |
+| `workspaceStorage.ts` | Persistence | `→ App.tsx, store.ts` | Audit A8: saved charts as `{version:1, datasets:{id: PersistedChart[]}}` under `vizpilot.workspace.v1` (specs only, no render data); `hydrateWorkspace` re-renders on dataset select, failures kept as orphans; every access try/catch. |
 | `api.ts` | API Client | `→ App.tsx, components/UploadPanel.tsx, ManualBuilder.tsx, Recommendations.tsx` | fetch wrappers for `/api/*`; `ApiError` carries 422 errors. |
 | `types.ts` | Types | `→ many` | Contract mirrors (keep in sync with backend models). `Insight` optional fields: `headline`, `why_it_matters`, `validation`, `priority`, `effect{label,value,n}`. Stage 20b: `ChartType` gains `stacked_bar` / `sankey`, `ChartSpec.percent?`, and the `StackedBarChartData` / `SankeyChartData` payloads. |
 | `main.tsx` | Shell | — | React root. |
