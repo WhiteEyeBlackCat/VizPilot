@@ -14,25 +14,30 @@ Two regimes (audit 2026-10):
 
 - MAD > 0 (the usual case): robust z = |x - median| / (1.4826 MAD); a value is
   "extreme" when z > 10; fences on the sentinel-free values.
-- MAD == 0, i.e. at least half the values sit exactly on one value (the
-  median, which is then the mode): z is undefined (and the old IQR fallback
-  scored zero-inflated counts as 10% "extreme"). The column is described as
-  mode + off-mode values T instead:
+- MAD ~ 0 (<= MODE_TOLERANCE x max(1, |median|), so 1e-12 float noise on a
+  zero bulk does not flip the regime), i.e. at least half the values sit on
+  one value (the median, which is then the mode): z is undefined (and the old
+  IQR fallback scored zero-inflated counts as 10% "extreme"). The column is
+  described as mode + off-mode values T instead (values within the same
+  tolerance of the mode count as ON it):
     * concentration = constant (T empty) / concentrated (mode share >= 0.9)
       / mode_dominated — informational only, never a warning;
-    * sentinels: distinct off-mode values peeled from the outside in; a value
-      is "extreme" when its distance to the mode exceeds 10x the median
-      distance of the remaining off-mode values (always, when none remain);
-      the "scale" signal compares |value| with 100x max(|mode|, that median
+    * sentinels: distinct off-mode values peeled from the outside in (only
+      the MAX_MODE_CANDIDATES outermost ones are examined); a value is
+      "extreme" when its distance to the mode exceeds 10x the median distance
+      of the remaining off-mode values (always, when none remain); the
+      "scale" signal compares |value| with 100x max(|mode|, that median
       distance) and is NOT available when both are 0 (an all-zero bulk gives
       no magnitude to be inconsistent with). Same 2-of-3 rule as above, so a
       zero-mode column needs the sentinel PATTERN plus repetition: 999999 /
       -9999 are flagged, a repeated -1 or 12345 next to zeros is not;
     * extremes: Tukey far-out fences on the sentinel-free off-mode values
       (>= MIN_ROBUST_N of them and IQR > 0), else none — the mode itself is
-      never an extreme and a second mode never collapses the fences.
+      never an extreme and a second mode never collapses the fences. A
+      heavy-tailed off-mode part (zeros + lognormal / Pareto) therefore gets
+      extreme counts like any heavy-tailed column: far values, not errors.
   The same off-mode fences are used when the sentinel-free IQR of the MAD > 0
-  path is 0 (fences would otherwise collapse onto one value).
+  path is ~0 (fences would otherwise collapse onto one value).
 """
 
 import math
@@ -63,18 +68,28 @@ SENTINEL_SCALE_FACTOR = 100.0
 SENTINEL_MIN_SIGNALS = 2
 # Tukey far-out fences (q1 - k IQR, q3 + k IQR); the box render uses 1.5
 FAR_OUT_IQR_MULTIPLIER = 3.0
-# mode-dominated columns (MAD == 0): share of the mode from which the column
+# mode-dominated columns (MAD ~ 0): share of the mode from which the column
 # is reported "concentrated" (informational)
 CONCENTRATED_SHARE = 0.9
 # mode-dominated columns: at most this many distinct off-mode values are
-# examined (outermost first) as sentinel candidates — bounds the cost
+# examined (outermost first) as sentinel candidates — bounds the cost. More
+# than 32 distinct far-out NON-sentinel values would hide a sentinel nearer
+# the bulk; such a tail is described by the extreme-value counts instead
 MAX_MODE_CANDIDATES = 32
+# "MAD == 0" and "on the mode" mean <= MODE_TOLERANCE x max(1, |median|).
+# Absorbs float noise; a column whose genuine spread is below 1e-9 absolute
+# (with |median| < 1) is treated as concentrated — rescale such units
+MODE_TOLERANCE = 1e-9
 
 
 def _quantiles(v: pl.Series) -> tuple[float, float, float]:
     q1 = float(v.quantile(0.25, interpolation="linear"))
     q3 = float(v.quantile(0.75, interpolation="linear"))
     return q1, q3, q3 - q1
+
+
+def _mode_tolerance(mode: float) -> float:
+    return MODE_TOLERANCE * max(1.0, abs(mode))
 
 
 def _signals(value: float, count: int, n: int, scale_reference: float | None) -> list[str]:
@@ -96,28 +111,62 @@ def _off_mode_window(clean: pl.Series, mode: float) -> tuple[int, float, float]:
     and clipped to the data range; no fences (0 extremes, full range) when
     there are too few off-mode values or they are themselves concentrated."""
     lo, hi = float(clean.min()), float(clean.max())
-    off = clean.filter(clean != mode)
+    off = clean.filter((clean - mode).abs() > _mode_tolerance(mode))
     if len(off) < MIN_ROBUST_N:
         return 0, lo, hi
     q1, q3, iqr = _quantiles(off)
-    if iqr == 0:
+    if iqr <= _mode_tolerance(q1):
         return 0, lo, hi
     f_lo, f_hi = q1 - FAR_OUT_IQR_MULTIPLIER * iqr, q3 + FAR_OUT_IQR_MULTIPLIER * iqr
     extreme_count = int(((off < f_lo) | (off > f_hi)).sum())
     return extreme_count, max(lo, min(mode, f_lo)), min(hi, max(mode, f_hi))
 
 
-def _mode_sentinels(v: pl.Series, mode: float) -> list[SentinelCandidate]:
-    """Suspected sentinels among the off-mode values of a MAD == 0 column,
-    peeled from the outside in (see module docstring)."""
-    n = len(v)
-    off = v.filter(v != mode)
-    distinct = sorted(off.value_counts().rows(), key=lambda r: (-abs(r[0] - mode), r[0]))
+def _mode_sentinels(off: pl.Series, mode: float, n: int) -> list[SentinelCandidate]:
+    """Suspected sentinels among the off-mode values of a mode-dominated
+    column, peeled from the outside in (see module docstring).
+
+    Every "median distance of the rest" is read from ONE ascending distance
+    array: the outer values (flagged sentinels, the candidate) are contiguous
+    blocks at its top, so the median is an order statistic that skips those
+    blocks — no per-candidate filter / median pass."""
+    dist = (off - mode).abs()
+    m = len(dist)
+    # cheap exit, the common continuous case: with all c rows at the largest
+    # distance removed, the rest's median is >= asc[(m - c - 1) // 2] (a
+    # "lower" quantile can only undershoot it); if the outermost value is
+    # within Z_SENTINEL of that, no off-mode value is extreme
+    d_max = float(dist.max())
+    c = int((dist == d_max).sum())
+    if 1 < m and c < m:
+        lower = float(dist.quantile(((m - c - 1) // 2) / (m - 1), interpolation="lower"))
+        if lower > 0 and d_max <= Z_SENTINEL * lower:
+            return []
+    # equal distances (mode - x, mode + x): the smaller value is peeled first
+    frame = pl.DataFrame({"v": off, "d": dist}).sort(["d", "v"], descending=[False, True])
+    asc = frame["d"]
+    runs = frame["v"].rle().tail(MAX_MODE_CANDIDATES)  # equal values are contiguous
+    blocks: list[tuple[int, int, float]] = []  # (start, length, value), outermost first
+    end = m
+    for length, value in zip(
+        reversed(runs.struct.field("len").to_list()), reversed(runs.struct.field("value").to_list())
+    ):
+        blocks.append((end - length, length, value))
+        end -= length
+
+    def order_stat(k: int, removed: list[tuple[int, int]]) -> float:
+        for start, length in removed:  # ascending, disjoint
+            if start > k:
+                break
+            k += length
+        return float(asc[k])
+
     sentinels: list[SentinelCandidate] = []
-    flagged: list[float] = []
-    for value, count in distinct[:MAX_MODE_CANDIDATES]:
-        rest = off.filter(~off.is_in([*flagged, value]))
-        ref = float((rest - mode).abs().median()) if len(rest) else 0.0
+    flagged: list[tuple[int, int]] = []
+    for start, count, value in blocks:
+        removed = sorted([*flagged, (start, count)])
+        rest = m - sum(length for _, length in removed)
+        ref = (order_stat((rest - 1) // 2, removed) + order_stat(rest // 2, removed)) / 2 if rest else 0.0
         if ref > 0 and abs(value - mode) <= Z_SENTINEL * ref:
             break  # reached the off-mode bulk: inner values are closer still
         magnitude = max(abs(mode), ref)
@@ -125,22 +174,22 @@ def _mode_sentinels(v: pl.Series, mode: float) -> list[SentinelCandidate]:
         signals = _signals(float(value), int(count), n, scale_reference)
         if len(signals) - 1 >= SENTINEL_MIN_SIGNALS:
             sentinels.append(SentinelCandidate(value=float(value), count=int(count), signals=signals))
-            flagged.append(value)
+            flagged.append((start, count))
     return sentinels
 
 
 def _mode_dominated(v: pl.Series, mad: float, mode: float) -> dict:
-    """MAD == 0 regime: `mode` (== the median) holds at least half the rows."""
+    """MAD ~ 0 regime: `mode` (== the median) holds at least half the rows."""
     n = len(v)
-    mode_count = int((v == mode).sum())
-    mode_share = mode_count / n
-    if mode_count == n:
+    off = v.filter((v - mode).abs() > _mode_tolerance(mode))
+    mode_share = (n - len(off)) / n
+    if not len(off):
         concentration = "constant"
     elif mode_share >= CONCENTRATED_SHARE:
         concentration = "concentrated"
     else:
         concentration = "mode_dominated"
-    sentinels = _mode_sentinels(v, mode) if mode_count < n else []
+    sentinels = _mode_sentinels(off, mode, n) if len(off) else []
     sentinels.sort(key=lambda s: (-s.count, s.value))
     clean = v.filter(~v.is_in([s.value for s in sentinels])) if sentinels else v
     q1c, q3c, iqrc = _quantiles(clean)
@@ -164,14 +213,16 @@ def _mode_dominated(v: pl.Series, mad: float, mode: float) -> dict:
 
 def robust_quality(finite: pl.Series) -> dict:
     """ColumnQuality robust fields for the finite non-null values of a numeric
-    column; {} when there are too few values."""
-    v = finite.cast(pl.Float64)
+    column; {} when there are too few values. Non-finite values / nulls are
+    dropped defensively (the profiler already passes finite values only)."""
+    v = finite.cast(pl.Float64).drop_nulls()
+    v = v.filter(v.is_finite())
     n = len(v)
     if n < MIN_ROBUST_N:
         return {}
     median = float(v.median())
     mad = float((v - median).abs().median())
-    if mad == 0:
+    if mad <= _mode_tolerance(median):
         return _mode_dominated(v, mad, median)
     q1, q3, _ = _quantiles(v)
     scale = MAD_SCALE * mad
@@ -194,7 +245,7 @@ def robust_quality(finite: pl.Series) -> dict:
     clean = v.filter(~v.is_in([s.value for s in sentinels])) if sentinels else v
     sentinel_rows = n - len(clean)
     q1c, q3c, iqrc = _quantiles(clean)
-    if iqrc == 0:
+    if iqrc <= _mode_tolerance(q1c):
         # the sentinel-free values are mode-dominated: Tukey fences would
         # collapse onto that value and call every other row extreme
         extreme_count, lo, hi = _off_mode_window(clean, q1c)
