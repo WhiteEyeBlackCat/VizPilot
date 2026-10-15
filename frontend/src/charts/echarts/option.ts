@@ -165,8 +165,10 @@ function baseOption(result: RenderResult, zoomable: boolean, legendShown: boolea
 // `connectNulls: false` draws the break. Nothing is generated: a weekend in
 // business-day data, a holiday, or an overnight stretch in hourly data is no
 // bucket of the chart when no group has a point there, so the line stays
-// connected across it; a season absent from months that other seasons
-// occupy breaks. Only grouped temporal lines are touched.
+// connected across it by this rule; a season absent from months that other
+// seasons occupy breaks. This rule touches grouped temporal lines only; a
+// stretch that no group occupies is left to the per-series cadence rule
+// ("temporal own-cadence gaps" below, A5), which also covers ungrouped lines.
 //
 // The rule presumes the x values are *aligned buckets* — identities shared
 // by every group — and would fragment raw asynchronous timestamps (group A
@@ -279,20 +281,171 @@ export function breakAbsentBuckets(
   y: (number | null)[],
   grid: TemporalGrid,
 ): Pair[] {
-  const base = pairs(x, y);
-  if (grid.aligned === null) return base;
   const keys = x.map(temporalKey);
-  if (grid.aligned === "grid" && !atLeastHalf(steps(keys.map((k) => grid.position.get(k) ?? NaN)), (s) => s === grid.unit)) return base;
+  return withBreaks(pairs(x, y), keys, absentBreaks(keys, grid));
+}
+
+/** `brk[i]` true ⇔ the group is absent from an existing bucket between
+ *  observations i-1 and i (see "grouped temporal gaps"). */
+function absentBreaks(keys: number[], grid: TemporalGrid): boolean[] {
+  const brk = keys.map(() => false);
+  if (grid.aligned === null) return brk;
+  if (grid.aligned === "grid" && !atLeastHalf(steps(keys.map((k) => grid.position.get(k) ?? NaN)), (s) => s === grid.unit)) return brk;
+  for (let i = 1; i < keys.length; i++) {
+    const gp = grid.index.get(keys[i - 1]);
+    const gc = grid.index.get(keys[i]);
+    if (gp !== undefined && gc !== undefined && Math.abs(gc - gp) > 1) brk[i] = true;
+  }
+  return brk;
+}
+
+/** Insert one invisible null point at the midpoint (ms) before every
+ *  flagged observation; every backend (x, y) pair is kept, in order. The
+ *  null carries no value, so the axis tooltip shows nothing for it and the
+ *  break is drawn by `connectNulls: false`. */
+function withBreaks(base: Pair[], keys: number[], brk: boolean[]): Pair[] {
   const out: Pair[] = [];
   for (let i = 0; i < base.length; i++) {
-    if (i > 0) {
-      const gp = grid.index.get(keys[i - 1]);
-      const gc = grid.index.get(keys[i]);
-      if (gp !== undefined && gc !== undefined && Math.abs(gc - gp) > 1) out.push([(keys[i - 1] + keys[i]) / 2, null]);
-    }
+    if (i > 0 && brk[i]) out.push([(keys[i - 1] + keys[i]) / 2, null]);
     out.push(base[i]);
   }
   return out;
+}
+
+// --- temporal own-cadence gaps (A5) -----------------------------------------
+//
+// The backend emits only the buckets that have rows (`_render_line`; `_clean`
+// drops rows whose y is null), never an empty bucket and never a null y. A
+// daily series with no rows from 01-20 to 01-28, or a monthly series without
+// March, therefore reached ECharts as consecutive points and was drawn as an
+// unbroken line, with `connectNulls: false` doing nothing. The absent-bucket
+// rule above cannot see this when no other group occupies the stretch (and
+// an ungrouped line has no other group at all).
+//
+// Rule (per series, from the series' own x values only): a series breaks
+// between two consecutive observations whose step is longer than every step
+// that *recurs* in that series — i.e. longer than its own cadence.
+//
+// - Positions are read on the coarsest exact local calendar scale the
+//   series' timestamps fit (`gridPositions` scales: month index, day number,
+//   or wall-clock milliseconds — the latter DST-safe). Week buckets are day
+//   positions with a recurring step of 7.
+// - Recurring step: a step value that occurs at least `CADENCE_MIN_COUNT`
+//   (2) times AND makes up at least `CADENCE_MIN_SHARE` (10 %) of the
+//   series' steps. A pattern has to be seen twice before it is a cadence;
+//   a one-off long step is a hole. No recurring step → no cadence → no break.
+// - Off-slots: a weekday the series never samples (business-day data: no
+//   Saturday / Sunday) or a time of day it never samples (office hours,
+//   market hours: nothing between 17:00 and 09:00) is not part of its
+//   cadence, once the series spans at least one full week / day so every
+//   slot had a chance to occur. Positions are counted over the sampled slots
+//   only, so Fri → Mon and 17:00 → 09:00 are one step and are never broken
+//   by themselves, while a missing full week still is. This is read from the
+//   data, not from a calendar: no holiday list, nothing generated.
+// - Raw / unset granularity: the x values are the timestamps themselves, so
+//   the rule applies only when the series is a regular grid on its own scale
+//   (unit = min step > 0, every step a multiple, ≥ half the steps one unit —
+//   the `temporalGrid` test, per series); irregular asynchronous timestamps
+//   are never broken. day / week / month granularity: the backend truncated
+//   x to calendar buckets, the rule applies as it is.
+// - Fewer than `CADENCE_MIN_POINTS` (5) points: no cadence can be inferred
+//   (three steps cannot tell a hole from a pattern) → unchanged.
+//
+// A gap, never a fabricated value: for count / sum aggregations an empty
+// bucket arguably means 0, but the payload does not say so (the backend
+// drops empty buckets and null-y rows alike), and drawing a 0 — or a
+// straight line through the hole — would assert a value nobody measured.
+// Filling empty count / sum buckets with 0 would need a backend fill in
+// `render.py` and is a product decision; until then the honest picture is a
+// gap. Numeric-x and category-x lines are untouched.
+
+export const CADENCE_MIN_POINTS = 5;
+export const CADENCE_MIN_COUNT = 2;
+export const CADENCE_MIN_SHARE = 0.1;
+
+const WEEK_DAYS = 7;
+/** local calendar day number and wall-clock ms within the day of a key */
+const localDay = (d: Date): number => Math.round(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / DAY_MS);
+const localTimeOfDay = (d: Date): number => ((d.getHours() * 60 + d.getMinutes()) * 60 + d.getSeconds()) * 1000 + d.getMilliseconds();
+/** 0 = Monday … 6 = Sunday for a day number (day 0 = 1970-01-01, a Thursday) */
+const weekdayOf = (day: number): number => (((day + 3) % WEEK_DAYS) + WEEK_DAYS) % WEEK_DAYS;
+
+/** Positions of one series' valid keys on its own scale, with sampled-slot
+ *  compression (see "temporal own-cadence gaps"), plus whether the raw
+ *  positions form a regular grid. */
+function cadencePositions(keys: number[]): { pos: number[]; regular: boolean } | null {
+  const valid = keys.filter((k) => !Number.isNaN(k));
+  if (valid.length < 2) return null;
+  const { scale } = gridPositions(valid);
+  const dates = keys.map((k) => new Date(k));
+  const day = dates.map(localDay);
+  const tod = dates.map(localTimeOfDay);
+  const raw = keys.map((k, i) =>
+    Number.isNaN(k) ? NaN : scale === "month" ? dates[i].getFullYear() * 12 + dates[i].getMonth() : scale === "day" ? day[i] : day[i] * DAY_MS + tod[i],
+  );
+  const rawSteps = steps(raw);
+  const unit = rawSteps.length ? Math.min(...rawSteps) : 0;
+  const regular = unit > 0 && rawSteps.every((s) => s % unit === 0) && atLeastHalf(rawSteps, (s) => s === unit);
+  if (scale === "month" || unit <= 0) return { pos: raw, regular };
+  const idx = keys.map((_, i) => i).filter((i) => !Number.isNaN(keys[i]));
+  const spanDays = day[idx[idx.length - 1]] - day[idx[0]];
+  // sampled weekdays (only once the series spans a full week)
+  const weekdays = new Set(idx.map((i) => weekdayOf(day[i])));
+  const slotDays = spanDays >= WEEK_DAYS && weekdays.size < WEEK_DAYS ? Array.from(weekdays).sort((a, b) => a - b) : null;
+  const dayPos = (d: number): number => {
+    if (!slotDays) return d;
+    const week = Math.floor((d + 3) / WEEK_DAYS); // Monday-aligned week
+    return week * slotDays.length + slotDays.indexOf(weekdayOf(d));
+  };
+  if (scale === "day") return { pos: keys.map((k, i) => (Number.isNaN(k) ? NaN : dayPos(day[i]))), regular };
+  // ms scale: sampled times of day, once the series spans a full day and
+  // samples more often than daily
+  const times = unit < DAY_MS && spanDays >= 1 ? Array.from(new Set(idx.map((i) => tod[i]))).sort((a, b) => a - b) : null;
+  const pos = keys.map((k, i) => {
+    if (Number.isNaN(k)) return NaN;
+    if (!times) return dayPos(day[i]) * DAY_MS + tod[i];
+    return dayPos(day[i]) * times.length + times.indexOf(tod[i]);
+  });
+  return { pos, regular };
+}
+
+/** `brk[i]` true ⇔ the step from observation i-1 to i is longer than every
+ *  recurring step of this series (see "temporal own-cadence gaps"). */
+function cadenceBreaks(keys: number[], bucketed: boolean): boolean[] {
+  const brk = keys.map(() => false);
+  if (keys.filter((k) => !Number.isNaN(k)).length < CADENCE_MIN_POINTS) return brk;
+  const cp = cadencePositions(keys);
+  if (!cp || (!bucketed && !cp.regular)) return brk;
+  const st = steps(cp.pos);
+  if (st.some((s) => s <= 0)) return brk; // unsorted / duplicate x: no cadence
+  const counts = new Map<number, number>();
+  for (const s of st) counts.set(s, (counts.get(s) ?? 0) + 1);
+  const recurring = Array.from(counts).filter(([, n]) => n >= CADENCE_MIN_COUNT && n >= CADENCE_MIN_SHARE * st.length);
+  if (!recurring.length) return brk;
+  const cadence = Math.max(...recurring.map(([s]) => s));
+  for (let i = 1; i < keys.length; i++) {
+    const a = cp.pos[i - 1];
+    const b = cp.pos[i];
+    if (!Number.isNaN(a) && !Number.isNaN(b) && b - a > cadence) brk[i] = true;
+  }
+  return brk;
+}
+
+/** `pairs()` for one temporal series with a null point inserted wherever
+ *  the series leaves its own cadence (always) or — for a grouped chart,
+ *  `grid` given — wherever it is absent from an aligned bucket another group
+ *  occupies. One null per break even when both rules agree. */
+export function breakTemporalGaps(
+  x: (number | string | null)[],
+  y: (number | null)[],
+  granularity: TimeGranularity | null | undefined,
+  grid: TemporalGrid | null,
+): Pair[] {
+  const keys = x.map(temporalKey);
+  const bucketed = granularity === "day" || granularity === "week" || granularity === "month";
+  const own = cadenceBreaks(keys, bucketed);
+  const absent = grid ? absentBreaks(keys, grid) : own.map(() => false);
+  return withBreaks(pairs(x, y), keys, own.map((b, i) => b || absent[i]));
 }
 // --- line -------------------------------------------------------------------
 
@@ -302,15 +455,17 @@ function lineOption(result: RenderResult): VizOption {
   const categorical = isCategoricalX(d);
   const categories = categorical ? Array.from(new Set(d.series.flatMap((s) => s.x.map(String)))) : [];
   const many = d.series.some((s) => s.x.length > LINE_SYMBOL_MAX_POINTS);
-  // grouped temporal series break where a group is absent from an aligned
-  // bucket other groups occupy (see "grouped temporal gaps" above); raw
-  // asynchronous timestamps, ungrouped lines and numeric / category axes are
-  // passed through as they are
-  const grid = temporal && result.spec.group_by != null ? temporalGrid(d, result.spec.time_granularity) : null;
+  // temporal series break where they leave their own cadence (see "temporal
+  // own-cadence gaps"), and — grouped — where a group is absent from an
+  // aligned bucket other groups occupy (see "grouped temporal gaps"); raw
+  // asynchronous timestamps and numeric / category axes are passed through
+  // as they are
+  const gran = result.spec.time_granularity;
+  const grid = temporal && result.spec.group_by != null ? temporalGrid(d, gran) : null;
   const series: LineSeriesOption[] = d.series.map((s) => ({
     type: "line",
     name: s.name,
-    data: grid ? breakAbsentBuckets(s.x, s.y, grid) : pairs(s.x, s.y),
+    data: temporal ? breakTemporalGaps(s.x, s.y, gran, grid) : pairs(s.x, s.y),
     showSymbol: !many,
     symbolSize: 5,
     lineStyle: { width: 1.5 },

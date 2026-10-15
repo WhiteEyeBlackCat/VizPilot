@@ -200,10 +200,18 @@ describe("grouped temporal line: breaks where a group is absent from an existing
     expect(gridPositions([Date.parse("2025-01-01T00:00:00"), Date.parse("2025-01-01T06:00:00")]).scale).toBe("ms");
   });
 
-  it("case 8: ungrouped temporal lines are unchanged even across a long gap", () => {
+  it("case 8: ungrouped temporal lines get no absent-bucket rule — but a long gap beyond the series' own cadence breaks (A5)", () => {
+    // before A5 this test pinned the bug: monthly buckets Jun–Aug 2011 then
+    // Jun–Jul 2012 were joined across ten empty months. The month cadence
+    // (step 1, recurring) now breaks the 10-month step; see option.gaps2.test.ts
     const a = monthly("v", ["2011-06", "2011-07", "2011-08", "2012-06", "2012-07"]);
-    const [s] = seriesOf(line([a], { group_by: null, time_granularity: "month" }));
-    expect(points(s)).toEqual(a.x.map((x, i) => [x, a.y[i]]));
+    const r = line([a], { group_by: null, time_granularity: "month" });
+    const [s] = seriesOf(r);
+    expect(segments(s)).toEqual([months(["2011-06", "2011-07", "2011-08"]), months(["2012-06", "2012-07"])]);
+    expectPreserved(r);
+    // no hole: unchanged
+    const c = monthly("v", ["2011-06", "2011-07", "2011-08", "2011-09", "2011-10"]);
+    expect(points(seriesOf(line([c], { group_by: null, time_granularity: "month" }))[0])).toEqual(c.x.map((x, i) => [x, c.y[i]]));
   });
 
   it("case 9: numeric-x grouped lines are untouched", () => {
