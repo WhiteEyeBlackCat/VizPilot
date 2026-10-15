@@ -401,6 +401,110 @@ def test_confidence_missed_sentinel_is_now_suspected() -> None:
 def test_confidence_extreme_message_names_the_mode() -> None:
     (warning,) = [w for w in _hist_warnings(_TAIL) if w.code == "extreme_value"]
     assert "values other than 0" in warning.message and warning.severity == "info"
+    assert "far values" in warning.message and "not errors" in warning.message
+
+
+# --- review follow-ups: tolerance, non-finite input, heavy tails, fast peeling
+
+
+def test_float_noise_on_the_mode_takes_the_mode_path() -> None:
+    rng = random.Random(5)
+    exact = [0.0] * 700 + [float(i) for i in range(1, 301)]
+    noisy = [rng.uniform(-1e-12, 1e-12) for _ in range(700)] + [float(i) for i in range(1, 301)]
+    assert _legacy_robust_quality(pl.Series(noisy))["extreme_value_count"] == 99  # the discontinuity
+    for values in (exact, noisy):
+        q = _q(values)
+        assert q["extreme_value_count"] == 0 and q["suspected_sentinels"] == []
+        assert q["concentration"] == "mode_dominated" and q["mode_share"] == pytest.approx(0.7)
+        assert q["robust_range"].lo == pytest.approx(0.0, abs=1e-11) and q["robust_range"].hi == 300.0
+    # a missed sentinel next to a noisy zero bulk is found too
+    q = _q([rng.uniform(-1e-12, 1e-12) for _ in range(990)] + [999999.0] * 10)
+    assert [s.value for s in q["suspected_sentinels"]] == [999999.0]
+
+
+def test_non_finite_input_is_dropped_not_raised() -> None:
+    values = [0.0] * 990 + [999999.0] * 10
+    dirty = pl.Series(values + [float("nan"), float("inf"), float("-inf"), None], dtype=pl.Float64)
+    assert robust_quality(dirty) == _q(values)
+    assert robust_quality(pl.Series([float("nan")] * 10)) == {}
+    rng = random.Random(9)
+    normal = [rng.gauss(0, 1) for _ in range(200)]
+    assert robust_quality(pl.Series(normal + [float("nan")])) == _q(normal)
+
+
+@pytest.mark.parametrize("tail", ["lognormal_s1", "lognormal_s2", "pareto_a1", "pareto_a0_7"])
+def test_heavy_tailed_zero_inflated_gets_extreme_counts_not_sentinels(tail) -> None:
+    # documented behaviour: Tukey far-out fences on the off-mode values, the
+    # same treatment a plain lognormal gets on the MAD > 0 path. Real far
+    # values: counted (warning-level for Pareto alpha <= 1), never sentinels
+    rng = random.Random(31)
+    draw = {
+        "lognormal_s1": lambda: rng.lognormvariate(3, 1),
+        "lognormal_s2": lambda: rng.lognormvariate(3, 2),
+        "pareto_a1": lambda: rng.paretovariate(1.0),
+        "pareto_a0_7": lambda: rng.paretovariate(0.7),
+    }[tail]
+    off = [draw() for _ in range(200)]
+    values = [0.0] * 3800 + off
+    q = _q(values)
+    assert q["suspected_sentinels"] == [] and q["concentration"] == "concentrated"
+    s = pl.Series(off)
+    q1, q3 = float(s.quantile(0.25, interpolation="linear")), float(s.quantile(0.75, interpolation="linear"))
+    expected = sum(1 for x in off if x < q1 - 3 * (q3 - q1) or x > q3 + 3 * (q3 - q1))
+    assert q["extreme_value_count"] == expected
+    if tail.startswith("pareto"):
+        assert expected > 0
+        (warning,) = [w for w in _hist_warnings(values) if w.code == "extreme_value"]
+        assert "not errors" in warning.message and "invalid" not in warning.message
+
+
+def _reference_mode_sentinels(values: list[float]) -> list[tuple[float, int, list[str]]]:
+    """Straightforward (slow) outside-in peeling, for the fast implementation."""
+    s = pl.Series(values, dtype=pl.Float64)
+    n, mode = len(s), float(s.median())
+    off = s.filter(s != mode)
+    distinct = sorted(off.value_counts().rows(), key=lambda r: (-abs(r[0] - mode), r[0]))
+    out, flagged = [], []
+    for value, count in distinct[:32]:
+        rest = off.filter(~off.is_in([*flagged, value]))
+        ref = float((rest - mode).abs().median()) if len(rest) else 0.0
+        if ref > 0 and abs(value - mode) <= 10 * ref:
+            break
+        signals = ["extreme"]
+        if count >= 2 and count >= 0.002 * n:
+            signals.append("repeated")
+        if value == math.floor(value) and abs(value) in {999.0, 9999.0, 99999.0, 999999.0}:
+            signals.append("pattern")
+        magnitude = max(abs(mode), ref)
+        if magnitude > 0 and abs(value) >= 100 * magnitude:
+            signals.append("scale")
+        if len(signals) >= 3:
+            out.append((float(value), int(count), signals))
+            flagged.append(value)
+    return sorted(out, key=lambda t: (-t[1], t[0]))
+
+
+def test_fast_peeling_matches_reference() -> None:
+    rng = random.Random(77)
+    specials = [999, 9999, 99999, 999999, -999, -9999, -1, 12345, 5000]
+    for _ in range(300):
+        n = rng.choice([20, 200, 2000])
+        mode = rng.choice([0.0, 7.0, -2.5, 100.0])
+        k = n - int(n * rng.uniform(0.5, 1.0))
+        values = [mode] * (n - k)
+        for _ in range(k):
+            r = rng.random()
+            if r < 0.3:
+                values.append(float(rng.choice(specials)))
+            elif r < 0.6:
+                values.append(mode + rng.randint(-30, 30))
+            else:
+                values.append(mode + rng.lognormvariate(2, rng.choice([0.5, 1, 2])))
+        series = pl.Series(values, dtype=pl.Float64)
+        if float((series - series.median()).abs().median()) != 0:
+            continue
+        got = [(s.value, s.count, s.signals) for s in _q(values)["suspected_sentinels"]]
+        assert got == _reference_mode_sentinels(values)
 
 
 def test_profile_round_trip_keeps_mode_fields() -> None:
