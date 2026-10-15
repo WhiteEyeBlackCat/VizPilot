@@ -230,6 +230,13 @@ export function gridPositions(keys: number[]): { scale: GridScale; position: Map
   return { scale, position: new Map(keys.map((k, i) => [k, pos(dates[i], k)])) };
 }
 
+/** Smallest value without spreading (a spread throws past ~10^5 values). */
+const minOf = (xs: number[]): number => {
+  let m = Infinity;
+  for (const v of xs) if (v < m) m = v;
+  return m;
+};
+
 /** Steps between consecutive valid positions of a series. */
 const steps = (positions: number[]): number[] => {
   const out: number[] = [];
@@ -265,7 +272,7 @@ export function temporalGrid(data: LineChartData, granularity: TimeGranularity |
   const index = new Map(sorted.map((k, i) => [k, i]));
   const { scale, position } = gridPositions(sorted);
   const unionSteps = steps(sorted.map((k) => position.get(k)!));
-  const unit = unionSteps.length ? Math.min(...unionSteps) : 0;
+  const unit = unionSteps.length ? minOf(unionSteps) : 0;
   const bucketed = granularity === "day" || granularity === "week" || granularity === "month";
   const regular = unit > 0 && unionSteps.every((s) => s % unit === 0) && atLeastHalf(unionSteps, (s) => s === unit);
   return { index, aligned: bucketed ? "bucketed" : regular ? "grid" : null, scale, position, unit };
@@ -326,10 +333,18 @@ function withBreaks(base: Pair[], keys: number[], brk: boolean[]): Pair[] {
 // between two consecutive observations whose step is longer than every step
 // that *recurs* in that series — i.e. longer than its own cadence.
 //
-// - Positions are read on the coarsest exact local calendar scale the
-//   series' timestamps fit (`gridPositions` scales: month index, day number,
-//   or wall-clock milliseconds — the latter DST-safe). Week buckets are day
-//   positions with a recurring step of 7.
+// - Positions are read on the series' own clock, independent of the
+//   viewer's time zone: a string with an offset ("…Z", "…+08:00") is read in
+//   UTC; a naive string ("2025-03-03T09:00:00", "2025-03-03") is read as the
+//   wall-clock time it spells (parsed as if UTC), so a daylight-saving
+//   transition of the viewer's zone neither creates a skipped hour (spring
+//   forward) nor a repeated one (fall back). The scale is the coarsest exact
+//   one every value fits: month index (all month starts), day number (all
+//   midnights) or milliseconds. Week buckets are day positions with a
+//   recurring step of 7. A zero step (the same instant twice, e.g. a naive
+//   01:30 repeated by a source-side fall-back) is skipped — never a break,
+//   never counted — instead of disabling the series; a negative step
+//   (unsorted x) disables the rule for that series.
 // - Recurring step: a step value that occurs at least `CADENCE_MIN_COUNT`
 //   (2) times AND makes up at least `CADENCE_MIN_SHARE` (10 %) of the
 //   series' steps. A pattern has to be seen twice before it is a cadence;
@@ -358,72 +373,99 @@ function withBreaks(base: Pair[], keys: number[], brk: boolean[]): Pair[] {
 // Filling empty count / sum buckets with 0 would need a backend fill in
 // `render.py` and is a product decision; until then the honest picture is a
 // gap. Numeric-x and category-x lines are untouched.
+//
+// Known limitations (deliberate trade-offs, not bugs):
+// - A miss that recurs becomes cadence in a short series: two single
+//   missing days among ~20 daily points make step 2 "recurring" (≥ 2 and
+//   ≥ 10 %), so neither is broken.
+// - Off-slot elimination over a short span hides a one-off miss: in a
+//   series spanning one to two weeks, a weekday missing on its only
+//   occurrence looks like a weekday the series never samples (same for a
+//   time of day over one to two days), so the line stays connected.
+// - Jittered timestamps (09:00:03, 10:00:01, …) are not a regular grid, so
+//   raw / unset-granularity series with jitter are never broken.
+// - Business-day data breaks at holidays (a one-off missing weekday).
 
 export const CADENCE_MIN_POINTS = 5;
 export const CADENCE_MIN_COUNT = 2;
 export const CADENCE_MIN_SHARE = 0.1;
 
 const WEEK_DAYS = 7;
-/** local calendar day number and wall-clock ms within the day of a key */
-const localDay = (d: Date): number => Math.round(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / DAY_MS);
-const localTimeOfDay = (d: Date): number => ((d.getHours() * 60 + d.getMinutes()) * 60 + d.getSeconds()) * 1000 + d.getMilliseconds();
 /** 0 = Monday … 6 = Sunday for a day number (day 0 = 1970-01-01, a Thursday) */
 const weekdayOf = (day: number): number => (((day + 3) % WEEK_DAYS) + WEEK_DAYS) % WEEK_DAYS;
+const HAS_OFFSET = /(Z|[+-]\d{2}(:?\d{2})?)$/i;
 
-/** Positions of one series' valid keys on its own scale, with sampled-slot
- *  compression (see "temporal own-cadence gaps"), plus whether the raw
- *  positions form a regular grid. */
-function cadencePositions(keys: number[]): { pos: number[]; regular: boolean } | null {
-  const valid = keys.filter((k) => !Number.isNaN(k));
-  if (valid.length < 2) return null;
-  const { scale } = gridPositions(valid);
-  const dates = keys.map((k) => new Date(k));
-  const day = dates.map(localDay);
-  const tod = dates.map(localTimeOfDay);
-  const raw = keys.map((k, i) =>
-    Number.isNaN(k) ? NaN : scale === "month" ? dates[i].getFullYear() * 12 + dates[i].getMonth() : scale === "day" ? day[i] : day[i] * DAY_MS + tod[i],
-  );
-  const rawSteps = steps(raw);
-  const unit = rawSteps.length ? Math.min(...rawSteps) : 0;
+/** The series' own clock (see "temporal own-cadence gaps"): UTC ms for an
+ *  offset-qualified string, the spelled wall-clock time read as UTC for a
+ *  naive one; NaN for anything else. Independent of the viewer's zone. */
+export const clockKey = (v: number | string | null): number => {
+  if (typeof v !== "string") return NaN;
+  if (/^\d{4}-\d{2}$/.test(v)) return Date.parse(`${v}-01T00:00:00Z`);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return Date.parse(`${v}T00:00:00Z`);
+  const t = v.replace(/^(\d{4}-\d{2}-\d{2}) /, "$1T");
+  return Date.parse(HAS_OFFSET.test(t) ? t : `${t}Z`);
+};
+
+/** Positions of one series' values on its own clock, with sampled-slot
+ *  compression (see "temporal own-cadence gaps"), plus whether the
+ *  uncompressed positions form a regular grid. */
+export function cadencePositions(x: (number | string | null)[]): { pos: number[]; regular: boolean } | null {
+  const clock = x.map(clockKey);
+  const idx = clock.map((_, i) => i).filter((i) => !Number.isNaN(clock[i]));
+  if (idx.length < 2) return null;
+  const day = clock.map((c) => Math.floor(c / DAY_MS));
+  const tod = clock.map((c, i) => c - day[i] * DAY_MS);
+  const monthStart = idx.every((i) => tod[i] === 0 && new Date(clock[i]).getUTCDate() === 1);
+  const midnight = idx.every((i) => tod[i] === 0);
+  const raw = clock.map((c, i) => {
+    if (Number.isNaN(c)) return NaN;
+    if (monthStart) {
+      const d = new Date(c);
+      return d.getUTCFullYear() * 12 + d.getUTCMonth();
+    }
+    return midnight ? day[i] : c;
+  });
+  const rawSteps = steps(raw).filter((s) => s !== 0);
+  const positive = rawSteps.filter((s) => s > 0);
+  const unit = positive.length ? minOf(positive) : 0;
   const regular = unit > 0 && rawSteps.every((s) => s % unit === 0) && atLeastHalf(rawSteps, (s) => s === unit);
-  if (scale === "month" || unit <= 0) return { pos: raw, regular };
-  const idx = keys.map((_, i) => i).filter((i) => !Number.isNaN(keys[i]));
+  if (monthStart || unit <= 0) return { pos: raw, regular };
   const spanDays = day[idx[idx.length - 1]] - day[idx[0]];
   // sampled weekdays (only once the series spans a full week)
   const weekdays = new Set(idx.map((i) => weekdayOf(day[i])));
-  const slotDays = spanDays >= WEEK_DAYS && weekdays.size < WEEK_DAYS ? Array.from(weekdays).sort((a, b) => a - b) : null;
-  const dayPos = (d: number): number => {
-    if (!slotDays) return d;
-    const week = Math.floor((d + 3) / WEEK_DAYS); // Monday-aligned week
-    return week * slotDays.length + slotDays.indexOf(weekdayOf(d));
-  };
-  if (scale === "day") return { pos: keys.map((k, i) => (Number.isNaN(k) ? NaN : dayPos(day[i]))), regular };
-  // ms scale: sampled times of day, once the series spans a full day and
-  // samples more often than daily
-  const times = unit < DAY_MS && spanDays >= 1 ? Array.from(new Set(idx.map((i) => tod[i]))).sort((a, b) => a - b) : null;
-  const pos = keys.map((k, i) => {
-    if (Number.isNaN(k)) return NaN;
-    if (!times) return dayPos(day[i]) * DAY_MS + tod[i];
-    return dayPos(day[i]) * times.length + times.indexOf(tod[i]);
+  const slotDay =
+    spanDays >= WEEK_DAYS && weekdays.size < WEEK_DAYS ? new Map(Array.from(weekdays).sort((a, b) => a - b).map((w, r) => [w, r])) : null;
+  const dayPos = (d: number): number =>
+    slotDay ? Math.floor((d + 3) / WEEK_DAYS) * slotDay.size + slotDay.get(weekdayOf(d))! : d; // Monday-aligned weeks
+  if (midnight) return { pos: clock.map((c, i) => (Number.isNaN(c) ? NaN : dayPos(day[i]))), regular };
+  // millisecond scale: sampled times of day, once the series spans a full
+  // day and samples more often than daily
+  const slotTime =
+    unit < DAY_MS && spanDays >= 1 ? new Map(Array.from(new Set(idx.map((i) => tod[i]))).sort((a, b) => a - b).map((t, r) => [t, r])) : null;
+  const pos = clock.map((c, i) => {
+    if (Number.isNaN(c)) return NaN;
+    return slotTime ? dayPos(day[i]) * slotTime.size + slotTime.get(tod[i])! : dayPos(day[i]) * DAY_MS + tod[i];
   });
   return { pos, regular };
 }
 
 /** `brk[i]` true ⇔ the step from observation i-1 to i is longer than every
  *  recurring step of this series (see "temporal own-cadence gaps"). */
-function cadenceBreaks(keys: number[], bucketed: boolean): boolean[] {
-  const brk = keys.map(() => false);
-  if (keys.filter((k) => !Number.isNaN(k)).length < CADENCE_MIN_POINTS) return brk;
-  const cp = cadencePositions(keys);
-  if (!cp || (!bucketed && !cp.regular)) return brk;
-  const st = steps(cp.pos);
-  if (st.some((s) => s <= 0)) return brk; // unsorted / duplicate x: no cadence
+function cadenceBreaks(x: (number | string | null)[], bucketed: boolean): boolean[] {
+  const brk = x.map(() => false);
+  const cp = cadencePositions(x);
+  if (!cp || cp.pos.filter((p) => !Number.isNaN(p)).length < CADENCE_MIN_POINTS) return brk;
+  if (!bucketed && !cp.regular) return brk;
+  const all = steps(cp.pos);
+  if (all.some((s) => s < 0)) return brk; // unsorted x: no cadence
+  const st = all.filter((s) => s > 0); // a repeated instant is skipped, not a break
   const counts = new Map<number, number>();
   for (const s of st) counts.set(s, (counts.get(s) ?? 0) + 1);
   const recurring = Array.from(counts).filter(([, n]) => n >= CADENCE_MIN_COUNT && n >= CADENCE_MIN_SHARE * st.length);
   if (!recurring.length) return brk;
-  const cadence = Math.max(...recurring.map(([s]) => s));
-  for (let i = 1; i < keys.length; i++) {
+  let cadence = 0;
+  for (const [step] of recurring) if (step > cadence) cadence = step;
+  for (let i = 1; i < x.length; i++) {
     const a = cp.pos[i - 1];
     const b = cp.pos[i];
     if (!Number.isNaN(a) && !Number.isNaN(b) && b - a > cadence) brk[i] = true;
@@ -443,7 +485,7 @@ export function breakTemporalGaps(
 ): Pair[] {
   const keys = x.map(temporalKey);
   const bucketed = granularity === "day" || granularity === "week" || granularity === "month";
-  const own = cadenceBreaks(keys, bucketed);
+  const own = cadenceBreaks(x, bucketed);
   const absent = grid ? absentBreaks(keys, grid) : own.map(() => false);
   return withBreaks(pairs(x, y), keys, own.map((b, i) => b || absent[i]));
 }
