@@ -890,11 +890,11 @@ class _Workflow:
             if suggestion is not None:
                 # a bare chart has no validated claim behind it: its caption may
                 # describe, never assert (no causal / comparative / universal words)
-                problem = semantic_problem(suggestion.reason, None) if suggestion.reason else None
+                problem = semantic_problem(suggestion.reason, None, set(self.columns)) if suggestion.reason else None
                 if problem:
                     self.trace.errors.append(f"chart '{suggestion.title}': {problem} — caption dropped")
                     suggestion = suggestion.model_copy(update={"reason": ""})
-                problem = semantic_problem(suggestion.title, None) if suggestion.title else None
+                problem = semantic_problem(suggestion.title, None, set(self.columns)) if suggestion.title else None
                 if problem:
                     self.trace.errors.append(f"chart '{suggestion.title}': {problem} — neutral title used")
                     suggestion = suggestion.model_copy(
@@ -995,13 +995,19 @@ class _Workflow:
             if item.chart_id is not None and str(item.chart_id) not in chart_ids:
                 logger.warning("LLM #2 insight %d names unknown chart %r — chart id ignored", hid, item.chart_id)
             v = by_id[hid]
-            # text and why_it_matters are checked one by one so a sentence
-            # boundary between them is never lost to the concatenation
-            problem = _wording_problem(item.text, v, names) or _wording_problem(item.why_it_matters, v, names)
+            problem = _wording_problem(item.text, v, names)
             if problem:
                 logger.warning("LLM #2 insight %d rejected: %s — template used", hid, problem)
                 self.trace.errors.append(f"llm2 insight {hid}: {problem}")
                 continue
+            # why_it_matters is gated on its own: an unverifiable one costs the
+            # why (LLM #1's gated reason or nothing is shown), never the text
+            why = item.why_it_matters.strip()
+            why_problem = _wording_problem(why, v, names) if why else None
+            if why_problem:
+                logger.warning("LLM #2 insight %d why_it_matters rejected: %s", hid, why_problem)
+                self.trace.errors.append(f"llm2 why {hid}: {why_problem}")
+                why = ""
             # the headline is gated on its own: a bad headline costs the
             # headline (the UI falls back to the text), never the insight
             headline: str | None = (item.headline or "").strip()
@@ -1016,7 +1022,7 @@ class _Workflow:
             out[hid] = {
                 "headline": headline or None,
                 "text": item.text.strip(),
-                "why_it_matters": item.why_it_matters.strip(),
+                "why_it_matters": why,
                 "priority": max(1, min(5, int(item.priority or by_id[hid].importance))),
             }
         return out

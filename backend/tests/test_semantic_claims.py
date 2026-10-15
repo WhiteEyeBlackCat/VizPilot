@@ -149,10 +149,11 @@ def test_headline_and_why_it_matters_are_checked_against_the_claim(profile, df) 
     insight = next(i for i in result["insights"] if i["priority"] == 5)
     assert insight["text"] == good and insight["headline"] is None
     assert any(e.startswith("llm2 headline 1") for e in result["debug"]["errors"])
-    # a causal why_it_matters rejects the LLM #2 wording of that insight
+    # a causal why_it_matters costs the why only (LLM #1's gated reason is shown instead)
     result, _ = _run(profile, df, _two_covered(), final=_final(good, why="Segment e causes higher revenue."))
     insight = next(i for i in result["insights"] if i["priority"] == 5)
-    assert insight["text"].startswith("Mean sales is highest") and "causes" not in (insight["why_it_matters"] or "")
+    assert insight["text"] == good and "causes" not in (insight["why_it_matters"] or "")
+    assert any(e.startswith("llm2 why 1: causal language") for e in result["debug"]["errors"])
 
 
 def test_llm1_reason_and_chart_caption_are_checked_against_the_claim(profile, df) -> None:
