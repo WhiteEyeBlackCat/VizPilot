@@ -426,7 +426,7 @@ def render_claim(claim: Claim) -> str | None:
 
 _CAUSAL = re.compile(
     r"\b(?:cause[sd]?|causing|causal(?:ly)?|drive[sn]?|driving|drove|driver[s]?|lead(?:s|ing)?\s+to|led\s+to|"
-    r"result(?:s|ed|ing)?\s+in|because|due\s+to|thanks\s+to|owing\s+to|as\s+a\s+result|"
+    r"result(?:s|ed|ing)?\s+in|because|on\s+account\s+of|due\s+to|thanks\s+to|owing\s+to|as\s+a\s+result|"
     r"make[s]?\s+\S+\s+(?:higher|lower|more|less|rise|fall|increase|decrease|grow|go\s+up|go\s+down)|"
     r"affect(?:s|ed|ing)?|influenc(?:e|es|ed|ing)|impact(?:s|ed|ing)?|determin(?:e|es|ed|ing|ant)|"
     r"boost(?:s|ed|ing)?|trigger(?:s|ed|ing)?|produce[sd]?|responsible\s+for|consequence[s]?|"
@@ -447,6 +447,7 @@ _PHRASES = [
     (r"\bnot\s+(?:the\s+)?(?:same|equal|identical|uniform)\b", "differs"),
     (r"\b(?:falls?|fell|falling)\s+short\s+of\b", "trails"),
     (r"\blag(?:s|ged|ging)?\s+behind\b", "trails"),
+    (r"\bbehind\b", "below"),
     (r"\b(?:edges?|edged)\s+out\b", "outsells"),
     (r"\b(?:comes?|came|coming)\s+out\s+on\s+top\b", "highest"),
     (r"\bon\s+top\b", "top"),
@@ -487,9 +488,10 @@ _MAG = {"double": 2.0, "doubles": 2.0, "doubled": 2.0, "twice": 2.0, "triple": 3
         "thrice": 3.0, "half": 0.5, "halved": 0.5, "halves": 0.5, "times": None, "fold": None}
 _INTENSITY = {"high": 1, "large": 1, "big": 1, "strong": 1, "huge": 1, "massive": 1, "elevated": 1, "hefty": 1,
               "sizable": 1, "sizeable": 1, "low": -1, "small": -1, "weak": -1, "tiny": -1, "modest": -1, "poor": -1,
-              "slight": -1, "limited": -1, "depressed": -1}
+              "slight": -1, "limited": -1, "depressed": -1, "substantial": 1, "considerable": 1, "notable": 1,
+              "pronounced": 1, "sharp": 1, "wide": 1}
 _EQUAL = {"same", "equal", "similar", "identical", "comparable", "alike", "uniform", "equally", "similarly"}
-_OTHER_EVAL = {"percent", "percentage", "ratio", "rank", "ranks", "ranked", "ranking", "outlier", "record",
+_OTHER_EVAL = {"percent", "percentage", "ratio", "ranking", "outlier", "record",
                "premium", "advantage", "majority", "minority", "multiple", "%", "upper", "superior", "inferior",
                "standout", "winner", "loser", "excel", "excels", "excelled", "underdog", "laggard", "champion"}
 _HEDGE = {"roughly", "about", "nearly", "almost", "around", "approximately", "some", "close", "circa", "approx"}
@@ -591,6 +593,8 @@ def _lower(text: str) -> str:
     # length-preserving case fold (str.lower can change the length of a few
     # characters, which would shift every span)
     out = "".join(ch.lower() if len(ch.lower()) == 1 else ch for ch in text)
+    # typographic quotes are punctuation, not content: fold to ASCII (1:1)
+    out = out.translate(str.maketrans({"’": "'", "‘": "'", "“": '"', "”": '"'}))
     # "e.g." / "i.e." would otherwise read as the labels "e" / "i"
     return re.sub(r"\b(?:e\.g\.|i\.e\.)", lambda m: " " * len(m.group(0)), out)
 
@@ -728,6 +732,11 @@ def _prepare(text: str, claim: Claim | None, names: set[str]) -> _Text:
     norm = "".join(chars)
     for name in sorted((n for n in names if n), key=len, reverse=True):
         norm = re.sub(r"(?<![\w])" + re.escape(name.lower()) + r"(?![\w])", lambda m: "#" * len(m.group(0)), norm)
+    if claim is not None and claim.kind in ("sign_flip", "slope_difference"):
+        # "the sign of the z-w relationship depends on the region" IS the finding
+        # (sign / strength by group), not a causal claim between two measures
+        norm = re.sub(r"(\b(?:sign|direction|strength|slope)\b[^.;]{0,60}?)\bdepends\s+on(?=\s+(?:the\s+)?#)",
+                      lambda m: m.group(1) + "differs by", norm)
     tokens = [_Tok(m.group(0), m.start(), m.end()) for m in _TOKEN.finditer(norm)]
     return _Text(text, low, norm, labels, tokens, claim)
 
@@ -766,6 +775,8 @@ def semantic_problem(text: str, claim: Claim | None, column_names: set[str] | No
     t = _prepare(text, claim, names)
     if any(ch.isalpha() and not ch.isascii() for ch in t.norm):
         return "text is not in English (only English wording can be verified)"
+    if any(not ch.isascii() for ch in t.norm.replace("§", "").replace("#", "")):
+        return "non-ASCII symbol (emoji, dash, sign) cannot be verified"
     m = _SYMBOL.search(t.norm)
     if m:
         return f"comparison symbol '{m.group(0)}' cannot be verified"
@@ -776,8 +787,8 @@ def semantic_problem(text: str, claim: Claim | None, column_names: set[str] | No
     if m:
         return f"causal language '{m.group(0).strip()}' is not supported by an associational test"
     if claim is None:
-        return _claimless_problem(t)
-    problem = _quantifier_problem(t, claim)
+        return _allowlist_problem(t, None) or _claimless_problem(t)
+    problem = _quantifier_problem(t, claim) or _allowlist_problem(t, claim)
     if problem:
         return problem
     for start, end in _spans(t.norm, _SENTENCE_BREAK):
@@ -1083,6 +1094,9 @@ def _clause_order(t, cs, ce, claim, evals, labels, values, ordered, middle, key,
             return f"{subjects[0].label} is not '{k.word}' {refs[0].label} in {key} (ratio {ratio:.2f})", prev_subjects
     # "high" / "low" bound to a group: above / below the middle
     for k, (_, polarity) in intens:
+        following = next((w.word for w in _words(t, k.end, ce)), "")
+        if following in _GAP_WORDS or following in ("margin", "margins"):
+            continue  # "a wide margin", "a large gap": the size of the (validated) difference
         h = _nearest(t, labels_or_prev, k.start, prefer_before=True)
         if h is None:
             return f"'{k.word}' is not bound to a group", prev_subjects
@@ -1347,6 +1361,14 @@ def _binding_problem(t: _Text, start: int, end: int, claim: Claim) -> str | None
     for m in _NUMBER.finditer(low, start, end):
         if m.start() in paired or any(a <= m.start() < b for a, b in inside):
             continue
+        # "99.1 in North", "200.0 for South": the label the number is placed in
+        placed = re.match(r"\s*(?:in|for|at)\s+", low[m.end():end])
+        target = next((h for h in labels if placed and h.start == m.end() + placed.end()), None)
+        if target is not None:
+            problem = check(m.group(0), target.label)
+            if problem:
+                return problem
+            continue
         best: tuple[int, bool, _Hit] | None = None
         for h in labels:
             gap = _word_gap(low, h.end, m.start()) if h.start < m.start() else _word_gap(low, m.end(), h.start)
@@ -1358,4 +1380,105 @@ def _binding_problem(t: _Text, start: int, end: int, claim: Claim) -> str | None
         problem = check(m.group(0), best[2].label)
         if problem:
             return problem
+    return None
+
+
+# --- token allowlist (review round 3): fail closed by construction --------------------
+#
+# LLM text is accepted only if EVERY word, after masking column names, group
+# labels and numbers, is in one of these closed lists: function words, neutral
+# statistical / descriptive words, a few plain advisory words (for
+# why_it_matters), the verifier's lexicon (each such word must then bind and
+# match the evidence, see above) and the words of the claim's own template.
+# Anything else - an idiom ("takes the crown"), a causal verb ("fuels"), a
+# foreign word, a spelled-out number - rejects the text, so no list of bad
+# words is needed and an unknown phrasing can never pass.
+
+_FUNCTION_WORDS = frozenset("""
+a an the and or but while whereas although though however yet so as than that which who whose whom where when
+this these those it its they them their there here is are was were be been being has have had having does do did
+can could will would may might should of in on at by for with within without across between among from to into
+onto over per each both either neither also only about roughly approximately around nearly almost some all any
+other others rest another every s versus vs compared relative then after before later earlier during throughout
+up out off again further same what how than such very more most less least well far much slightly
+""".split()) - {"neither", "without", "throughout", "up", "out", "off", "again", "such"}
+
+_NEUTRAL_WORDS = frozenset("""
+mean means average averages averaged averaging median medians value values group groups grouping category
+categories subgroup subgroups segment segments level levels class classes relationship relationships
+correlation correlations correlated correlate correlates related relate relates associated association
+associations link links linked connection connected trend trends change changes changed shift shifts shifted
+shifting point points row rows record records sample samples data dataset table distribution distributions
+distributed spread spreads variance variation variations varies vary varied varying differs differ differed
+differing difference differences different distinct gap gaps margin margins shape shapes pattern patterns column
+columns observation observations period periods time times over bin bins range ranges ranged ranging strength
+sign signs direction directions finding findings evidence measured measure overall pooled whole total inside
+across among statistic statistics adjusted eta squared r n ks pearson coefficient sd standard deviation iqr
+quartile quartiles effect size share proportion count counts number numbers observed seen shows show showed shown
+sits sit lies lie has have records posts sees earns earn earned earning sells sell sold selling generates
+generate generated tends tend tended goes go went follows follow followed pairs pattern holds is are was were
+remains remain stays stay appears appear looks look moves move moving together jointly along alongside clearly
+clear markedly marked sharply sharp strongly notably noticeably substantially considerably distinctly modestly
+slightly mildly moderately moderate somewhat generally typically consistently noticeable visible apparent
+regional by case cases part whereas whole entire mid middle centre center end ends edge range wide
+""".split())
+
+_ADVISORY_WORDS = frozenset("""
+matters matter important useful worth helps help helpful understand understanding knowing know pricing price
+prices market markets separate behaves behave behaviour behavior like customers customer demand investment
+investments invest budget budgets planning plan plans strategy strategies targeting target targets decisions
+decision monitor monitoring explore exploring consider considering focus focusing resources resource priorities
+priority prioritise prioritize risk risks opportunity opportunities performance operations operational inventory
+staffing capacity forecasting forecast forecasts design marketing allocation allocate allocating attention review
+reviewing check checking compare comparing comparison comparisons tailor tailoring expectations
+expectation interpret interpreting reporting report reports analysis analyses further deeper why need needs
+needed worthwhile relevant guide guides guiding should could may might
+llm ai model says suggests suggested suggestion chart charts plot plots view axis bar bars line lines scatter
+histogram box boxes heatmap own month months year years day days week weeks date dates mid early late start
+beginning january february march april may june july august september october november december
+hour hours weekday weekdays weekend weekends level timeline reason reasons
+""".split())
+
+_LEXICON_WORDS = frozenset(
+    set(_COMP_UP) | set(_COMP_DOWN) | set(_SUP_UP) | set(_SUP_DOWN) | set(_STRENGTH) | set(_STRENGTH_SUP)
+    | set(_SPREAD_COMP) | set(_SPREAD_SUP) | set(_RANK) | {k for k in _MAG if k not in ("fold",)}
+    | set(_INTENSITY) | set(_SIGN_POS) | set(_SIGN_NEG) | _AFTER_WORDS | _BEFORE_WORDS
+    | {"between", "followed", "rank", "ranks", "ranked", "differs", "curved", "positive", "negative"}
+)
+_SPELLED = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+            "eleven": 11, "twelve": 12}
+
+
+def _claim_words(claim: Claim | None) -> set[str]:
+    if claim is None:
+        return set()
+    words: set[str] = set()
+    sentence = render_claim(claim)
+    if sentence:
+        words |= set(re.findall(r"[a-z]+", sentence.lower()))
+    gcol = (claim.group_column or "").lower()
+    if gcol:
+        words |= {gcol, gcol + "s", gcol + "es", gcol + "al", gcol + "ally"}
+    for name in claim.columns.values():
+        words |= set(re.findall(r"[a-z]+", name.lower()))
+    # the words of the group labels themselves (a label may be several words)
+    for g in claim.groups:
+        words |= set(re.findall(r"[a-z]+", g.label.lower()))
+    return words
+
+
+def _allowlist_problem(t: _Text, claim: Claim | None) -> str | None:
+    allowed = _FUNCTION_WORDS | _NEUTRAL_WORDS | _ADVISORY_WORDS | _LEXICON_WORDS | _claim_words(claim)
+    words = [(m.group(0), m.start(), m.end()) for m in re.finditer(r"[a-z]+", t.norm)]
+    n_groups = len(claim.groups) if claim is not None else 0
+    for i, (word, start, end) in enumerate(words):
+        if word in allowed:
+            continue
+        if word in _SPELLED:
+            # "all four regions": a count of the claim's own groups, verified
+            nxt = words[i + 1][0] if i + 1 < len(words) else ""
+            nouns = _group_nouns(claim) if claim is not None else set()
+            if nxt in nouns and _SPELLED[word] == n_groups:
+                continue
+        return f"'{word}' is not a word the backend can verify"
     return None
