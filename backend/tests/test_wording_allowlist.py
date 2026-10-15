@@ -225,7 +225,7 @@ def test_property_only_allowlisted_and_correct_sentences_are_accepted(data) -> N
     df, _ = data
     claim = _region_claim(df)
     means = {g.label: g.mean for g in claim.groups}
-    labels = list(means)
+    labels = sorted(means)  # polars group_by order is not stable: keep the draw deterministic
     names = {"region", "revenue", "units", "channel"}
     allowed = C._FUNCTION_WORDS | C._NEUTRAL_WORDS | C._ADVISORY_WORDS | C._LEXICON_WORDS | C._claim_words(claim)
     lexicon = sorted(C._COMP_UP | C._COMP_DOWN | C._SUP_UP | C._SUP_DOWN | {"has", "the", "than", "in", "is", "revenue"})
@@ -249,13 +249,154 @@ def test_property_only_allowlisted_and_correct_sentences_are_accepted(data) -> N
         for lab in sorted(labels, key=len, reverse=True):
             stripped = re.sub(rf"\b{re.escape(lab.lower())}\b", " ", stripped)
         for word in re.findall(r"[a-z]+", stripped):
-            assert word in allowed or word in names, (sentence, word)
+            # "behind" is read as "below" by the gate's idiom normalisation
+            assert word in allowed or word in names or word == "behind", (sentence, word)
         # independent oracle: "<a> <comparative> ... than <b>" must match the means
         words = set(re.findall(r"[a-z]+", stripped))
-        if " than " in sentence and words & (C._COMP_UP | C._COMP_DOWN):
+        before_than, _, after_than = sentence.partition(" than ")
+        if after_than and re.search(rf"\b{a}\b", before_than) and re.search(rf"\b{b}\b", after_than) and words & (C._COMP_UP | C._COMP_DOWN):
             up = bool(words & C._COMP_UP)
             assert (means[a] > means[b]) == up, sentence
-        if words & (C._SUP_UP | C._SUP_DOWN) and sentence.startswith(a) and " than " not in sentence:
+        sups = [w for w in re.findall(r"[a-z]+", stripped) if w in C._SUP_UP | C._SUP_DOWN]
+        if len(sups) == 1 and sentence.startswith(a) and " than " not in sentence and b not in sentence:
             top = max(means, key=means.get) if words & C._SUP_UP else min(means, key=means.get)
             assert a == top, sentence
     assert accepted >= 20  # the property is exercised on real accepted sentences
+
+
+# --- review round 4: period binding, "different directions", ordered lists, sign binding -----
+
+R4_GROUP = [
+    "Than South, North has a higher mean.", "Higher than South is North's mean.", "South has the lowest mean; North, the highest.",
+    "The highest mean is North's, the lowest South's.", "North earns more and South less.", "North sells more; South sells less.",
+    "Mean revenue: North higher, South lower.", "Over South, North has the higher mean.",
+    "Each of South and North East has a lower mean than North.", "South, at 99.1, has the lowest mean.",
+    "North (200.0) and South (99.1) differ.", "Mean revenue for North is higher than for South.",
+    "More revenue is in North than in South.", "North East, West and South are lower than North.",
+    "Mean revenue by region: North, then North East, then West, then South.", "From highest to lowest: North, North East, West, South.",
+    "North sits between West and South.", "South is lower than North East, which is lower than North.",
+    "Twice the mean of South is in North.", "South is half of North.", "Mean revenue goes from 200.0 in North to 99.1 in South.",
+    "Mean revenue goes from 99.1 in South to 200.0 in North.", "The mean in North is far above the rest.",
+    "South sells less than the other regions; North sells the most.", "North is the region with the highest mean; South is second.",
+    "South and North have means of 200.0 and 99.1.", "Revenue: North 200.0, South 99.1.", "North earns well; South earns less.",
+    "The North mean is higher than the South mean.", "South's mean is lower than North's mean.", "North is higher, South is lower.",
+    "In terms of mean revenue, North comes first and South last.", "North tops; South trails.", "North is high and South is low.",
+    "Revenue is higher for North and lower for South.", "Is North higher than South? Yes.", "Higher mean: North. Lower mean: South.",
+    "North versus South: higher versus lower.", "North, then West, then North East, then South.",
+    "South, followed by West, then North East.",
+]
+
+
+@pytest.mark.parametrize("text", R4_GROUP)
+def test_round4_group_attacks(data, text) -> None:
+    _, _, ins = _run(data, text=text)
+    assert ins is not None and ins["text"] != text
+
+
+@pytest.mark.parametrize("field, text", [
+    ("why", "Invest in North, the top region."), ("why", "Focus budget on North, which sells more."),
+    ("why", "Prioritise North, where revenue is highest."), ("why", "North sells the most, so plan inventory there."),
+    ("headline", "North Has The Highest Mean"), ("headline", "North Above South"), ("headline", "North First, South Last"),
+])
+def test_round4_headline_and_why_attacks(data, field, text) -> None:
+    _, _, ins = _run(data, **({"headline": text} if field == "headline" else {"why": text}))
+    assert ins is not None and ins.get("headline" if field == "headline" else "why_it_matters") != text
+
+
+@pytest.mark.parametrize("text", ["w and z move in different directions.", "w and z move apart.", "w is lower where z is higher.",
+                                  "w and z are linked, with w higher where z is lower.", "w and z have a negative correlation.",
+                                  "w goes lower as z goes higher.", "The correlation of z and w is below 0.",
+                                  "w and z show the same relationship in north and east."])
+def test_round4_positive_relationship_attacks(pos, text) -> None:
+    assert not _shipped(pos, text)
+
+
+@pytest.mark.parametrize("text", ["w and z move together in north, south, east and west.",
+                                  "w and z are positively correlated across north, south, east and west.",
+                                  "w and z show a positive correlation by region.", "w and z move together, by region.",
+                                  "w and z are linked the same way by region.", "w and z have a positive relationship in the data.",
+                                  "Overall, w and z move together."])
+def test_round4_sign_flip_attacks(flip, text) -> None:
+    assert not _shipped(flip, text)
+
+
+@pytest.mark.parametrize("text", ["load goes from 49.7 to 100.0.", "Mean load shifts from 49.7 to 100.0.",
+                                  "load is higher in the later period.", "The later period has the higher mean load.",
+                                  "Mean load after 2023-11-01 is 100.0.", "load moves up over time.",
+                                  "Mean load is 49.7 before and 100.0 after.", "load changes from 49.7 to 100.0 around 2023-11-01.",
+                                  "Mean load before 2023-11-01 is 49.7."])
+def test_round4_time_attacks(time_data, text) -> None:  # noqa: F811
+    assert _time_source(time_data, 1, text) != "llm2"
+
+
+@pytest.mark.parametrize("text", ["u has a peak in the middle.", "u is high in the middle of x and low at the ends.",
+                                  "u is lowest at the ends of x.", "Mean u in the middle bins is 57.1.",
+                                  "u varies, with the highest mean at mid x.", "u goes up and then down over x.",
+                                  "u falls then rises over x."])
+def test_round4_curve_attacks(time_data, text) -> None:  # noqa: F811
+    assert _time_source(time_data, 2, text) != "llm2"
+
+
+R4_KEPT_GROUP = [
+    "South has the highest mean revenue, at {South}.", "North has the lowest mean revenue ({North}).",
+    "Mean revenue is about twice as high in South as in North.", "South's mean revenue is well above North's.",
+    "Mean revenue varies sharply by region.", "South earns the most, while North earns the least.",
+    "North East and West sit between South and North.", "The gap between South and North is large.",
+    "South leads on mean revenue, followed by North East.", "Revenue differs clearly across the four regions.",
+    "South stands out with the highest average revenue.", "Average revenue in North is the lowest of the four regions.",
+    "Mean revenue by region, from highest to lowest: South, then North East, then West, then North.",
+]
+
+
+@pytest.mark.parametrize("text", R4_KEPT_GROUP)
+def test_round4_correct_group_wording(data, means, text) -> None:
+    text = text.format(**means)
+    result, _, ins = _run(data, text=text)
+    assert ins is not None and ins["text"] == text, [e for e in result["debug"]["errors"] if "insight 1" in e]
+
+
+@pytest.mark.parametrize("frame, text", [
+    ("pos", "w tends to rise with z in each region."), ("pos", "In every region, w increases with z."),
+    ("flip", "The z-w correlation is positive in north and south and negative in east and west."),
+])
+def test_round4_correct_relationship_wording(request, frame, text) -> None:
+    assert _shipped(request.getfixturevalue(frame), text)
+
+
+def test_round4_sign_words_bind_to_the_groups_after_them(flip) -> None:
+    assert not _shipped(flip, "The z-w correlation is negative in north and south and positive in east and west.")
+
+
+@pytest.mark.parametrize("text", ["Mean load fell from 100.0 to 49.7 around 2023-11-01.", "load declined after 2023-11-01.",
+                                  "Mean load is 100.0 before and 49.7 after.", "Mean load after 2023-11-01 is 49.7."])
+def test_round4_correct_time_wording(time_data, text) -> None:  # noqa: F811
+    assert _time_source(time_data, 1, text) == "llm2"
+
+
+@pytest.mark.parametrize("text", ["u follows a U-shaped pattern across x.", "The relationship between x and u is U-shaped."])
+def test_round4_correct_curve_wording(time_data, text) -> None:  # noqa: F811
+    assert _time_source(time_data, 2, text) == "llm2"
+
+
+def _tier_claim(groups, col="tier", target="y"):
+    return build_claim(SimpleNamespace(test_type="group_difference", columns={"group": col, "target": target},
+                                       evidence={"groups": [{"group": g, "n": 50, "mean": m} for g, m in groups]}))
+
+
+@pytest.mark.parametrize("groups, col, target, texts", [
+    ([("high", 10.0), ("low", 30.0), ("mid", 20.0)], "tier", "y",
+     ["The high tier has the highest mean y.", "tier high has the highest mean y.", "high has a higher mean y than low.",
+      "Mean y is higher in the high tier than in the low tier.", "y is high for high and low for low.", "'high' tops the tiers."]),
+    ([("1", 10.0), ("2", 30.0), ("3", 20.0)], "season", "temp",
+     ["Season 1 has the highest mean temp.", "season 1 has the highest mean temp.", "Mean temp is highest in season 1.",
+      "temp in season 2 is 10.", "Mean temp is 30 in season 1 and 10 in season 2.", "The first season has the highest mean temp.",
+      "Mean temp peaks in season one."]),
+    ([("A", 10.0), ("AB", 30.0), ("B", 20.0)], "seg", "y",
+     ["AB has the lowest mean y.", "seg A has the highest mean y.", "A B has the highest mean y.", "A and B are above AB."]),
+    ([("Mean", 10.0), ("Median", 30.0)], "stat", "y",
+     ["Mean has the higher y.", "The Mean group has the highest mean y."]),
+])
+def test_tricky_labels_never_ship_a_wrong_order(groups, col, target, texts) -> None:
+    claim = _tier_claim(groups, col, target)
+    for text in texts:
+        assert semantic_problem(text, claim, {col, target}) is not None, text
