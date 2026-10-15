@@ -62,10 +62,12 @@ class OpenAICompatProvider:
         api_key: str = "",
         timeout_seconds: float = 30,
         include_sample_rows: bool = True,
+        include_category_values: bool = True,
         transport: httpx.BaseTransport | None = None,  # tests inject MockTransport
     ) -> None:
         self._model = model
         self._include_sample_rows = include_sample_rows
+        self._include_category_values = include_category_values
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         self._client = httpx.Client(
             base_url=base_url.rstrip("/"), headers=headers, timeout=timeout_seconds, transport=transport
@@ -75,18 +77,26 @@ class OpenAICompatProvider:
     def cache_identity(self) -> tuple:
         """Everything about this provider that changes what the LLM says:
         part of the recommendation cache key (audit A6)."""
-        return ("openai_compat", self._model, str(self._client.base_url), self._include_sample_rows)
+        return (
+            "openai_compat",
+            self._model,
+            str(self._client.base_url),
+            self._include_sample_rows,
+            self._include_category_values,
+        )
 
     def generate_hypotheses(
         self, profile: DatasetProfile, rule_candidates: list[Recommendation]
     ) -> tuple[HypothesisResponse, LLMUsage]:
-        messages = build_hypothesis_messages(profile, rule_candidates, self._include_sample_rows)
+        messages = build_hypothesis_messages(
+            profile, rule_candidates, self._include_sample_rows, self._include_category_values
+        )
         return self._complete(messages, HypothesisResponse)
 
     def finalize_insights(
         self, profile: DatasetProfile, validated: list[ValidatedHypothesis]
     ) -> tuple[FinalResponse, LLMUsage]:
-        messages = build_final_messages(profile, validated)
+        messages = build_final_messages(profile, validated, self._include_category_values)
         return self._complete(messages, FinalResponse)
 
     # the single-call name is kept as a thin alias for older callers

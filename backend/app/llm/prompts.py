@@ -180,10 +180,14 @@ def build_hypothesis_messages(
     profile: DatasetProfile,
     rule_candidates: list[Recommendation],
     include_sample_rows: bool = True,
+    include_category_values: bool = True,
 ) -> list[dict[str, str]]:
     return [
         {"role": "system", "content": HYPOTHESIS_SYSTEM_PROMPT},
-        {"role": "user", "content": _user_content(profile, rule_candidates, include_sample_rows)},
+        {
+            "role": "user",
+            "content": _user_content(profile, rule_candidates, include_sample_rows, include_category_values),
+        },
     ]
 
 
@@ -192,12 +196,15 @@ build_messages = build_hypothesis_messages
 
 
 def _user_content(
-    profile: DatasetProfile, rule_candidates: list[Recommendation], include_sample_rows: bool
+    profile: DatasetProfile,
+    rule_candidates: list[Recommendation],
+    include_sample_rows: bool,
+    include_category_values: bool = True,
 ) -> str:
     lines = [f"Dataset: {profile.n_rows} rows, {profile.n_cols} columns.", "", "Columns:"]
     columns = profile.columns[:MAX_COLUMNS]
     for col in columns:
-        lines.append(f"- {_describe_column(col)}")
+        lines.append(f"- {_describe_column(col, include_category_values)}")
     if len(profile.columns) > MAX_COLUMNS:
         lines.append(f"(only the first {MAX_COLUMNS} of {len(profile.columns)} columns are listed)")
 
@@ -482,20 +489,24 @@ def _pattern_line(p: GroupTimePattern) -> str:
 # --- LLM #2 -------------------------------------------------------------------
 
 
-def build_final_messages(profile: DatasetProfile, validated: list[ValidatedHypothesis]) -> list[dict[str, str]]:
+def build_final_messages(
+    profile: DatasetProfile, validated: list[ValidatedHypothesis], include_category_values: bool = True
+) -> list[dict[str, str]]:
     return [
         {"role": "system", "content": FINAL_SYSTEM_PROMPT},
-        {"role": "user", "content": _final_user_content(profile, validated)},
+        {"role": "user", "content": _final_user_content(profile, validated, include_category_values)},
     ]
 
 
-def _final_user_content(profile: DatasetProfile, validated: list[ValidatedHypothesis]) -> str:
+def _final_user_content(
+    profile: DatasetProfile, validated: list[ValidatedHypothesis], include_category_values: bool = True
+) -> str:
     names = {c.name for c in profile.columns}
     used = sorted({name for v in validated for name in v.columns.values()} & names)
     lines = [f"Dataset: {profile.n_rows} rows, {profile.n_cols} columns.", "", "Columns involved:"]
     by_name = {c.name: c for c in profile.columns}
     for name in used:
-        lines.append(f"- {_describe_column_brief(by_name[name])}")
+        lines.append(f"- {_describe_column_brief(by_name[name], include_category_values)}")
     lines += ["", "Validated hypotheses (backend-verified; numbers are authoritative):"]
     for v in validated:
         claim = v.claim if v.claim is not None else build_claim(v)
@@ -526,7 +537,16 @@ def _final_user_content(profile: DatasetProfile, validated: list[ValidatedHypoth
 # --- shared -------------------------------------------------------------------
 
 
-def _describe_column(col: ColumnProfile) -> str:
+def _example_values(col: ColumnProfile, include: bool) -> str:
+    """Up to three frequent labels, or a placeholder when cell values may not
+    leave the machine (C1: a non-loopback endpoint without explicit opt-in;
+    a name / email column would otherwise be sent verbatim)."""
+    if not include:
+        return "(values withheld)"
+    return ", ".join(str(t.value) for t in (col.top_values or [])[:3])
+
+
+def _describe_column(col: ColumnProfile, include_category_values: bool = True) -> str:
     base = f"{col.name} ({col.semantic_type}"
     if col.missing_ratio > 0:
         base += f", {col.missing_ratio:.0%} missing"
@@ -548,7 +568,7 @@ def _describe_column(col: ColumnProfile) -> str:
             line += f"; {extreme} extreme values"
         return line
     if col.semantic_type in ("categorical", "boolean"):
-        top = ", ".join(str(t.value) for t in (col.top_values or [])[:3])
+        top = _example_values(col, include_category_values)
         summary = f"{base}: {col.n_categories} categories, top: {top}"
         if getattr(col, "nominal", False):
             # numeric-looking code: a label, never a quantity to average
@@ -559,7 +579,7 @@ def _describe_column(col: ColumnProfile) -> str:
     return base
 
 
-def _describe_column_brief(col: ColumnProfile) -> str:
+def _describe_column_brief(col: ColumnProfile, include_category_values: bool = True) -> str:
     """LLM #2 column line: type and a rounded range only (no quality flags,
     no extreme-value counts — nothing the analyst could mistake for a fact
     to report).
@@ -576,7 +596,7 @@ def _describe_column_brief(col: ColumnProfile) -> str:
     if col.semantic_type == "numeric":
         return base
     if col.semantic_type in ("categorical", "boolean"):
-        top = ", ".join(str(t.value) for t in (col.top_values or [])[:3])
+        top = _example_values(col, include_category_values)
         return f"{base}: {col.n_categories} categories, e.g. {top}"
     if col.semantic_type == "datetime":
         return f"{base}: {str(col.min)[:10]} to {str(col.max)[:10]}"

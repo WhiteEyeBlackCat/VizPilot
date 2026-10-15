@@ -36,7 +36,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not settings.llm_endpoint_is_local:
             log.warning(
                 "LLM endpoint %s is not on this machine: dataset metadata (column names, "
-                "statistics) will be sent to it; sample rows and example values are %s.",
+                "statistics, and group labels inside evidence) will be sent to it; sample rows "
+                "and example category values are %s.",
                 settings.llm_base_url,
                 "INCLUDED (VIZPILOT_LLM_ALLOW_REMOTE_DATA=true)"
                 if settings.llm_allow_remote_data
@@ -48,6 +49,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             api_key=settings.llm_api_key,
             timeout_seconds=settings.llm_timeout_seconds,
             include_sample_rows=settings.llm_include_sample_rows and settings.llm_may_send_cell_values,
+            include_category_values=settings.llm_may_send_cell_values,
         )
     else:
         provider = DisabledProvider()
