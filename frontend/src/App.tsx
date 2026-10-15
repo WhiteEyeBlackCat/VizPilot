@@ -10,16 +10,21 @@ import { InsightsPage } from "./pages/InsightsPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { WorkspacePage } from "./pages/WorkspacePage";
 import {
+  createPreviewGate,
   initialState,
   isSaved,
+  persistableDatasets,
+  persistableWorkspace,
   reducer,
   workspaceOf,
+  type Action,
   type ExploreField,
   type FieldUpdate,
   type Page,
   type Preview,
   type SavedChart,
 } from "./store";
+import { hydrateWorkspace, saveWorkspace } from "./workspaceStorage";
 import type { ChartSpec, DatasetMeta, Insight, Recommendation } from "./types";
 import { Button } from "@/components/ui/button";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup, type GroupHandle, type Layout } from "@/components/ui/resizable";
@@ -31,7 +36,24 @@ const PAGE_ORDER: Page[] = ["overview", "insights", "explore", "workspace"];
 const DEFAULT_LAYOUT: Layout = { content: 55, preview: 45 };
 
 export default function App() {
-  const [state, dispatch] = useReducer(reducer, initialState);
+  const [state, rawDispatch] = useReducer(reducer, initialState);
+  // "latest preview request wins": every async render takes a request id; a
+  // newer request or anything that replaces / clears the preview (sync
+  // preview, close, dataset switch) invalidates the pending ones. The reducer
+  // enforces it for results (previewRequestId); this ref lets a superseded
+  // render swallow its error instead of showing it over a newer chart.
+  const previewGate = useRef(createPreviewGate()).current;
+  const dispatch = useCallback((action: Action) => {
+    if (
+      action.type === "CLOSE_PREVIEW" ||
+      action.type === "SELECT_DATASET" ||
+      action.type === "CLEAR_SELECTION" ||
+      (action.type === "SET_PREVIEW" && action.requestId === undefined)
+    ) {
+      previewGate.invalidate();
+    }
+    rawDispatch(action);
+  }, [previewGate]);
   const [route, navigate] = useHashRoute();
   const [newOpen, setNewOpen] = useState(false);
   // three layouts: ≥1280 sidebar + content + resizable preview column;
@@ -49,6 +71,9 @@ export default function App() {
   // overwrite the remembered width that is about to be restored
   const restoringRef = useRef(false);
 
+  const hydratedRef = useRef(state.hydrated);
+  hydratedRef.current = state.hydrated;
+
   const { datasets, meta, profile, recs, aiPending, preview, panelOpen } = state;
   const datasetId = meta?.dataset_id ?? null;
   const workspace = workspaceOf(state, datasetId);
@@ -65,6 +90,13 @@ export default function App() {
   const selectDataset = useCallback((m: DatasetMeta) => {
     const id = m.dataset_id;
     dispatch({ type: "SELECT_DATASET", meta: m });
+    // A8: bring the persisted workspace back (re-rendered from the stored
+    // specs); the reducer drops it if the selection moved on meanwhile
+    if (!hydratedRef.current[id]) {
+      hydrateWorkspace(id, api.render)
+        .then(({ charts, orphans }) => dispatch({ type: "HYDRATE_WORKSPACE", datasetId: id, charts, orphans }))
+        .catch(() => dispatch({ type: "HYDRATE_WORKSPACE", datasetId: id, charts: [], orphans: [] }));
+    }
     api
       .profile(id)
       .then((p) => dispatch({ type: "PROFILE_LOADED", datasetId: id, profile: p }))
@@ -78,7 +110,21 @@ export default function App() {
       .recommendations(id, true)
       .then((r) => dispatch({ type: "RECS_LOADED", datasetId: id, recs: r, final: true }))
       .catch(() => dispatch({ type: "AI_DONE", datasetId: id }));
-  }, []);
+  }, [dispatch]);
+
+  // A8 write side: persist a dataset's workspace only once it is hydrated
+  // (an earlier write would replace the stored charts with the empty list)
+  // and only when its list changed
+  const writtenRef = useRef<Record<string, unknown>>({});
+  useEffect(() => {
+    for (const id of persistableDatasets(state)) {
+      const sig = [state.workspaceByDataset[id], state.orphansByDataset[id]];
+      const prev = writtenRef.current[id] as unknown[] | undefined;
+      if (prev && prev[0] === sig[0] && prev[1] === sig[1]) continue;
+      writtenRef.current[id] = sig;
+      saveWorkspace(id, persistableWorkspace(state, id));
+    }
+  }, [state]);
 
   // the hash is the source of truth for the selected dataset; malformed
   // hashes are normalised (replace, no history entry) and an unknown id
@@ -114,10 +160,18 @@ export default function App() {
     async (spec: ChartSpec, extra: Omit<Preview, "result" | "seq">) => {
       const id = datasetId;
       if (!id) return;
-      const result = await api.render(id, spec);
-      dispatch({ type: "SET_PREVIEW", datasetId: id, preview: { result, ...extra } });
+      const requestId = previewGate.begin();
+      dispatch({ type: "PREVIEW_REQUESTED", datasetId: id, requestId });
+      let result;
+      try {
+        result = await api.render(id, spec);
+      } catch (e) {
+        if (!previewGate.isCurrent(requestId)) return; // superseded: only the newest request reports errors
+        throw e;
+      }
+      dispatch({ type: "SET_PREVIEW", datasetId: id, preview: { result, ...extra }, requestId });
     },
-    [datasetId],
+    [datasetId, previewGate, dispatch],
   );
 
   const previewRecommendation = useCallback(

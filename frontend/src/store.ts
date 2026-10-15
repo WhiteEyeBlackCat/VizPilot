@@ -20,6 +20,7 @@ import type {
   RecommendationsResponse,
   RenderResult,
 } from "./types";
+import type { PersistedChart } from "./workspaceStorage";
 
 export type Page = "overview" | "insights" | "explore" | "workspace";
 
@@ -82,8 +83,20 @@ export interface AppState {
   recsFinal: boolean; // the full (LLM) response has replaced the rules-only one
   aiPending: boolean;
   preview: Preview | null;
+  /** id of the newest in-flight render (PREVIEW_REQUESTED); null when nothing
+   *  is pending. A SET_PREVIEW carrying another id is a superseded response
+   *  and is dropped ("latest request wins"). Anything that replaces or clears
+   *  the preview synchronously also resets it to null. */
+  previewRequestId: number | null;
   panelOpen: boolean;
   workspaceByDataset: Record<string, SavedChart[]>;
+  /** datasets whose persisted workspace has been merged in (HYDRATE_WORKSPACE).
+   *  Storage is only written for these: writing earlier would overwrite the
+   *  stored charts with the still-empty list. */
+  hydrated: Record<string, boolean>;
+  /** persisted entries that could not be re-rendered; kept out of the UI but
+   *  written back untouched */
+  orphansByDataset: Record<string, PersistedChart[]>;
   explore: ExploreForm;
   insightsExploratoryOpen: boolean;
   /** the last spec generated from Explore for this dataset (shown as a recap) */
@@ -98,8 +111,11 @@ export const initialState: AppState = {
   recsFinal: false,
   aiPending: false,
   preview: null,
+  previewRequestId: null,
   panelOpen: false,
   workspaceByDataset: {},
+  hydrated: {},
+  orphansByDataset: {},
   explore: initialExploreForm,
   insightsExploratoryOpen: false,
   lastExploreSpec: null,
@@ -113,11 +129,13 @@ export type Action =
   | { type: "PROFILE_LOADED"; datasetId: string; profile: DatasetProfile }
   | { type: "RECS_LOADED"; datasetId: string; recs: RecommendationsResponse; final: boolean }
   | { type: "AI_DONE"; datasetId: string }
-  | { type: "SET_PREVIEW"; datasetId: string; preview: Omit<Preview, "seq"> }
+  | { type: "PREVIEW_REQUESTED"; datasetId: string; requestId: number }
+  | { type: "SET_PREVIEW"; datasetId: string; preview: Omit<Preview, "seq">; requestId?: number }
   | { type: "CLOSE_PREVIEW" }
   | { type: "SET_PANEL_OPEN"; open: boolean }
   | { type: "SAVE_PREVIEW"; key: string; savedAt: string }
   | { type: "REMOVE_SAVED"; datasetId: string; key: string }
+  | { type: "HYDRATE_WORKSPACE"; datasetId: string; charts: SavedChart[]; orphans: PersistedChart[] }
   | { type: "EXPLORE_FIELD"; field: ExploreField; value: FieldUpdate<string> }
   | { type: "SET_EXPLORATORY_OPEN"; open: boolean };
 
@@ -136,6 +154,34 @@ export function specKey(spec: ChartSpec): string {
   ]);
 }
 
+/** What is stored for a saved chart: the spec (re-rendered on load), never the
+ *  RenderResult data arrays. */
+export function toPersisted(c: SavedChart): PersistedChart {
+  return {
+    key: c.key,
+    spec: c.result.spec,
+    savedAt: c.savedAt,
+    title: c.result.spec.title,
+    ...(c.rec ? { rec: c.rec } : {}),
+    ...(c.insightText ? { insightText: c.insightText } : {}),
+    ...(c.insight ? { insight: c.insight } : {}),
+  };
+}
+
+/** Datasets whose workspace may be written to storage: only hydrated ones
+ *  (writing earlier would replace the stored charts with an empty list). */
+export function persistableDatasets(state: AppState): string[] {
+  return Object.keys(state.hydrated).filter((id) => state.hydrated[id]);
+}
+
+/** The entries to write for a dataset: the visible charts plus the orphans
+ *  that could not be rendered (so they are never lost). */
+export function persistableWorkspace(state: AppState, datasetId: string): PersistedChart[] {
+  const shown = workspaceOf(state, datasetId).map(toPersisted);
+  const keys = new Set(shown.map((c) => c.key));
+  return [...(state.orphansByDataset[datasetId] ?? []).filter((o) => !keys.has(o.key)), ...shown];
+}
+
 export function workspaceOf(state: AppState, datasetId: string | null | undefined): SavedChart[] {
   return datasetId ? (state.workspaceByDataset[datasetId] ?? []) : [];
 }
@@ -143,6 +189,22 @@ export function workspaceOf(state: AppState, datasetId: string | null | undefine
 export function isSaved(state: AppState, spec: ChartSpec): boolean {
   const key = specKey(spec);
   return workspaceOf(state, state.meta?.dataset_id).some((c) => specKey(c.result.spec) === key);
+}
+
+/** Client-side half of "latest preview request wins" (the reducer holds the
+ *  other half in previewRequestId). `begin` takes a new request id and
+ *  supersedes every earlier one; `invalidate` supersedes all pending without
+ *  starting one; `isCurrent` tells a finishing render, success or failure,
+ *  whether it may still report. */
+export function createPreviewGate() {
+  let current = 0;
+  return {
+    begin: () => ++current,
+    invalidate: () => {
+      current += 1;
+    },
+    isCurrent: (id: number) => id === current,
+  };
 }
 
 let previewSeq = 0;
@@ -167,6 +229,7 @@ export function reducer(state: AppState, action: Action): AppState {
         recs: null,
         recsFinal: false,
         aiPending: true,
+        previewRequestId: null,
         preview: null, // the workspace of the previous dataset is kept, keyed by id
         explore: initialExploreForm,
         insightsExploratoryOpen: false,
@@ -185,6 +248,7 @@ export function reducer(state: AppState, action: Action): AppState {
         recsFinal: false,
         aiPending: false,
         preview: null,
+        previewRequestId: null,
         panelOpen: false,
         explore: initialExploreForm,
         insightsExploratoryOpen: false,
@@ -210,18 +274,26 @@ export function reducer(state: AppState, action: Action): AppState {
       if (state.meta?.dataset_id !== action.datasetId) return state;
       return { ...state, aiPending: false };
 
+    case "PREVIEW_REQUESTED":
+      if (state.meta?.dataset_id !== action.datasetId) return state;
+      return { ...state, previewRequestId: action.requestId };
+
     case "SET_PREVIEW":
       if (state.meta?.dataset_id !== action.datasetId) return state; // dataset switched while rendering
+      // latest request wins: an async result is dropped unless it is the
+      // newest request; a synchronous preview (no id) invalidates all pending
+      if (action.requestId !== undefined && action.requestId !== state.previewRequestId) return state;
       previewSeq += 1;
       return {
         ...state,
+        previewRequestId: action.requestId === undefined ? null : state.previewRequestId,
         preview: { ...action.preview, seq: previewSeq },
         panelOpen: true,
         lastExploreSpec: action.preview.source === "explore" ? action.preview.result.spec : state.lastExploreSpec,
       };
 
     case "CLOSE_PREVIEW":
-      return { ...state, preview: null, panelOpen: false };
+      return { ...state, preview: null, previewRequestId: null, panelOpen: false };
 
     case "SET_PANEL_OPEN":
       return { ...state, panelOpen: action.open };
@@ -257,6 +329,29 @@ export function reducer(state: AppState, action: Action): AppState {
 
     case "SET_EXPLORATORY_OPEN":
       return state.insightsExploratoryOpen === action.open ? state : { ...state, insightsExploratoryOpen: action.open };
+
+    case "HYDRATE_WORKSPACE": {
+      if (state.meta?.dataset_id !== action.datasetId) return state; // dataset switched while rendering
+      // charts saved while hydration was in flight stay; persisted ones are
+      // older, so they go first; duplicates (same key or same chart) dropped
+      const existing = workspaceOf(state, action.datasetId);
+      const keys = new Set(existing.map((c) => c.key));
+      const specs = new Set(existing.map((c) => specKey(c.result.spec)));
+      const restored: SavedChart[] = [];
+      for (const c of action.charts) {
+        const sk = specKey(c.result.spec);
+        if (keys.has(c.key) || specs.has(sk)) continue;
+        keys.add(c.key);
+        specs.add(sk);
+        restored.push(c);
+      }
+      return {
+        ...state,
+        workspaceByDataset: { ...state.workspaceByDataset, [action.datasetId]: [...restored, ...existing] },
+        orphansByDataset: { ...state.orphansByDataset, [action.datasetId]: action.orphans },
+        hydrated: { ...state.hydrated, [action.datasetId]: true },
+      };
+    }
 
     case "REMOVE_SAVED": {
       const list = workspaceOf(state, action.datasetId).filter((c) => c.key !== action.key);
