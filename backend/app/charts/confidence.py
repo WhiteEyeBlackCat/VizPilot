@@ -665,13 +665,17 @@ def _robustness(spec: ChartSpec, view: _View) -> tuple[float, list[Warning], boo
         elif kind == "extreme":
             ratio = float(col.quality.extreme_value_ratio)
             count = int(round(int(col.quality.extreme_value_count) * view.scale))
+            mode = getattr(col.quality, "mode_value", None)
+            # mode-dominated column (MAD == 0): the fences come from the values
+            # off the dominant one, so say so instead of "typical range"
+            typical = "typical range" if mode is None else f"values other than {_format_value(mode)}"
             warnings.append(
                 Warning(
                     code="extreme_value",
                     severity="warning" if ratio >= EXTREME_WARN_RATIO else "info",
                     message=(
                         f"{name} has {count} extreme values ({ratio:.1%}) far outside its "
-                        "typical range; the axis may be compressed."
+                        f"{typical}; the axis may be compressed."
                     ),
                     meta={"column": name, "extreme_count": count, "extreme_ratio": round(ratio, 4)},
                 )
