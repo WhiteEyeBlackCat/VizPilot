@@ -141,14 +141,14 @@ def test_dedup_keeps_rules_spec_adopts_llm_reason(profile) -> None:
         "y": target.spec.y,
         "group_by": target.spec.group_by,
         "aggregation": target.spec.aggregation,
-        "reason": "the LLM's better reason",
+        "reason": "the LLM's own reason",
         "priority": 1,
     }
     service, _ = _service({"charts": [mention]})
     result = service.get(profile, use_llm=True)
     first = result["charts"][0]
     assert first["source"] == "rules"  # rules spec kept
-    assert first["spec"]["reason"] == "the LLM's better reason"
+    assert first["spec"]["reason"] == "the LLM's own reason"
     assert first["spec"]["time_granularity"] == target.spec.time_granularity
     assert first["spec"]["title"] == target.spec.title
 

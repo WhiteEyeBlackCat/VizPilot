@@ -35,7 +35,7 @@ from .coverage import ValidatedHypothesis
 # bumped whenever a system prompt or the prompt layout changes: part of the
 # recommendation cache key, so a prompt change never serves wording produced
 # under the previous prompt (audit A6)
-PROMPT_VERSION = "2026-10-a1"
+PROMPT_VERSION = "2026-10-a1b"
 
 # stage 20a: `coverage.bin_extremes_lines` deliberately describes a bin's x
 # range ("... for x in [12.3, 18.1]") with numbers that are NOT in the
@@ -105,6 +105,7 @@ Respond with a single JSON object, no prose, matching exactly:
 }
 
 Rules:
+- Write in English.
 - 0 to 5 hypotheses. Returning an empty list is a correct answer when nothing meets all of: \
 statistically supported by the evidence, analytically meaningful, non-definitional, non-redundant.
 - Do not report a relationship merely because its effect size or correlation is large. An insight \
@@ -145,6 +146,7 @@ size, per-group or per-bin numbers) and candidate charts. Your job is communicat
 concise, precise insight for each validated hypothesis and say why it matters.
 
 Hard rules:
+- Write in English. Use plain wording; anything the backend cannot verify is replaced by its own sentence.
 - Do NOT add any factual claim that is not in the supplied evidence, and do NOT change, round \
 differently, or invent numbers. Quote numbers from the evidence as given (you may omit them).
 - Do NOT mention columns that are not listed. Do NOT merge two hypotheses into one claim.
