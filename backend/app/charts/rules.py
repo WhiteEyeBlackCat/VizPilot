@@ -297,9 +297,19 @@ def choose_time_granularity(unique_count: int, span_days: float) -> TimeGranular
 _DISTRIBUTION_TYPES = frozenset({"box", "violin", "raincloud", "ridgeline", "dot_interval"})
 
 
+def _merge_flag(a: bool | None, b: bool | None) -> bool | None:
+    if a is True or b is True:
+        return True
+    if a is False or b is False:
+        return False
+    return None
+
+
 def fdr_unsupported(spec: ChartSpec, profile: DatasetProfile, index: "_EvidenceIndex") -> bool:
-    """True when the chart claims a relationship whose test is not a
-    discovery (or was never run): it must not take a top slot."""
+    """True when the chart claims a relationship that WAS tested and is not
+    a BH discovery: it must not take a top slot. A claim with no test
+    behind it (a short series without within-bucket df, a pair outside the
+    correlation scan) is left to the existing score floors."""
     kinds = {c.name: c.semantic_type for c in profile.columns}
     x, y, group = spec.x, spec.y, spec.group_by
     if not x or not y or kinds.get(y) != "numeric":
@@ -308,19 +318,20 @@ def fdr_unsupported(spec: ChartSpec, profile: DatasetProfile, index: "_EvidenceI
     if kx == "numeric":
         if spec.type not in ("scatter", "hexbin"):
             return False  # a cycle over a numeric axis: no test in L1
-        return index.disc_corr.get(frozenset((x, y))) is not True
+        return index.disc_corr.get(frozenset((x, y))) is False
     if kx == "datetime":
-        if index.disc_time.get((x, y)) is not True:
+        if index.disc_time.get((x, y)) is False:
             return True
         if group:
-            return not (index.disc_time_inter.get((x, group, y)) or index.disc_eta.get((group, y)) is True)
+            return _merge_flag(index.disc_time_inter.get((x, group, y)), index.disc_eta.get((group, y))) is False
         return False
     if kx in ("categorical", "boolean"):
         if group and kinds.get(group) in ("categorical", "boolean"):
-            return not index.disc_inter.get((x, group, y))
-        if index.disc_eta.get((x, y)) is True:
-            return False
-        return not (spec.type in _DISTRIBUTION_TYPES and index.disc_disp.get((x, y)) is True)
+            return index.disc_inter.get((x, group, y)) is False
+        flags = [index.disc_eta.get((x, y))]
+        if spec.type in _DISTRIBUTION_TYPES:
+            flags.append(index.disc_disp.get((x, y)))
+        return _merge_flag(*flags) is False if len(flags) == 2 else flags[0] is False
     return False
 
 
@@ -393,20 +404,26 @@ class _EvidenceIndex:
         # stage 21: BH discovery flags per test (None = no test / pre-21 profile)
         self.disc_eta = {(e.cat, e.num): getattr(e, "discovery", None) for e in evidence.cat_num}
         self.disc_time = {(t.datetime_col, t.num): getattr(t, "discovery", None) for t in evidence.time_effects}
-        self.disc_corr = {frozenset((t.a, t.b)): t.discovery for t in getattr(evidence, "correlation_tests", [])}
+        # a pair is supported when either its Pearson or its Spearman test is a discovery
+        self.disc_corr: dict[frozenset[str], bool | None] = {}
+        for t in getattr(evidence, "correlation_tests", []):
+            flags = [f for f in (t.discovery, getattr(t, "discovery_spearman", None)) if f is not None]
+            self.disc_corr[frozenset((t.a, t.b))] = None if not flags else any(flags)
         self.disc_disp = {(d.cat, d.num): getattr(d, "discovery", None) for d in getattr(evidence, "dispersion", [])}
-        self.disc_inter: dict[tuple[str, str, str], bool] = {}
-        self.disc_time_inter: dict[tuple[str, str, str], bool] = {}
+        # tri-state per key: True = some test is a discovery, False = tested
+        # and none is, absent / None = never tested (no cap without a test)
+        self.disc_inter: dict[tuple[str, str, str], bool | None] = {}
+        self.disc_time_inter: dict[tuple[str, str, str], bool | None] = {}
         for e in evidence.interactions:
-            flag = getattr(e, "discovery", None) is True
+            flag = getattr(e, "discovery", None)
             if "@" in e.cat1 or "@" in e.cat2:
                 for first, second in ((e.cat1, e.cat2), (e.cat2, e.cat1)):
                     if "@" in first and "@" not in second:
                         key = (first.split("@", 1)[0], second, e.num)
-                        self.disc_time_inter[key] = self.disc_time_inter.get(key, False) or flag
+                        self.disc_time_inter[key] = _merge_flag(self.disc_time_inter.get(key), flag)
                 continue
             for a, b in ((e.cat1, e.cat2), (e.cat2, e.cat1)):
-                self.disc_inter[(a, b, e.num)] = self.disc_inter.get((a, b, e.num), False) or flag
+                self.disc_inter[(a, b, e.num)] = _merge_flag(self.disc_inter.get((a, b, e.num)), flag)
         # stage 19: (x, y) -> binned eta-squared of the L2 non-linear scan (numeric cycles)
         self.binned_eta2 = {
             (n.x, n.y): n.binned_eta2 for n in getattr(getattr(evidence, "layer2", None), "nonlinear", []) or []

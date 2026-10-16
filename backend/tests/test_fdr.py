@@ -127,3 +127,45 @@ def test_a_strong_planted_correlation_stays_top():
     prof = _profile(df, "fdr-top")
     top = [r for r in recommend_charts(prof) if r.tier == "top"]
     assert any(r.spec.type == "scatter" and {r.spec.x, r.spec.y} == {"x1", "x2"} for r in top)
+
+
+def _additive_grid(seed: int, missing: set, sizes: list[int] | None = None) -> pl.DataFrame:
+    rng = random.Random(seed)
+    rows = []
+    for i, r_eff in enumerate((0, 3, 6, 9)):
+        for j, c_eff in enumerate((0, 2, 4, 8)):
+            if (i, j) in missing:
+                continue
+            n = sizes[(4 * i + j) % len(sizes)] if sizes else 10
+            rows += [(f"a{i}", f"b{j}", r_eff + c_eff + rng.gauss(0, 1)) for _ in range(n)]
+    return pl.DataFrame(rows, schema=["f1", "f2", "y"], orient="row")
+
+
+def test_interaction_f_is_calibrated_on_incomplete_and_unbalanced_grids():
+    """Review finding: the unweighted-means SS made 400/400 additive seeds
+    'significant' with two empty cells; the LS additive fit fixes it."""
+    from app.profiling.evidence import _interaction_test
+
+    for missing, sizes in (({(0, 0), (3, 3)}, None), (set(), [8, 8, 10, 30, 40])):
+        hits = sum(_interaction_test(_additive_grid(s, missing, sizes), "f1", "f2", "y")[2] < 0.05 for s in range(150))
+        assert hits / 150 <= 0.11, (missing, sizes, hits)
+
+
+def test_an_untested_short_series_is_not_capped():
+    """Review finding: 12 monthly points have no within-bucket df, so no time
+    test exists; that must not count as a failed test."""
+    rng = random.Random(1012)
+    df = pl.DataFrame({
+        "month": [datetime(2023, m, 1) for m in range(1, 13)],
+        "sales": [100 + 10 * m + rng.gauss(0, 2) for m in range(12)],
+    })
+    prof = _profile(df, "fdr-short")
+    index = _EvidenceIndex(prof.evidence)
+    lines = [r for r in recommend_charts(prof) if r.spec.type == "line" and r.spec.x == "month"]
+    assert lines and all(not fdr_unsupported(r.spec, prof, index) for r in lines)
+
+
+def test_spearman_is_tested_and_can_carry_a_scatter():
+    prof = _profile(_noise(200, 4), "fdr-spearman")
+    t = prof.evidence.correlation_tests[0]
+    assert t.rho is not None and t.p_value_spearman is not None and t.discovery_spearman is not None

@@ -169,7 +169,7 @@ def compute_evidence(
         derived_columns=derived + buckets,
         near_duplicate_groups=near_dups,
         dispersion=dispersion,
-        correlation_tests=_correlation_tests(df, correlations, dts),
+        correlation_tests=_correlation_tests(df, correlations, dts, spearman),
     )
     apply_fdr(evidence)
     return evidence
@@ -850,13 +850,44 @@ def _interaction_test(df: pl.DataFrame, f1: str, f2: str, num: str) -> tuple[flo
     a, b = kept[f1].n_unique(), kept[f2].n_unique()
     df_int = kept.height - a - b + 1
     df_within = data.height - kept.height
+    # the test uses the least-squares additive fit, not the unweighted-means
+    # one behind `strength`: on an unbalanced or incomplete grid the latter is
+    # not the LS fit and inflates the interaction SS (independent review:
+    # 400/400 additive seeds "significant" with two empty cells)
+    ss_int_ls = _ls_interaction_ss(list(kept.select(f1, f2, "_n", "_m").iter_rows()))
     if df_int < 1 or df_within < 1:
         p_value = 1.0
     elif ss_within <= 0:
-        p_value = 0.0 if ss_interaction > 0 else 1.0
+        p_value = 0.0 if ss_int_ls > 0 else 1.0
     else:
-        p_value = f_survival((ss_interaction / df_int) / (ss_within / df_within), df_int, df_within)
+        p_value = f_survival((ss_int_ls / df_int) / (ss_within / df_within), df_int, df_within)
     return float(ss_interaction / ss_total), data.height, p_value
+
+
+def _ls_interaction_ss(cells: list[tuple]) -> float:
+    """Interaction sum of squares of a two-way layout = RSS(additive LS fit)
+    − RSS(cell means), from the cell table (row, col, n, mean). The weighted
+    additive fit is solved by Gauss–Seidel backfitting, which converges to
+    the least-squares solution for a connected design of any balance."""
+    rows = {r for r, _, _, _ in cells}
+    cols = {c for _, c, _, _ in cells}
+    total_n = sum(n for _, _, n, _ in cells)
+    mu = sum(n * m for _, _, n, m in cells) / total_n
+    row_eff = {r: 0.0 for r in rows}
+    col_eff = {c: 0.0 for c in cols}
+    row_w = {r: sum(n for rr, _, n, _ in cells if rr == r) for r in rows}
+    col_w = {c: sum(n for _, cc, n, _ in cells if cc == c) for c in cols}
+    previous = math.inf
+    for _ in range(1000):
+        for r in rows:
+            row_eff[r] = sum(n * (m - mu - col_eff[c]) for rr, c, n, m in cells if rr == r) / row_w[r]
+        for c in cols:
+            col_eff[c] = sum(n * (m - mu - row_eff[r]) for r, cc, n, m in cells if cc == c) / col_w[c]
+        rss = sum(n * (m - mu - row_eff[r] - col_eff[c]) ** 2 for r, c, n, m in cells)
+        if previous - rss <= 1e-12 * max(rss, 1e-300):
+            break
+        previous = rss
+    return max(rss, 0.0)
 
 
 # --- correlation significance + false-discovery control (stage 21) -----------
@@ -868,7 +899,7 @@ def _lag1_autocorrelations(df: pl.DataFrame, cols: list[str], dts: list[ColumnPr
     if not dts or not cols:
         return {}
     dt = max(dts, key=lambda c: (-(c.missing_count or 0), c.name)).name
-    ordered = df.filter(pl.col(dt).is_not_null()).sort(dt).select(
+    ordered = df.filter(pl.col(dt).is_not_null()).sort(dt, maintain_order=True).select(
         pl.when(pl.col(c).cast(pl.Float64).is_finite()).then(pl.col(c).cast(pl.Float64)).otherwise(None).alias(c)
         for c in cols
     )
@@ -878,8 +909,17 @@ def _lag1_autocorrelations(df: pl.DataFrame, cols: list[str], dts: list[ColumnPr
     return {c: float(v) for c, v in row.items() if v is not None and math.isfinite(v)}
 
 
+def _t_test_p(r: float, n_eff: float) -> float:
+    if abs(r) >= 1:
+        return 0.0
+    return f_survival(r * r * (n_eff - 2) / (1 - r * r), 1, n_eff - 2)
+
+
 def _correlation_tests(
-    df: pl.DataFrame, correlations: Correlations | None, dts: list[ColumnProfile]
+    df: pl.DataFrame,
+    correlations: Correlations | None,
+    dts: list[ColumnProfile],
+    spearman: Correlations | None = None,
 ) -> list[CorrelationTest]:
     """t-test of every Pearson pair in the correlation matrix. With a datetime
     column the sample is Bartlett's effective n (independent random walks
@@ -901,17 +941,15 @@ def _correlation_tests(
             if ra is not None and rb is not None and ra * rb > 0:
                 n_eff = n * (1 - ra * rb) / (1 + ra * rb)
             n_eff = min(float(n), max(MIN_EFFECTIVE_N, n_eff))
-            if abs(r) >= 1:
-                p_value = 0.0
-            else:
-                t2 = r * r * (n_eff - 2) / (1 - r * r)
-                p_value = f_survival(t2, 1, n_eff - 2)
+            rho_s = spearman.matrix[i][j] if spearman is not None and spearman.columns == cols else None
             tests.append(
                 CorrelationTest(
                     a=a, b=b, r=float(r), n=int(n), n_eff=round(n_eff, 3),
                     autocorr_a=None if ra is None else round(ra, 6),
                     autocorr_b=None if rb is None else round(rb, 6),
-                    p_value=p_value,
+                    p_value=_t_test_p(r, n_eff),
+                    rho=rho_s,
+                    p_value_spearman=None if rho_s is None else _t_test_p(rho_s, n_eff),
                 )
             )
     return tests
@@ -945,12 +983,14 @@ def apply_fdr(evidence: Evidence, q: float = FDR_Q) -> None:
         entries.append((e, e.p_value))
     for e in evidence.correlation_tests:
         entries.append((e, e.p_value))
+    spearman_entries = [(e, e.p_value_spearman) for e in evidence.correlation_tests]
     for e in evidence.dispersion:
         entries.append((e, e.bf_p_value))
-    tested = [(e, p) for e, p in entries if p is not None and math.isfinite(p)]
-    rejected = benjamini_hochberg([p for _, p in tested], q) if tested else []
-    for (e, _), flag in zip(tested, rejected):
-        e.discovery = flag
+    tested = [(e, p, "discovery") for e, p in entries if p is not None and math.isfinite(p)]
+    tested += [(e, p, "discovery_spearman") for e, p in spearman_entries if p is not None and math.isfinite(p)]
+    rejected = benjamini_hochberg([p for _, p, _ in tested], q) if tested else []
+    for (e, _, field), flag in zip(tested, rejected):
+        setattr(e, field, flag)
     evidence.fdr = FdrSummary(q=q, m=len(tested), discoveries=sum(rejected))
 
 

@@ -507,6 +507,12 @@ class CorrelationTest(BaseModel):
     autocorr_b: float | None = None
     p_value: float
     discovery: bool | None = None
+    # the scatter rules admit a pair on max(|pearson|, |spearman|), so the
+    # rank correlation is tested too (t approximation, same n_eff) and both
+    # p-values join the BH family
+    rho: float | None = None
+    p_value_spearman: float | None = None
+    discovery_spearman: bool | None = None
 
 
 class FdrSummary(BaseModel):
