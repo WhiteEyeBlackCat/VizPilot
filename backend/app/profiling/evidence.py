@@ -16,11 +16,13 @@ import polars as pl
 from .models import (
     CatNumEffect,
     ColumnProfile,
+    CorrelationTest,
     Correlations,
     DerivedColumn,
     DerivedKind,
     DispersionEffect,
     Evidence,
+    FdrSummary,
     InteractionEffect,
     NearDuplicateGroup,
     SlopeHet,
@@ -127,6 +129,15 @@ BUCKET_RESOLUTION_SLACK = 1.5
 BUCKET_EDGE_SHARE = 0.1
 BUCKET_EDGE_MIN_SHARE = 0.08
 BUCKET_EDGE_MIN_ROWS = 2
+# stage 21: false-discovery control. Every L1 test with a p-value joins one
+# Benjamini–Hochberg family per dataset at FDR_Q; the rules only let a chart
+# whose supporting test is a discovery into the top tier. Measured on 1 200
+# seeded noise datasets (audit phase B): n = 30 × 20 columns produced a top
+# chart in 84 % of them by multiplicity alone, 6 % with BH.
+FDR_Q = 0.05
+# Bartlett effective n for time-ordered correlations is floored here so the
+# t-test keeps at least one degree of freedom
+MIN_EFFECTIVE_N = 3.0
 
 _BUCKET_TRUNC: dict[TimeBucket, str] = {"day": "1d", "month": "1mo", "year": "1y"}
 _COARSER: dict[TimeBucket, TimeBucket | None] = {"day": "month", "month": "year", "year": None}
@@ -149,7 +160,7 @@ def compute_evidence(
     # the derived caps, layer 2 and the probes treat them like any identity)
     # and flags entries that restate an identity / near copy / banding
     dispersion, buckets = _dispersion_effects(df, cats, nums, derived)
-    return Evidence(
+    evidence = Evidence(
         cat_num=cat_num,
         time_effects=_time_effects(df, dts, nums),
         num_num_spearman=spearman,
@@ -158,7 +169,10 @@ def compute_evidence(
         derived_columns=derived + buckets,
         near_duplicate_groups=near_dups,
         dispersion=dispersion,
+        correlation_tests=_correlation_tests(df, correlations, dts),
     )
+    apply_fdr(evidence)
+    return evidence
 
 
 class EtaResult(NamedTuple):
@@ -167,6 +181,7 @@ class EtaResult(NamedTuple):
     n_total: int
     n_min: int
     group_counts: dict[str, int]  # str(group value) -> valid rows; only non-empty groups
+    p_value: float = 1.0  # stage 21: one-way ANOVA F-test, df (k - 1, n - k)
 
 
 def adjusted_eta_squared(df: pl.DataFrame, cat: str, num: str) -> tuple[float, int] | None:
@@ -225,8 +240,20 @@ def adjusted_eta_squared_many(
         ss_within = groups[f"ssw:{num}"].sum()
         adjusted = 1 - (ss_within / (n - k)) / (ss_total / (n - 1))
         group_counts = {key: int(c) for key, c in zip(keys, counts.to_list()) if c > 0}
-        results[num] = EtaResult(max(float(adjusted), 0.0), k, n, int(non_empty.min()), group_counts)
+        results[num] = EtaResult(
+            max(float(adjusted), 0.0), k, n, int(non_empty.min()), group_counts,
+            _anova_p(float(ss_total), float(ss_within), k, n),
+        )
     return results
+
+
+def _anova_p(ss_total: float, ss_within: float, k: int, n: int) -> float:
+    """One-way ANOVA F-test p-value from the two sums of squares."""
+    ss_between = max(ss_total - ss_within, 0.0)
+    if ss_within <= 0:
+        return 0.0 if ss_between > 0 else 1.0
+    f = (ss_between / (k - 1)) / (ss_within / (n - k))
+    return f_survival(f, k - 1, n - k)
 
 
 def _eligible_cats(columns: list[ColumnProfile]) -> list[ColumnProfile]:
@@ -260,6 +287,7 @@ def _cat_num_effects(
                         n_total=result.n_total,
                         n_min=result.n_min,
                         group_counts=result.group_counts,
+                        p_value=result.p_value,
                     )
                 )
     return effects
@@ -660,6 +688,7 @@ def _time_effects(
                     bucket=bucket,
                     n_total=result.n_total,
                     n_min=result.n_min,
+                    p_value=result.p_value,
                 )
             pending = still_pending
             bucket = _COARSER[bucket]
@@ -739,12 +768,13 @@ def _interactions(
     effects = []
     for label1, label2 in pairs:
         for num in top_nums:
-            result = _interaction_effect(frame, label1, label2, num)
+            result = _interaction_test(frame, label1, label2, num)
             if result is not None:
-                strength, n_total = result
+                strength, n_total, p_value = result
                 effects.append(
                     InteractionEffect(
-                        cat1=label1, cat2=label2, num=num, strength=strength, n_total=n_total
+                        cat1=label1, cat2=label2, num=num, strength=strength, n_total=n_total,
+                        p_value=p_value,
                     )
                 )
     return effects
@@ -756,6 +786,11 @@ def _interaction_strength(df: pl.DataFrame, f1: str, f2: str, num: str) -> float
 
 
 def _interaction_effect(df: pl.DataFrame, f1: str, f2: str, num: str) -> tuple[float, int] | None:
+    result = _interaction_test(df, f1, f2, num)
+    return None if result is None else (result[0], result[1])
+
+
+def _interaction_test(df: pl.DataFrame, f1: str, f2: str, num: str) -> tuple[float, int, float] | None:
     """Additive-prediction residual share of variance, with the number of
     rows in the kept cells.
 
@@ -763,7 +798,9 @@ def _interaction_effect(df: pl.DataFrame, f1: str, f2: str, num: str) -> tuple[f
     marginals, an unbalanced but purely additive design produces a large fake
     interaction (the eval pins this), so the unweighted-means ANOVA form is
     required. Not df-corrected — small cells bias it upward, which the
-    MIN_CELL_COUNT floor bounds."""
+    MIN_CELL_COUNT floor bounds. Stage 21: the third value is the F-test
+    p-value of SS_interaction / (cells − a − b + 1) against the within-cell
+    residual / (N − cells), which does account for the cell count."""
     data = df.select(f1, f2, num).drop_nulls()
     if data.schema[num].is_float():
         data = data.filter(pl.col(num).is_finite())
@@ -803,7 +840,118 @@ def _interaction_effect(df: pl.DataFrame, f1: str, f2: str, num: str) -> tuple[f
         w * (m - (row_mean[i] + col_mean[j] - grand)) ** 2
         for i, j, w, m in kept.select(f1, f2, "_n", "_m").iter_rows()
     )
-    return float(ss_interaction / ss_total), data.height
+    cell_mean = kept.select(f1, f2, "_m")
+    ss_within = float(
+        data.join(cell_mean, on=[f1, f2], how="left")
+        .select(((pl.col(num) - pl.col("_m")) ** 2).sum())
+        .item()
+        or 0.0
+    )
+    a, b = kept[f1].n_unique(), kept[f2].n_unique()
+    df_int = kept.height - a - b + 1
+    df_within = data.height - kept.height
+    if df_int < 1 or df_within < 1:
+        p_value = 1.0
+    elif ss_within <= 0:
+        p_value = 0.0 if ss_interaction > 0 else 1.0
+    else:
+        p_value = f_survival((ss_interaction / df_int) / (ss_within / df_within), df_int, df_within)
+    return float(ss_interaction / ss_total), data.height, p_value
+
+
+# --- correlation significance + false-discovery control (stage 21) -----------
+
+
+def _lag1_autocorrelations(df: pl.DataFrame, cols: list[str], dts: list[ColumnProfile]) -> dict[str, float]:
+    """Lag-1 autocorrelation of each numeric column with the rows ordered by
+    the dataset's most complete datetime column; empty without one."""
+    if not dts or not cols:
+        return {}
+    dt = max(dts, key=lambda c: (-(c.missing_count or 0), c.name)).name
+    ordered = df.filter(pl.col(dt).is_not_null()).sort(dt).select(
+        pl.when(pl.col(c).cast(pl.Float64).is_finite()).then(pl.col(c).cast(pl.Float64)).otherwise(None).alias(c)
+        for c in cols
+    )
+    if ordered.height < 4:
+        return {}
+    row = ordered.select(pl.corr(pl.col(c), pl.col(c).shift(1)).alias(c) for c in cols).row(0, named=True)
+    return {c: float(v) for c, v in row.items() if v is not None and math.isfinite(v)}
+
+
+def _correlation_tests(
+    df: pl.DataFrame, correlations: Correlations | None, dts: list[ColumnProfile]
+) -> list[CorrelationTest]:
+    """t-test of every Pearson pair in the correlation matrix. With a datetime
+    column the sample is Bartlett's effective n (independent random walks
+    correlate at |r| >= 0.3 in ~70 % of seeded pairs whatever n is; with n_eff
+    the false-positive rate falls to 0.5–4 %, audit phase B §4)."""
+    if correlations is None:
+        return []
+    cols = correlations.columns
+    rho = _lag1_autocorrelations(df, cols, dts)
+    tests = []
+    for i, a in enumerate(cols):
+        for j in range(i + 1, len(cols)):
+            r = correlations.matrix[i][j]
+            n = correlations.pair_counts[i][j] if correlations.pair_counts else None
+            if r is None or n is None or n < 4:
+                continue
+            ra, rb = rho.get(a), rho.get(b := cols[j])
+            n_eff = float(n)
+            if ra is not None and rb is not None and ra * rb > 0:
+                n_eff = n * (1 - ra * rb) / (1 + ra * rb)
+            n_eff = min(float(n), max(MIN_EFFECTIVE_N, n_eff))
+            if abs(r) >= 1:
+                p_value = 0.0
+            else:
+                t2 = r * r * (n_eff - 2) / (1 - r * r)
+                p_value = f_survival(t2, 1, n_eff - 2)
+            tests.append(
+                CorrelationTest(
+                    a=a, b=b, r=float(r), n=int(n), n_eff=round(n_eff, 3),
+                    autocorr_a=None if ra is None else round(ra, 6),
+                    autocorr_b=None if rb is None else round(rb, 6),
+                    p_value=p_value,
+                )
+            )
+    return tests
+
+
+def benjamini_hochberg(p_values: list[float], q: float = FDR_Q) -> list[bool]:
+    """Step-up BH: True for every p-value rejected at FDR level q."""
+    m = len(p_values)
+    order = sorted(range(m), key=lambda i: p_values[i])
+    cutoff = 0
+    for rank, i in enumerate(order, 1):
+        if p_values[i] <= q * rank / m:
+            cutoff = rank
+    rejected = [False] * m
+    for i in order[:cutoff]:
+        rejected[i] = True
+    return rejected
+
+
+def apply_fdr(evidence: Evidence, q: float = FDR_Q) -> None:
+    """One BH family per dataset over every L1 entry with a p-value; sets
+    each entry's `discovery` and the summary in `evidence.fdr`. Interactions
+    and dispersion entries are listed after screening, so their family is
+    the listed subset (documented limitation)."""
+    entries: list = []
+    for e in evidence.cat_num:
+        entries.append((e, e.p_value))
+    for e in evidence.time_effects:
+        entries.append((e, e.p_value))
+    for e in evidence.interactions:
+        entries.append((e, e.p_value))
+    for e in evidence.correlation_tests:
+        entries.append((e, e.p_value))
+    for e in evidence.dispersion:
+        entries.append((e, e.bf_p_value))
+    tested = [(e, p) for e, p in entries if p is not None and math.isfinite(p)]
+    rejected = benjamini_hochberg([p for _, p in tested], q) if tested else []
+    for (e, _), flag in zip(tested, rejected):
+        e.discovery = flag
+    evidence.fdr = FdrSummary(q=q, m=len(tested), discoveries=sum(rejected))
 
 
 # --- slope heterogeneity ----------------------------------------------------

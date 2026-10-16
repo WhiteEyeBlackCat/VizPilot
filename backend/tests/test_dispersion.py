@@ -145,7 +145,7 @@ def test_dispersion_is_deterministic_and_round_trips() -> None:
     df = _groups({"a": 0, "b": 0, "c": 0}, {"a": 0.5, "b": 1.5, "c": 3.0}, 100)
     first, second = _profile(df), _profile(df)
     assert first.evidence.dispersion == second.evidence.dispersion
-    assert first.profile_version == PROFILE_VERSION == 15
+    assert first.profile_version == PROFILE_VERSION == 16
     payload = first.model_dump()
     assert payload["evidence"]["dispersion"][0]["strength"] == "strong"
     assert DatasetProfile.model_validate(payload).evidence.dispersion == first.evidence.dispersion

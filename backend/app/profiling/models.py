@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 # Bump whenever the profile schema or inference rules change: cached
 # {id}.profile.json files with a different version are recomputed.
-PROFILE_VERSION = 15  # v15: mode-dominated (MAD == 0) robust path — ColumnQuality.mode_value/mode_share/concentration, sentinels + off-mode fences without z (audit 2026-10); v14: ColumnProfile.categories (full label set of small categoricals for role detection, stage 19.2); v13: dispersion compared groups / F-test p-value / definitional flag, bucket derived kind (stage 19.2); v12: dispersion evidence (stage 19.1); v11: layer-2 shapes/strength (stage 17.1b); v10: evidence layer 2 (stage 17.1)
+PROFILE_VERSION = 16  # v16: per-test p_value + per-dataset Benjamini–Hochberg discovery flag on L1 tests, correlation_tests with Bartlett effective n, Evidence.fdr (stage 21); v15: mode-dominated (MAD == 0) robust path — ColumnQuality.mode_value/mode_share/concentration, sentinels + off-mode fences without z (audit 2026-10); v14: ColumnProfile.categories (full label set of small categoricals for role detection, stage 19.2); v13: dispersion compared groups / F-test p-value / definitional flag, bucket derived kind (stage 19.2); v12: dispersion evidence (stage 19.1); v11: layer-2 shapes/strength (stage 17.1b); v10: evidence layer 2 (stage 17.1)
 
 SemanticType = Literal["numeric", "categorical", "datetime", "boolean", "text", "id", "unknown"]
 Frequency = Literal["daily", "weekly", "monthly", "irregular", "unknown"]
@@ -151,6 +151,10 @@ class CatNumEffect(BaseModel):
     # per-group pairwise-complete rows, str(value) keys like SlopeHet.corrs and
     # the render group labels; only groups with >= 1 valid row (sum == n_total)
     group_counts: dict[str, int] = {}
+    # stage 21, additive: one-way ANOVA F-test p-value of the raw eta-squared,
+    # and whether the test survives the dataset's Benjamini–Hochberg family
+    p_value: float | None = None
+    discovery: bool | None = None
 
 
 class TimeEffect(BaseModel):
@@ -164,6 +168,8 @@ class TimeEffect(BaseModel):
     bucket: TimeBucket
     n_total: int = 0  # pairwise-complete rows in the profiled sample
     n_min: int = 0  # rows in the smallest non-empty time bucket
+    p_value: float | None = None  # stage 21: F-test over the time buckets (iid rows assumed)
+    discovery: bool | None = None  # stage 21: survives the dataset BH family
 
 
 class InteractionEffect(BaseModel):
@@ -176,6 +182,10 @@ class InteractionEffect(BaseModel):
     num: str
     strength: float
     n_total: int = 0  # rows in the kept cells
+    # stage 21: F-test of the interaction sum of squares against the
+    # within-cell residual, df (cells - a - b + 1, N - cells)
+    p_value: float | None = None
+    discovery: bool | None = None
 
 
 class SlopeHet(BaseModel):
@@ -288,6 +298,7 @@ class DispersionEffect(BaseModel):
     definitional: bool = False
     definitional_kind: DerivedKind | None = None
     definition: str | None = None  # e.g. "sales = unit_price × quantity", "price_band = bucket(price)"
+    discovery: bool | None = None  # stage 21: bf_p_value survives the dataset BH family
 
 
 # --- evidence layer 2 (stage 17.1) ------------------------------------------
@@ -480,6 +491,34 @@ class EvidenceLayer2(BaseModel):
     subgroup_anomalies: list[SubgroupAnomaly] = []
 
 
+class CorrelationTest(BaseModel):
+    """Stage 21: significance of one Pearson correlation. When the dataset has a
+    datetime column, rows are ordered by it and the lag-1 autocorrelations of
+    both columns shrink the sample to Bartlett's effective n
+    n·(1 − ρa·ρb)/(1 + ρa·ρb) — two trending series are not n independent
+    pairs. p_value is the t-test on r with n_eff − 2 df."""
+
+    a: str
+    b: str
+    r: float
+    n: int
+    n_eff: float
+    autocorr_a: float | None = None
+    autocorr_b: float | None = None
+    p_value: float
+    discovery: bool | None = None
+
+
+class FdrSummary(BaseModel):
+    """Stage 21: one Benjamini–Hochberg family per dataset over every L1 test
+    with a p-value (cat_num, time_effects, interactions, correlation_tests,
+    dispersion). `m` counts the tests, `discoveries` those rejected at `q`."""
+
+    q: float
+    m: int
+    discoveries: int
+
+
 class Evidence(BaseModel):
     cat_num: list[CatNumEffect] = []
     time_effects: list[TimeEffect] = []
@@ -492,6 +531,8 @@ class Evidence(BaseModel):
     # stage 19.1, additive: spread differences across groups, decoupled from
     # the mean-difference evidence in cat_num (read by the rules and the LLM)
     dispersion: list[DispersionEffect] = []
+    correlation_tests: list[CorrelationTest] = []  # stage 21, additive
+    fdr: FdrSummary | None = None  # stage 21, additive
     layer2: EvidenceLayer2 = EvidenceLayer2()  # stage 17.1, additive; LLM-only
 
 

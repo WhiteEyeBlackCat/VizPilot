@@ -290,6 +290,53 @@ def choose_time_granularity(unique_count: int, span_days: float) -> TimeGranular
     return "month"
 
 
+# stage 21: charts that rest on an inferential claim may be top only when the
+# claim's test survives the dataset's Benjamini–Hochberg family (evidence
+# `discovery`). Descriptive charts (histogram, count bar, correlation heatmap,
+# flow) and cycles over a numeric axis (no closed-form test) are unaffected.
+_DISTRIBUTION_TYPES = frozenset({"box", "violin", "raincloud", "ridgeline", "dot_interval"})
+
+
+def fdr_unsupported(spec: ChartSpec, profile: DatasetProfile, index: "_EvidenceIndex") -> bool:
+    """True when the chart claims a relationship whose test is not a
+    discovery (or was never run): it must not take a top slot."""
+    kinds = {c.name: c.semantic_type for c in profile.columns}
+    x, y, group = spec.x, spec.y, spec.group_by
+    if not x or not y or kinds.get(y) != "numeric":
+        return False
+    kx = kinds.get(x)
+    if kx == "numeric":
+        if spec.type not in ("scatter", "hexbin"):
+            return False  # a cycle over a numeric axis: no test in L1
+        return index.disc_corr.get(frozenset((x, y))) is not True
+    if kx == "datetime":
+        if index.disc_time.get((x, y)) is not True:
+            return True
+        if group:
+            return not (index.disc_time_inter.get((x, group, y)) or index.disc_eta.get((group, y)) is True)
+        return False
+    if kx in ("categorical", "boolean"):
+        if group and kinds.get(group) in ("categorical", "boolean"):
+            return not index.disc_inter.get((x, group, y))
+        if index.disc_eta.get((x, y)) is True:
+            return False
+        return not (spec.type in _DISTRIBUTION_TYPES and index.disc_disp.get((x, y)) is True)
+    return False
+
+
+def apply_fdr_caps(recs: list[Recommendation], profile: DatasetProfile) -> None:
+    """Stage 21: tier ceiling `secondary` for charts whose supporting test
+    fails the false-discovery control (the chart stays in the list; only the
+    headline slot is withheld). Profiles computed before stage 21 carry no
+    p-values and are left untouched."""
+    if getattr(profile.evidence, "fdr", None) is None:
+        return
+    index = _EvidenceIndex(profile.evidence)
+    for rec in recs:
+        if fdr_unsupported(rec.spec, profile, index):
+            rec.tier_cap = stricter_cap(rec.tier_cap, "secondary")
+
+
 def slope_spread_threshold(n_min: int) -> float:
     """Dynamic false-positive guard (stage7 blocking #4): small groups produce
     noisy per-group correlations, so the required spread grows as ~1/sqrt(n)."""
@@ -343,6 +390,23 @@ class _EvidenceIndex:
             for key, d in self.dispersion.items()
             if d.strength == "strong" and not getattr(d, "definitional", False)
         }
+        # stage 21: BH discovery flags per test (None = no test / pre-21 profile)
+        self.disc_eta = {(e.cat, e.num): getattr(e, "discovery", None) for e in evidence.cat_num}
+        self.disc_time = {(t.datetime_col, t.num): getattr(t, "discovery", None) for t in evidence.time_effects}
+        self.disc_corr = {frozenset((t.a, t.b)): t.discovery for t in getattr(evidence, "correlation_tests", [])}
+        self.disc_disp = {(d.cat, d.num): getattr(d, "discovery", None) for d in getattr(evidence, "dispersion", [])}
+        self.disc_inter: dict[tuple[str, str, str], bool] = {}
+        self.disc_time_inter: dict[tuple[str, str, str], bool] = {}
+        for e in evidence.interactions:
+            flag = getattr(e, "discovery", None) is True
+            if "@" in e.cat1 or "@" in e.cat2:
+                for first, second in ((e.cat1, e.cat2), (e.cat2, e.cat1)):
+                    if "@" in first and "@" not in second:
+                        key = (first.split("@", 1)[0], second, e.num)
+                        self.disc_time_inter[key] = self.disc_time_inter.get(key, False) or flag
+                continue
+            for a, b in ((e.cat1, e.cat2), (e.cat2, e.cat1)):
+                self.disc_inter[(a, b, e.num)] = self.disc_inter.get((a, b, e.num), False) or flag
         # stage 19: (x, y) -> binned eta-squared of the L2 non-linear scan (numeric cycles)
         self.binned_eta2 = {
             (n.x, n.y): n.binned_eta2 for n in getattr(getattr(evidence, "layer2", None), "nonlinear", []) or []
@@ -432,6 +496,7 @@ def recommend_charts(profile: DatasetProfile) -> list[Recommendation]:
     valid, _ = dedup_equivalent(valid, profile)  # stage 14: no-op for rules, shared post-pass
     apply_confidence(valid, profile)  # before the caps: slots go to confident charts
     apply_derived_caps(valid, profile)  # stage 13: definitional pairs sink before the slot cut
+    apply_fdr_caps(valid, profile)  # stage 21: top only for BH discoveries
     ranked = apply_diversity_caps(valid)
     for i, rec in enumerate(ranked):
         rec.spec.priority = i + 1

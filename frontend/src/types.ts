@@ -501,6 +501,13 @@ export interface DispersionEffect {
   definition?: string | null; // e.g. "price_band = bucket(price)"
 }
 
+/** Stage 21: one Benjamini–Hochberg family per dataset over the L1 tests. */
+export interface FdrSummary {
+  q: number;
+  m: number;
+  discoveries: number;
+}
+
 /** Only the evidence the UI shows is typed; the statistical layers stay opaque. */
 export interface Evidence {
   cat_num?: unknown[];
@@ -511,5 +518,7 @@ export interface Evidence {
   derived_columns?: DerivedColumn[];
   near_duplicate_groups?: NearDuplicateGroup[];
   dispersion?: DispersionEffect[]; // stage 19.1, additive
+  correlation_tests?: unknown[]; // stage 21, additive
+  fdr?: FdrSummary | null; // stage 21, additive
   layer2?: unknown;
 }

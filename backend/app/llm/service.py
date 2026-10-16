@@ -32,6 +32,7 @@ from ..charts.rules import (
     VerificationLevel,
     apply_confidence,
     apply_derived_caps,
+    apply_fdr_caps,
     apply_diversity_caps,
     assign_tiers,
     canonicalize_spec,
@@ -474,6 +475,7 @@ class _Merger:
                 rec = Recommendation(spec=spec, score=score, source="llm", tier_cap=_TIER_CAP[level], intent=intent, alternatives=alternatives)
                 apply_confidence([rec], self.profile)  # same chain as the rules charts
                 apply_derived_caps([rec], self.profile)
+                apply_fdr_caps([rec], self.profile)  # stage 21: same top gate as the rules
                 if substitutions:
                     rec.warnings = rec.warnings + [near_duplicate_substituted_warning(substitutions)]
                 self.added[key] = rec
