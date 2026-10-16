@@ -11,6 +11,20 @@ works completely without the LLM.
 
 > Upload data → profile → evidence (effect sizes + tests) → rules / LLM hypotheses → evidence gate → validated charts and findings.
 
+## Chart gallery
+
+Charts are chosen by analytical intent, not from a fixed menu — cycles get polar and rose charts,
+spread differences get raincloud and ridgeline plots, flows get a sankey, dense clouds a hexbin.
+Every image below is the app's own ECharts adapter rendering data recorded from the real backend.
+
+| Cycle · polar line | Cycle · rose |
+|---|---|
+| ![Mean rides around the day, polar line](docs/images/gallery/polar.png) | ![Total rides by hour, rose chart](docs/images/gallery/rose.png) |
+| **Same mean, different spread · raincloud** | **Ordered groups · ridgeline** |
+| ![Raincloud plot of three groups with equal means and different spreads](docs/images/gallery/raincloud.png) | ![Ridgeline of amount by level](docs/images/gallery/ridgeline.png) |
+| **Flow · sankey** | **Dense scatter · hexbin** |
+| ![Sankey of shipments from hub to hub](docs/images/gallery/sankey.png) | ![Hexbin of a dense correlated cloud](docs/images/gallery/hexbin.png) |
+
 ## Screenshots
 
 | Overview: automatic profile | Explore: manual chart builder |
