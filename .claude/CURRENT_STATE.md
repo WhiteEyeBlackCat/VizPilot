@@ -49,6 +49,7 @@ Pipeline as in `.claude/ARCHITECTURE.md`. Charts (stage 19): evidence + roles �
 Stage 19.2: dispersion is a supported-group Brown–Forsythe comparison with an F-test gate and a definitional flag; bandings are derived columns; roles read the full label set of small categoricals. Stage 19.1: rules read L1 `dispersion` (strong, non-definitional) for the distribution family and never L2 group summaries; slot filling is a deterministic greedy over slot value (question / raw-type diminishing returns) inside the family / per-x / per-y caps; `/profile` carries `column_roles` (response-only) for the Explore builder; the LLM sees roles + spread differences as metadata and may hint polar / rose / raincloud / ridgeline (guards still decide).
 
 ## In progress
+- **Stage 21 open fixes** (branch `stage21-fdr`, HEAD `ca8b4ab`): ranked list in `.claude/docs/stages/stage21-open-fixes.md` (local) — serial correlation in time / non-linear tests, probe double-dipping, fail-closed coverage + `PROFILE_VERSION` 17, post-selection and group-column choice, change-point upgrade, interaction batching; then a 30-seed LLM ablation with AR / random-walk cells.
 - Audit branch awaits the user's review / merge decision (not pushed).
 
 ## Recent decisions
