@@ -95,20 +95,44 @@ def check_coverage(test_type: str, columns: dict[str, str], profile: DatasetProf
     hit = _check_coverage(test_type, columns, profile)
     if hit is None or hit.verdict == "fail":
         return hit
-    entry = _l1_entry(test_type, columns, profile)
-    if entry is not None and getattr(entry, "discovery", None) is False:
-        fdr = profile.evidence.fdr
-        hit.verdict = "fail"
-        hit.evidence_lines.append(
-            f"not significant after Benjamini–Hochberg across {fdr.m if fdr else '?'} tests (p = {entry.p_value:.3g})"
-        )
-        hit.evidence["fdr_discovery"] = False
+    found = _l1_entry(test_type, columns, profile)
+    if found is not None:
+        entry, flag, p_field = found
+        if getattr(entry, flag, None) is False:
+            fdr = profile.evidence.fdr
+            hit.verdict = "fail"
+            hit.evidence_lines.append(
+                f"not significant after Benjamini–Hochberg across {fdr.m if fdr else '?'} tests "
+                f"(p = {getattr(entry, p_field):.3g})"
+            )
+            hit.evidence["fdr_discovery"] = False
     return hit
 
 
-def _l1_entry(test_type: str, columns: dict[str, str], profile: DatasetProfile) -> Any:
-    """The layer-1 test behind a coverage answer, when there is one."""
+def _l1_entry(test_type: str, columns: dict[str, str], profile: DatasetProfile) -> tuple[Any, str, str] | None:
+    """The tested evidence entry behind a coverage answer, with the names of
+    its discovery flag and p-value field (the same lookups the branches of
+    _check_coverage use)."""
+    found = _tested_entry(test_type, columns, profile)
+    if found is None:
+        return None
+    if isinstance(found, tuple):
+        return found
+    return found, "discovery", "p_value"
+
+
+def _tested_entry(test_type: str, columns: dict[str, str], profile: DatasetProfile) -> Any:
     ev = profile.evidence
+    l2 = ev.layer2
+    if test_type in ("grouped_relationship", "slope_difference"):
+        x, y, group = columns["x"], columns["y"], columns["group"]
+        cond = next((c for c in l2.conditional_relationships if c.group == group and {c.x, c.y} == {x, y}), None)
+        if test_type == "slope_difference":
+            het = next((s for s in ev.slope_heterogeneity if s.group == group and {s.x, s.y} == {x, y}), None)
+            return het if het is not None else cond
+        return None if cond is None else (cond, "discovery_every_group", "p_value_every_group")
+    if test_type == "nonlinear_relationship":
+        return next((s for s in l2.nonlinear if (s.x, s.y) == (columns["x"], columns["y"])), None)
     if test_type == "group_difference":
         return next((e for e in ev.cat_num if e.cat == columns["group"] and e.num == columns["target"]), None)
     if test_type == "time_pattern":

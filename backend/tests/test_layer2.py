@@ -492,6 +492,11 @@ def test_layer1_and_rules_unchanged_by_layer2() -> None:
 
     casts = {c.name: c.cast_params for c in profile.columns if c.cast_params is not None}
     standalone = compute_evidence(apply_casts(df, casts), profile.columns, profile.correlations)
+    # stage 21: the BH family spans layer 1 and the structural layer-2 tests
+    from app.profiling.evidence import apply_fdr
+
+    standalone.layer2 = profile.evidence.layer2.model_copy(deep=True)
+    apply_fdr(standalone)
     assert standalone.model_dump(exclude={"layer2"}) == profile.evidence.model_dump(exclude={"layer2"})
 
 

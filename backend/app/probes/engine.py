@@ -36,8 +36,12 @@ from ..profiling.evidence import (
     _COARSER,
     _datetime_span_days,
     _finite,
-    _interaction_effect,
+    _interaction_test,
     adjusted_eta_squared_many,
+    every_group_p,
+    fisher_z_homogeneity_p,
+    ks_p,
+    lack_of_fit_p,
     span_bucket,
 )
 from ..profiling.layer2 import (
@@ -215,6 +219,7 @@ def _finish(
     chart: ChartSpec,
     notes: list[str],
     effect_verdict: str | None = None,
+    p_value: float | None = None,
 ) -> ProbeResult:
     """Effect-size verdict, then the confidence cap (stage 9 chain on the
     suggested chart), then the sample-size floor."""
@@ -259,6 +264,7 @@ def _finish(
         evidence=evidence,
         chart=chart_out,
         notes=notes,
+        p_value=None if p_value is None else float(p_value),
     )
 
 
@@ -351,6 +357,7 @@ def _group_difference(frame: pl.DataFrame, profile: DatasetProfile, req: ProbeRe
         chart=chart,
         notes=notes,
         effect_verdict="fail" if result is None else None,
+        p_value=None if result is None else result.p_value,
     )
 
 
@@ -471,6 +478,7 @@ def _grouped_relationship(frame: pl.DataFrame, profile: DatasetProfile, req: Pro
         evidence=evidence,
         chart=chart,
         notes=notes,
+        p_value=every_group_p([(e["corr"], e["n"]) for e in entries]),
     )
 
 
@@ -522,6 +530,7 @@ def _slope_difference(frame: pl.DataFrame, profile: DatasetProfile, req: ProbeRe
         evidence=evidence,
         chart=chart,
         notes=[],
+        p_value=fisher_z_homogeneity_p([(e["corr"], e["n"]) for e in valid]),
     )
 
 
@@ -613,6 +622,7 @@ def _nonlinear_relationship(frame: pl.DataFrame, profile: DatasetProfile, req: P
         evidence=evidence,
         chart=chart,
         notes=[],
+        p_value=lack_of_fit_p(eta, r2, n, len(bins)),
     )
 
 
@@ -669,8 +679,11 @@ def _distribution_difference(frame: pl.DataFrame, profile: DatasetProfile, req: 
     ks_groups = [g.group for g in eligible]
     pairs = []
     for a, b in combinations(ks_groups, 2):
-        pairs.append({"a": a, "b": b, "ks": round(_ks_statistic(values[a], values[b]), 6)})
+        d = _ks_statistic(values[a], values[b])
+        pairs.append({"a": a, "b": b, "ks": round(d, 6), "p": ks_p(d, len(values[a]), len(values[b]))})
     best = max(pairs, key=lambda p: (p["ks"], p["a"], p["b"]))
+    # the claim is "some pair differs": smallest pair p, Bonferroni over the pairs
+    ks_family_p = min(1.0, min(p["p"] for p in pairs) * len(pairs))
     evidence = {
         "groups": groups_out,
         "ks_groups": ks_groups,
@@ -690,6 +703,7 @@ def _distribution_difference(frame: pl.DataFrame, profile: DatasetProfile, req: 
         evidence=evidence,
         chart=chart,
         notes=[],
+        p_value=ks_family_p,
     )
 
 
@@ -835,6 +849,7 @@ def _time_pattern(frame: pl.DataFrame, profile: DatasetProfile, req: ProbeReques
         profile,
         req,
         effect_size=eta.eta_squared,
+        p_value=eta.p_value,
         effect_label=label,
         n=eta.n_total,
         n_min_group=n_min_group,
@@ -851,7 +866,7 @@ def _time_pattern(frame: pl.DataFrame, profile: DatasetProfile, req: ProbeReques
 
 def _interaction(frame: pl.DataFrame, profile: DatasetProfile, req: ProbeRequest) -> ProbeResult:
     f1, f2, target = req.columns["factor1"], req.columns["factor2"], req.columns["target"]
-    result = _interaction_effect(frame, f1, f2, target)
+    result = _interaction_test(frame, f1, f2, target)
     data = frame.select(f1, f2, _finite_expr(target)).drop_nulls()
     cells = (
         data.group_by(f1, f2, maintain_order=True)
@@ -885,7 +900,7 @@ def _interaction(frame: pl.DataFrame, profile: DatasetProfile, req: ProbeRequest
             notes=["interaction undefined: sparse grid, too few cells, or no variation"],
             effect_verdict="fail",
         )
-    strength, n = result
+    strength, n, interaction_p = result
     return _finish(
         profile,
         req,
@@ -897,6 +912,7 @@ def _interaction(frame: pl.DataFrame, profile: DatasetProfile, req: ProbeRequest
         evidence={"cells": cell_rows, "strength": round(strength, 6), "n_cells": len(cell_rows)},
         chart=chart,
         notes=[],
+        p_value=interaction_p,
     )
 
 

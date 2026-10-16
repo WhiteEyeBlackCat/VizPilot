@@ -181,3 +181,77 @@ def test_llm_claim_on_a_non_discovery_fails_coverage():
             hit = check_coverage("group_difference", {"group": e.cat, "target": e.num}, prof)
             if hit is not None and e.discovery is False:
                 assert hit.verdict == "fail"
+
+
+# --- stage 21 B: structural tests, probes ------------------------------------
+
+
+def test_chi2_and_ks_tail_functions_match_tabulated_values():
+    from app.profiling.evidence import chi2_survival, ks_p
+
+    for x, df in ((3.841, 1), (5.991, 2), (11.070, 5), (18.307, 10)):
+        assert abs(chi2_survival(x, df) - 0.05) < 5e-4
+    assert chi2_survival(0.0, 3) == 1.0
+    # 5 % critical value of the two-sample KS: D ≈ 1.358 / sqrt(n_e) (large n)
+    n = 2000
+    assert abs(ks_p(1.358 / (n / 2) ** 0.5, n, n) - 0.05) < 0.005
+
+
+def test_holm_step_down():
+    from app.profiling.evidence import holm
+
+    assert holm([0.01, 0.04, 0.03]) == [0.03, 0.06, 0.06]
+    assert holm([]) == []
+
+
+def test_structural_tests_hold_their_level_under_the_null():
+    from app.profiling.evidence import fisher_z_homogeneity_p, lack_of_fit_p
+
+    rng = random.Random(21)
+    hits_z = hits_lof = 0
+    reps = 300
+    for _ in range(reps):
+        groups = []
+        for _ in range(3):
+            xs = [rng.gauss(0, 1) for _ in range(60)]
+            ys = [0.4 * x + rng.gauss(0, 1) for x in xs]
+            df = pl.DataFrame({"x": xs, "y": ys})
+            groups.append((df.select(pl.corr("x", "y")).item(), 60))
+        hits_z += fisher_z_homogeneity_p(groups) < 0.05
+        # a straight line: binned means only add noise
+        xs = sorted(rng.gauss(0, 1) for _ in range(200))
+        ys = [0.5 * x + rng.gauss(0, 1) for x in xs]
+        k = 10
+        bins = [ys[i * 20:(i + 1) * 20] for i in range(k)]
+        grand = sum(ys) / len(ys)
+        ssw = sum(sum((v - sum(b) / len(b)) ** 2 for v in b) for b in bins)
+        sst = sum((v - grand) ** 2 for v in ys)
+        adj = 1 - (ssw / (200 - k)) / (sst / 199)
+        r = pl.DataFrame({"x": xs, "y": ys}).select(pl.corr("x", "y")).item()
+        hits_lof += lack_of_fit_p(max(adj, 0.0), r * r, 200, k) < 0.05
+    assert hits_z / reps <= 0.09 and hits_lof / reps <= 0.09
+
+
+def test_structural_entries_join_the_bh_family():
+    prof = _profile(_noise(100, 31), "fdr-l2")
+    ev = prof.evidence
+    l2_tests = [c for c in ev.layer2.conditional_relationships if c.p_value is not None]
+    l2_tests += [s for s in ev.layer2.nonlinear if s.p_value is not None]
+    assert l2_tests, "the 20-column noise layout always lists some structure"
+    assert all(t.discovery is not None for t in l2_tests)
+    counted = (
+        len(ev.cat_num) + len(ev.time_effects) + len(ev.interactions) + len(ev.slope_heterogeneity)
+        + 2 * len(ev.correlation_tests) + len(ev.dispersion) + len(l2_tests)
+    )
+    assert ev.fdr.m <= counted + len(ev.layer2.conditional_relationships)
+
+
+def test_llm_nonlinear_claim_on_noise_needs_a_discovery():
+    from app.llm.coverage import check_coverage
+
+    for seed in range(20):
+        prof = _profile(_noise(100, 3000 + seed), f"fdr-nl-{seed}")
+        for s in prof.evidence.layer2.nonlinear:
+            hit = check_coverage("nonlinear_relationship", {"x": s.x, "y": s.y}, prof)
+            if hit is not None and s.discovery is False:
+                assert hit.verdict == "fail"

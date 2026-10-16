@@ -171,7 +171,7 @@ def compute_evidence(
         dispersion=dispersion,
         correlation_tests=_correlation_tests(df, correlations, dts, spearman),
     )
-    apply_fdr(evidence)
+    # the BH family is closed by the profiler once layer 2 exists (apply_fdr)
     return evidence
 
 
@@ -955,6 +955,139 @@ def _correlation_tests(
     return tests
 
 
+def _gamma_q(a: float, x: float) -> float:
+    """Regularised upper incomplete gamma Q(a, x) (Numerical Recipes 6.2:
+    series below a + 1, Lentz continued fraction above)."""
+    if x <= 0:
+        return 1.0
+    gln = math.lgamma(a)
+    if x < a + 1:
+        term = total = 1.0 / a
+        ap = a
+        for _ in range(500):
+            ap += 1
+            term *= x / ap
+            total += term
+            if abs(term) < abs(total) * 1e-15:
+                break
+        return max(0.0, 1.0 - total * math.exp(-x + a * math.log(x) - gln))
+    b = x + 1 - a
+    c = 1 / 1e-300
+    d = 1 / b
+    h = d
+    for i in range(1, 500):
+        an = -i * (i - a)
+        b += 2
+        d = an * d + b
+        d = 1e-300 if abs(d) < 1e-300 else d
+        c = b + an / c
+        c = 1e-300 if abs(c) < 1e-300 else c
+        d = 1 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1) < 1e-15:
+            break
+    return min(1.0, math.exp(-x + a * math.log(x) - gln) * h)
+
+
+def chi2_survival(x: float, df: int) -> float:
+    """P(chi²(df) > x)."""
+    if not math.isfinite(x):
+        return 0.0
+    return _gamma_q(df / 2.0, x / 2.0)
+
+
+def correlation_p(r: float, n: float) -> float:
+    """Two-sided t-test of a Pearson correlation on n pairs."""
+    if n < 4:
+        return 1.0
+    return _t_test_p(r, n)
+
+
+def fisher_z_homogeneity_p(pairs: list[tuple[float | None, int]]) -> float | None:
+    """Test that k correlations are equal: Q = Σ (n_i − 3)(z_i − z̄)² with
+    z = atanh(r), chi² with k − 1 df. None below two usable groups."""
+    usable = [(max(min(r, 0.999999), -0.999999), n) for r, n in pairs if r is not None and n > 3]
+    if len(usable) < 2:
+        return None
+    w = [n - 3 for _, n in usable]
+    z = [math.atanh(r) for r, _ in usable]
+    zbar = sum(wi * zi for wi, zi in zip(w, z)) / sum(w)
+    q = sum(wi * (zi - zbar) ** 2 for wi, zi in zip(w, z))
+    return chi2_survival(q, len(usable) - 1)
+
+
+def every_group_p(pairs: list[tuple[float | None, int]]) -> float | None:
+    """Intersection–union test of "the correlation is non-zero in every
+    estimated group": the largest per-group p-value. A group too small to
+    estimate is not tested here; the claim layer already caps it at weak
+    and names it."""
+    estimated = [(r, n) for r, n in pairs if r is not None]
+    if len(estimated) < 2:
+        return None
+    return max(correlation_p(r, n) for r, n in estimated)
+
+
+def lack_of_fit_p(adjusted_eta2: float, r2: float | None, n: int, k: int) -> float | None:
+    """F-test of bin means against the straight line (k bins, n rows)."""
+    if k < 3 or n - k < 1:
+        return None
+    raw = 1 - (1 - adjusted_eta2) * (n - k) / (n - 1)
+    lin = r2 or 0.0
+    if raw <= lin:
+        return 1.0
+    if raw >= 1:
+        return 0.0
+    f = ((raw - lin) / (k - 2)) / ((1 - raw) / (n - k))
+    return f_survival(f, k - 2, n - k)
+
+
+def ks_p(d: float, n1: int, n2: int) -> float:
+    """Asymptotic two-sample Kolmogorov–Smirnov p-value (Stephens' small-
+    sample adjustment of λ, as in Numerical Recipes probks)."""
+    ne = n1 * n2 / (n1 + n2)
+    if ne <= 0:
+        return 1.0
+    lam = (math.sqrt(ne) + 0.12 + 0.11 / math.sqrt(ne)) * d
+    if lam < 1e-3:
+        return 1.0
+    total, sign = 0.0, 1.0
+    for j in range(1, 101):
+        term = sign * 2 * math.exp(-2 * j * j * lam * lam)
+        total += term
+        if abs(term) < 1e-12:
+            break
+        sign = -sign
+    return min(1.0, max(0.0, total))
+
+
+def holm(p_values: list[float]) -> list[float]:
+    """Holm step-down adjusted p-values (family-wise error control)."""
+    m = len(p_values)
+    order = sorted(range(m), key=lambda i: p_values[i])
+    adjusted = [1.0] * m
+    running = 0.0
+    for rank, i in enumerate(order):
+        running = max(running, min(1.0, (m - rank) * p_values[i]))
+        adjusted[i] = running
+    return adjusted
+
+
+def annotate_structural_p_values(evidence: Evidence) -> None:
+    """Stage 21 B: p-values for the structural entries (L1 slope
+    heterogeneity, L2 conditional relationships and non-linear signals),
+    computed from the stored summaries, so they can join the BH family."""
+    for s in evidence.slope_heterogeneity:
+        s.p_value = fisher_z_homogeneity_p([(r, s.n_min) for r in s.corrs.values()])
+    layer2 = evidence.layer2
+    for c in layer2.conditional_relationships:
+        pairs = [(g.corr, g.n) for g in c.groups]
+        c.p_value = fisher_z_homogeneity_p(pairs)
+        c.p_value_every_group = every_group_p(pairs)
+    for s in layer2.nonlinear:
+        s.p_value = lack_of_fit_p(s.binned_eta2, s.r2_pearson, s.n, len(s.bins))
+
+
 def benjamini_hochberg(p_values: list[float], q: float = FDR_Q) -> list[bool]:
     """Step-up BH: True for every p-value rejected at FDR level q."""
     m = len(p_values)
@@ -970,10 +1103,13 @@ def benjamini_hochberg(p_values: list[float], q: float = FDR_Q) -> list[bool]:
 
 
 def apply_fdr(evidence: Evidence, q: float = FDR_Q) -> None:
-    """One BH family per dataset over every L1 entry with a p-value; sets
-    each entry's `discovery` and the summary in `evidence.fdr`. Interactions
-    and dispersion entries are listed after screening, so their family is
-    the listed subset (documented limitation)."""
+    """One BH family per dataset over every evidence entry with a p-value
+    (layer 1, and since stage 21 B the structural layer-2 entries); sets each
+    entry's `discovery` flag(s) and the summary in `evidence.fdr`.
+    Interactions, dispersion, conditional and non-linear entries are listed
+    after screening, so their family is the listed subset and their
+    p-values are optimistic (documented limitation)."""
+    annotate_structural_p_values(evidence)
     entries: list = []
     for e in evidence.cat_num:
         entries.append((e, e.p_value))
@@ -984,10 +1120,21 @@ def apply_fdr(evidence: Evidence, q: float = FDR_Q) -> None:
     for e in evidence.correlation_tests:
         entries.append((e, e.p_value))
     spearman_entries = [(e, e.p_value_spearman) for e in evidence.correlation_tests]
+    for e in evidence.slope_heterogeneity:
+        entries.append((e, e.p_value))
+    for e in evidence.layer2.conditional_relationships:
+        entries.append((e, e.p_value))
+        spearman_entries.append((e, e.p_value_every_group))  # second field, see below
+    for e in evidence.layer2.nonlinear:
+        entries.append((e, e.p_value))
     for e in evidence.dispersion:
         entries.append((e, e.bf_p_value))
     tested = [(e, p, "discovery") for e, p in entries if p is not None and math.isfinite(p)]
-    tested += [(e, p, "discovery_spearman") for e, p in spearman_entries if p is not None and math.isfinite(p)]
+    tested += [
+        (e, p, "discovery_every_group" if hasattr(e, "discovery_every_group") else "discovery_spearman")
+        for e, p in spearman_entries
+        if p is not None and math.isfinite(p)
+    ]
     rejected = benjamini_hochberg([p for _, p, _ in tested], q) if tested else []
     for (e, _, field), flag in zip(tested, rejected):
         setattr(e, field, flag)

@@ -81,6 +81,10 @@ class ProbeResult(BaseModel):
     chart: ChartSpec | None = None
     notes: list[str] = []
     cached: bool = False
+    # stage 21 B: the probe's own significance test, and the Holm-adjusted
+    # value across the probes of one workflow run (set by the LLM workflow)
+    p_value: float | None = None
+    p_adjusted: float | None = None
 
 
 class ProbeRejected(BaseModel):

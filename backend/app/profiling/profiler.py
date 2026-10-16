@@ -10,7 +10,7 @@ import polars as pl
 from pydantic import ValidationError
 
 from ..serialization import df_to_records
-from .evidence import compute_evidence
+from .evidence import apply_fdr, compute_evidence
 from .layer2 import compute_layer2
 from .models import (
     CATEGORY_LABELS_MAX,
@@ -50,6 +50,7 @@ def profile_dataset(df: pl.DataFrame, dataset_id: str, sample_threshold: int) ->
     # stage 17.1: structural summaries for the LLM workflow, computed after
     # layer 1 (they reuse its effect tables) and never read by the rule engine
     evidence.layer2 = compute_layer2(casted, columns, correlations, evidence)
+    apply_fdr(evidence)  # stage 21: one BH family over layer 1 + structural layer 2
     return DatasetProfile(
         profile_version=PROFILE_VERSION,
         dataset_id=dataset_id,

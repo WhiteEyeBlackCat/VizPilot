@@ -198,6 +198,10 @@ class SlopeHet(BaseModel):
     corrs: dict[str, float | None]
     spread: float
     n_min: int  # rows in the smallest contributing group (for dynamic thresholds)
+    # stage 21 B: Fisher-z homogeneity test of the per-group correlations
+    # (every group weighted by n_min - 3: conservative), joins the BH family
+    p_value: float | None = None
+    discovery: bool | None = None
 
 
 DerivedKind = Literal["product", "product_discount", "sum", "difference", "ratio", "near_copy", "bucket"]
@@ -384,6 +388,14 @@ class ConditionalRelationship(BaseModel):
     groups: list[GroupCorrelation]
     corr_spread: float
     n_min: int
+    # stage 21 B: two claims, two tests, both in the BH family —
+    # "the correlation differs between groups" (Fisher-z homogeneity, chi²
+    # with k − 1 df) and "the relationship holds in every group"
+    # (intersection–union: the largest per-group t-test p-value)
+    p_value: float | None = None
+    discovery: bool | None = None
+    p_value_every_group: float | None = None
+    discovery_every_group: bool | None = None
 
 
 class TimeSeriesPoint(BaseModel):
@@ -436,6 +448,11 @@ class NonlinearSignal(BaseModel):
     nonlinear_gap: float
     monotone: bool  # bin means are monotone in x
     shape: NonlinearShape
+    # stage 21 B: lack-of-fit F of the bin means against the straight line,
+    # ((η² − r²)/(k − 2)) / ((1 − η²)/(n − k)); the pair was listed after a
+    # top-gap screen, so the p-value is optimistic (documented)
+    p_value: float | None = None
+    discovery: bool | None = None
 
 
 class ChangePoint(BaseModel):

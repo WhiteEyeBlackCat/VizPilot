@@ -47,6 +47,7 @@ from ..charts.rules import (
 from ..charts.spec import ChartSpec, validate_spec
 from ..probes import MAX_PROBES, ProbeCache, ProbeRejected, ProbeRequest, ProbeResult, run_probes
 from ..probes.schemas import PROBE_ROLES
+from ..profiling.evidence import FDR_Q, holm
 from ..profiling.models import PROFILE_VERSION, DatasetProfile
 from ..probes.engine import MIN_ROWS
 from .coverage import (
@@ -796,6 +797,13 @@ class _Workflow:
         outcomes = run_probes(
             self.df, self.profile, [r for _, r in requests], max_probes=MAX_PROBES, cache=self.probe_cache
         )
+        # stage 21 B: the probes of one run are one family — Holm-adjust their
+        # own p-values; a probe whose adjusted p exceeds FDR_Q cannot validate
+        tested = [i for i, o in enumerate(outcomes) if isinstance(o, ProbeResult) and o.p_value is not None]
+        adjusted = holm([outcomes[i].p_value for i in tested])
+        outcomes = list(outcomes)
+        for i, p_adj in zip(tested, adjusted):
+            outcomes[i] = outcomes[i].model_copy(update={"p_adjusted": p_adj})
         validated: list[ValidatedHypothesis] = []
         for (c, _), outcome in zip(requests, outcomes):
             if isinstance(outcome, ProbeRejected):
@@ -812,6 +820,8 @@ class _Workflow:
                     "effect": result.effect_size,
                     "n": result.n,
                     "cached": result.cached,
+                    "p": result.p_value,
+                    "p_holm": result.p_adjusted,
                 }
             )
             if result.n < MIN_ROWS:
@@ -819,6 +829,13 @@ class _Workflow:
                 continue
             if result.verdict == "fail":
                 self._drop(c.id, c.hypothesis, f"probe failed: {result.effect_label} = {result.effect_size:.3f}")
+                continue
+            if result.p_adjusted is not None and result.p_adjusted > FDR_Q:
+                self._drop(
+                    c.id,
+                    c.hypothesis,
+                    f"probe not significant after Holm across {len(tested)} probes (p = {result.p_adjusted:.3g})",
+                )
                 continue
             hit = CoverageHit(
                 verdict=result.verdict,
