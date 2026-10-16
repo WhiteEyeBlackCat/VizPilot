@@ -169,3 +169,15 @@ def test_spearman_is_tested_and_can_carry_a_scatter():
     prof = _profile(_noise(200, 4), "fdr-spearman")
     t = prof.evidence.correlation_tests[0]
     assert t.rho is not None and t.p_value_spearman is not None and t.discovery_spearman is not None
+
+
+def test_llm_claim_on_a_non_discovery_fails_coverage():
+    """Stage 21: the LLM path cannot bypass the BH gate through existing evidence."""
+    from app.llm.coverage import check_coverage
+
+    for seed in range(30):
+        prof = _profile(_noise(30, 2000 + seed), f"fdr-cov-{seed}")
+        for e in prof.evidence.cat_num:
+            hit = check_coverage("group_difference", {"group": e.cat, "target": e.num}, prof)
+            if hit is not None and e.discovery is False:
+                assert hit.verdict == "fail"

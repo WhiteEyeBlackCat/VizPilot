@@ -88,7 +88,46 @@ def _fmt(value: float | None, digits: int = 3) -> str:
 
 
 def check_coverage(test_type: str, columns: dict[str, str], profile: DatasetProfile) -> CoverageHit | None:
-    """None when the evidence tables do not answer the question (run a probe)."""
+    """None when the evidence tables do not answer the question (run a probe).
+    Stage 21: a claim answered by a layer-1 test that is not a Benjamini–
+    Hochberg discovery fails, whatever its effect size — the same gate the
+    rules apply to the top tier, so an LLM claim cannot bypass it."""
+    hit = _check_coverage(test_type, columns, profile)
+    if hit is None or hit.verdict == "fail":
+        return hit
+    entry = _l1_entry(test_type, columns, profile)
+    if entry is not None and getattr(entry, "discovery", None) is False:
+        fdr = profile.evidence.fdr
+        hit.verdict = "fail"
+        hit.evidence_lines.append(
+            f"not significant after Benjamini–Hochberg across {fdr.m if fdr else '?'} tests (p = {entry.p_value:.3g})"
+        )
+        hit.evidence["fdr_discovery"] = False
+    return hit
+
+
+def _l1_entry(test_type: str, columns: dict[str, str], profile: DatasetProfile) -> Any:
+    """The layer-1 test behind a coverage answer, when there is one."""
+    ev = profile.evidence
+    if test_type == "group_difference":
+        return next((e for e in ev.cat_num if e.cat == columns["group"] and e.num == columns["target"]), None)
+    if test_type == "time_pattern":
+        time, target, group = columns["time"], columns["target"], columns.get("group")
+        if group:
+            return next(
+                (e for e in ev.interactions if e.num == target
+                 and {c.split("@", 1)[0] for c in (e.cat1, e.cat2)} == {time, group}
+                 and any("@" in c for c in (e.cat1, e.cat2))),
+                None,
+            )
+        return next((t for t in ev.time_effects if t.datetime_col == time and t.num == target), None)
+    if test_type == "interaction":
+        f1, f2, target = columns["factor1"], columns["factor2"], columns["target"]
+        return next((e for e in ev.interactions if e.num == target and {e.cat1, e.cat2} == {f1, f2}), None)
+    return None
+
+
+def _check_coverage(test_type: str, columns: dict[str, str], profile: DatasetProfile) -> CoverageHit | None:
     evidence = profile.evidence
     l2 = evidence.layer2
     if test_type == "group_difference":
