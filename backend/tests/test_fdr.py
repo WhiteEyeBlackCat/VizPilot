@@ -255,3 +255,21 @@ def test_llm_nonlinear_claim_on_noise_needs_a_discovery():
             hit = check_coverage("nonlinear_relationship", {"x": s.x, "y": s.y}, prof)
             if hit is not None and s.discovery is False:
                 assert hit.verdict == "fail"
+
+
+def test_review_b_fixes():
+    """Second independent review: KS tail at tiny lambda, curvature power
+    under a strong linear trend, one test per slope-heterogeneity hypothesis."""
+    from app.profiling.evidence import curvature_p, ks_p
+
+    assert ks_p(0.0001, 2000, 2000) == 1.0 and ks_p(0.002 / 31.6, 2000, 2000) == 1.0
+    rng = random.Random(77)
+    xs = [rng.gauss(0, 1) for _ in range(300)]
+    curved = pl.DataFrame({"x": xs, "y": [3 * x + 0.3 * x * x + rng.gauss(0, 1) for x in xs]})
+    assert curvature_p(curved, "x", "y") < 1e-3
+    prof = _profile(_noise(300, 41), "fdr-dedup")
+    conds = {(frozenset((c.x, c.y)), c.group): c for c in prof.evidence.layer2.conditional_relationships}
+    for s in prof.evidence.slope_heterogeneity:
+        twin = conds.get((frozenset((s.x, s.y)), s.group))
+        if twin is not None and twin.p_value is not None:
+            assert (s.p_value, s.discovery) == (twin.p_value, twin.discovery)

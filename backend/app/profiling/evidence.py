@@ -1049,7 +1049,9 @@ def ks_p(d: float, n1: int, n2: int) -> float:
     if ne <= 0:
         return 1.0
     lam = (math.sqrt(ne) + 0.12 + 0.11 / math.sqrt(ne)) * d
-    if lam < 1e-3:
+    if lam < 0.2:
+        # the alternating series converges too slowly here; the true tail is
+        # > 0.9999999 (independent review: lam = 0.002 returned 0.078)
         return 1.0
     total, sign = 0.0, 1.0
     for j in range(1, 101):
@@ -1059,6 +1061,70 @@ def ks_p(d: float, n1: int, n2: int) -> float:
             break
         sign = -sign
     return min(1.0, max(0.0, total))
+
+
+def _solve(a: list[list[float]], b: list[float]) -> list[float] | None:
+    """Gaussian elimination with partial pivoting (tiny normal equations)."""
+    n = len(b)
+    m = [row[:] + [rhs] for row, rhs in zip(a, b)]
+    for col in range(n):
+        piv = max(range(col, n), key=lambda r: abs(m[r][col]))
+        if abs(m[piv][col]) < 1e-12:
+            return None
+        m[col], m[piv] = m[piv], m[col]
+        for r in range(col + 1, n):
+            f = m[r][col] / m[col][col]
+            for c in range(col, n + 1):
+                m[r][c] -= f * m[col][c]
+    out = [0.0] * n
+    for r in range(n - 1, -1, -1):
+        out[r] = (m[r][n] - sum(m[r][c] * out[c] for c in range(r + 1, n))) / m[r][r]
+    return out
+
+
+def curvature_p(df: pl.DataFrame, x: str, y: str) -> float | None:
+    """Nested F-test of a cubic against the straight line (2 extra df), on
+    standardised x. Complements lack_of_fit_p, which loses power when a strong
+    linear trend inflates the within-bin variation (independent review)."""
+    data = df.select(
+        pl.when(pl.col(x).cast(pl.Float64).is_finite()).then(pl.col(x).cast(pl.Float64)).alias("x"),
+        pl.when(pl.col(y).cast(pl.Float64).is_finite()).then(pl.col(y).cast(pl.Float64)).alias("y"),
+    ).drop_nulls()
+    n = data.height
+    if n < 10:
+        return None
+    mean, sd = data["x"].mean(), data["x"].std()
+    if not sd:
+        return None
+    u = (pl.col("x") - mean) / sd
+    sums = data.select(
+        *[(u ** k).sum().alias(f"u{k}") for k in range(7)],
+        *[((u ** k) * pl.col("y")).sum().alias(f"uy{k}") for k in range(4)],
+        (pl.col("y") ** 2).sum().alias("yy"),
+    ).row(0, named=True)
+
+    def rss(degree: int) -> float | None:
+        k = degree + 1
+        xtx = [[sums[f"u{i + j}"] for j in range(k)] for i in range(k)]
+        xty = [sums[f"uy{i}"] for i in range(k)]
+        beta = _solve(xtx, xty)
+        if beta is None:
+            return None
+        return sums["yy"] - sum(b * v for b, v in zip(beta, xty))
+
+    rss1, rss3 = rss(1), rss(3)
+    if rss1 is None or rss3 is None or rss3 <= 0:
+        return None
+    f = max(rss1 - rss3, 0.0) / 2 / (rss3 / (n - 4))
+    return f_survival(f, 2, n - 4)
+
+
+def nonlinear_p(p_lof: float | None, p_curve: float | None) -> float | None:
+    """Two complementary curvature tests, Bonferroni-combined."""
+    ps = [p for p in (p_lof, p_curve) if p is not None]
+    if not ps:
+        return None
+    return min(1.0, len(ps) * min(ps))
 
 
 def holm(p_values: list[float]) -> list[float]:
@@ -1073,10 +1139,11 @@ def holm(p_values: list[float]) -> list[float]:
     return adjusted
 
 
-def annotate_structural_p_values(evidence: Evidence) -> None:
+def annotate_structural_p_values(evidence: Evidence, df: pl.DataFrame | None = None) -> None:
     """Stage 21 B: p-values for the structural entries (L1 slope
     heterogeneity, L2 conditional relationships and non-linear signals),
-    computed from the stored summaries, so they can join the BH family."""
+    computed from the stored summaries (plus a cubic curvature test on the
+    data when `df` is given), so they can join the BH family."""
     for s in evidence.slope_heterogeneity:
         s.p_value = fisher_z_homogeneity_p([(r, s.n_min) for r in s.corrs.values()])
     layer2 = evidence.layer2
@@ -1085,7 +1152,9 @@ def annotate_structural_p_values(evidence: Evidence) -> None:
         c.p_value = fisher_z_homogeneity_p(pairs)
         c.p_value_every_group = every_group_p(pairs)
     for s in layer2.nonlinear:
-        s.p_value = lack_of_fit_p(s.binned_eta2, s.r2_pearson, s.n, len(s.bins))
+        p_lof = lack_of_fit_p(s.binned_eta2, s.r2_pearson, s.n, len(s.bins))
+        p_curve = curvature_p(df, s.x, s.y) if df is not None and s.x in df.columns and s.y in df.columns else None
+        s.p_value = nonlinear_p(p_lof, p_curve)
 
 
 def benjamini_hochberg(p_values: list[float], q: float = FDR_Q) -> list[bool]:
@@ -1102,14 +1171,20 @@ def benjamini_hochberg(p_values: list[float], q: float = FDR_Q) -> list[bool]:
     return rejected
 
 
-def apply_fdr(evidence: Evidence, q: float = FDR_Q) -> None:
+def apply_fdr(evidence: Evidence, q: float = FDR_Q, df: pl.DataFrame | None = None) -> None:
     """One BH family per dataset over every evidence entry with a p-value
     (layer 1, and since stage 21 B the structural layer-2 entries); sets each
     entry's `discovery` flag(s) and the summary in `evidence.fdr`.
     Interactions, dispersion, conditional and non-linear entries are listed
     after screening, so their family is the listed subset and their
     p-values are optimistic (documented limitation)."""
-    annotate_structural_p_values(evidence)
+    annotate_structural_p_values(evidence, df)
+    # one hypothesis, one test: a slope-heterogeneity pair that layer 2 also
+    # lists (with exact per-group n) is tested there and mirrors its result
+    cond_by_key = {
+        (frozenset((c.x, c.y)), c.group): c for c in evidence.layer2.conditional_relationships if c.p_value is not None
+    }
+    mirrored = [(s, cond_by_key.get((frozenset((s.x, s.y)), s.group))) for s in evidence.slope_heterogeneity]
     entries: list = []
     for e in evidence.cat_num:
         entries.append((e, e.p_value))
@@ -1120,8 +1195,9 @@ def apply_fdr(evidence: Evidence, q: float = FDR_Q) -> None:
     for e in evidence.correlation_tests:
         entries.append((e, e.p_value))
     spearman_entries = [(e, e.p_value_spearman) for e in evidence.correlation_tests]
-    for e in evidence.slope_heterogeneity:
-        entries.append((e, e.p_value))
+    for e, twin in mirrored:
+        if twin is None:
+            entries.append((e, e.p_value))
     for e in evidence.layer2.conditional_relationships:
         entries.append((e, e.p_value))
         spearman_entries.append((e, e.p_value_every_group))  # second field, see below
@@ -1138,6 +1214,9 @@ def apply_fdr(evidence: Evidence, q: float = FDR_Q) -> None:
     rejected = benjamini_hochberg([p for _, p, _ in tested], q) if tested else []
     for (e, _, field), flag in zip(tested, rejected):
         setattr(e, field, flag)
+    for e, twin in mirrored:
+        if twin is not None:
+            e.p_value, e.discovery = twin.p_value, twin.discovery
     evidence.fdr = FdrSummary(q=q, m=len(tested), discoveries=sum(rejected))
 
 

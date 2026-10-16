@@ -496,7 +496,7 @@ def test_layer1_and_rules_unchanged_by_layer2() -> None:
     from app.profiling.evidence import apply_fdr
 
     standalone.layer2 = profile.evidence.layer2.model_copy(deep=True)
-    apply_fdr(standalone)
+    apply_fdr(standalone, df=apply_casts(df, casts))
     assert standalone.model_dump(exclude={"layer2"}) == profile.evidence.model_dump(exclude={"layer2"})
 
 

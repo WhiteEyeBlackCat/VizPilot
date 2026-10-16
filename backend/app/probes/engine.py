@@ -41,7 +41,9 @@ from ..profiling.evidence import (
     every_group_p,
     fisher_z_homogeneity_p,
     ks_p,
+    curvature_p,
     lack_of_fit_p,
+    nonlinear_p,
     span_bucket,
 )
 from ..profiling.layer2 import (
@@ -622,7 +624,7 @@ def _nonlinear_relationship(frame: pl.DataFrame, profile: DatasetProfile, req: P
         evidence=evidence,
         chart=chart,
         notes=[],
-        p_value=lack_of_fit_p(eta, r2, n, len(bins)),
+        p_value=nonlinear_p(lack_of_fit_p(eta, r2, n, len(bins)), curvature_p(data, x, y)),
     )
 
 

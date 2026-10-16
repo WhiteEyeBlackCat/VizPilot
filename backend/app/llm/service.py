@@ -799,7 +799,13 @@ class _Workflow:
         )
         # stage 21 B: the probes of one run are one family — Holm-adjust their
         # own p-values; a probe whose adjusted p exceeds FDR_Q cannot validate
-        tested = [i for i, o in enumerate(outcomes) if isinstance(o, ProbeResult) and o.p_value is not None]
+        # only probes that can still validate (effect not failed, enough rows)
+        # form the family, so certain drops do not dilute it
+        tested = [
+            i
+            for i, o in enumerate(outcomes)
+            if isinstance(o, ProbeResult) and o.p_value is not None and o.verdict != "fail" and o.n >= MIN_ROWS
+        ]
         adjusted = holm([outcomes[i].p_value for i in tested])
         outcomes = list(outcomes)
         for i, p_adj in zip(tested, adjusted):
