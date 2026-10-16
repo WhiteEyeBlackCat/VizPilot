@@ -1,15 +1,53 @@
 # VizPilot
 
-**Local AI Data Exploration Assistant** — upload a tabular dataset, get automatic profiling, explainable chart recommendations, and interactive visualizations. Runs fully locally; raw data never leaves your machine.
+**An evidence-gated AI pipeline for exploratory data analysis.** Upload a
+tabular dataset and get an automatic profile, chart recommendations and
+written findings — where a local language model may *propose* hypotheses, but
+every reported claim must be backed by a statistic the backend computed and
+tested. Runs fully locally; raw data never leaves your machine, and the app
+works completely without the LLM.
 
-> Upload data → understand data → suggest useful questions → recommend charts → visualize.
+![Insights page with the analysis panel](docs/images/insights-preview.png)
 
-## Planned MVP
+> Upload data → profile → evidence (effect sizes + tests) → rules / LLM hypotheses → evidence gate → validated charts and findings.
 
-- **File formats**: CSV, Excel (.xlsx), Parquet
-- **Charts**: line, bar, scatter, histogram, box plot, correlation heatmap
-- **Pipeline**: data loader → profiler (Polars) → evidence layer → rule-based chart engine + local LLM reasoning → validated ChartSpec (Pydantic) → backend-rendered RenderResult → Apache ECharts
-- **LLM**: optional layer, local-only, provider-agnostic (any OpenAI-compatible local server: Ollama, vLLM, llama.cpp, LM Studio). The app works fully with the LLM disabled.
+## Screenshots
+
+| Overview: automatic profile | Explore: manual chart builder |
+|---|---|
+| ![Overview page](docs/images/overview.png) | ![Explore page](docs/images/explore.png) |
+
+**Honest by design** — `sales` is detected as `unit_price × quantity × (1 − discount)`, so charts of the
+formula are demoted and the page says that no chart shows strong enough evidence:
+
+![Definitional relationship detected](docs/images/definitional-relationship.png)
+
+## What it does
+
+- **File formats**: CSV, Excel (.xlsx), Parquet.
+- **Profiling** (Polars): semantic types, missing / invalid values, sentinels, robust ranges, derived and near-duplicate columns.
+- **Evidence layers**: adjusted η², Pearson / Spearman, time-bucket effects, interactions, Brown–Forsythe dispersion, slope heterogeneity (layer 1); distribution shape, conditional relationships, non-linear signals, change points (layer 2).
+- **Charts** (18 types, chosen by analytical intent): line, bar, scatter, histogram, box, heatmap, violin, raincloud, ridgeline, dot-interval, lollipop, dumbbell, slopegraph, hexbin, polar line, rose, stacked bar, sankey. No pie charts.
+- **Optional local LLM** (any OpenAI-compatible server: Ollama, vLLM, llama.cpp, LM Studio), two stages: LLM #1 proposes hypotheses from a statistical summary → hallucination gate → coverage against existing evidence or a typed statistical probe → LLM #2 words validated findings → wording gate (only backend numbers may be quoted; otherwise a template).
+
+## Statistical safeguards
+
+| Safeguard | What it does |
+|---|---|
+| Evidence gate | an LLM claim survives only if an existing test or a new probe supports it; its own numbers are ignored |
+| False-discovery control | every test carries a p-value; one Benjamini–Hochberg family per dataset (q = 0.05); only discoveries can be top-tier charts or insights; probes of one run are Holm-adjusted |
+| Dependence | correlations of time-ordered columns use Bartlett's effective sample size |
+| Definitions are not findings | identities, banding and near-copies are detected and demoted |
+
+Measured on seeded synthetic data (in-app, stage 21): pure-noise datasets with ≥ 1 top-tier
+recommendation fell from 84 % to 4 % (30 rows × 20 columns), 0 % at n ≥ 100; two independent random
+walks are declared significantly correlated in 0–0.5 % of seeds (|r| ≥ 0.3 in ~67 %); recall of
+planted effects is unchanged.
+
+Known limits: time-bucket tests still assume independent rows (a random walk's trend can reach the
+top tier); layer-2 structural entries are tested after a top-N screen, so their p-values are
+optimistic; hypotheses the LLM generates from the same data are not yet corrected for that adaptive
+selection.
 
 ## Tech Stack
 
@@ -94,7 +132,7 @@ VIZPILOT_LLM_MODEL=qwen2.5:14b \
 | `VIZPILOT_LLM_MODEL` | *(empty)* | Model name on the local server |
 | `VIZPILOT_LLM_BASE_URL` | `http://localhost:11434/v1` | OpenAI-compatible endpoint |
 | `VIZPILOT_LLM_API_KEY` | *(empty)* | Only if your local server requires one |
-| `VIZPILOT_LLM_TIMEOUT_SECONDS` | `30` | Per-request timeout; on failure the app falls back to rule-based recommendations |
+| `VIZPILOT_LLM_TIMEOUT_SECONDS` | `60` | Per-request timeout; on failure the app falls back to rule-based recommendations |
 
 Only the dataset profile (schema, statistics, 5 sample rows) is ever sent to
 the LLM — never the raw dataset. Sample rows can be withheld too with
@@ -106,7 +144,7 @@ the LLM — never the raw dataset. Sample rows can be withheld too with
 Dataset → Profiler → Evidence → Rules / LLM → ChartSpec → RenderResult (backend)
                                                               │
                               src/charts/echarts/option.ts ◄──┘  pure RenderResult → ECharts option
-                              src/charts/echarts/theme.ts        one dark visual style for all six chart types
+                              src/charts/echarts/theme.ts        one dark visual style for every chart type 
                               src/charts/echarts/EChartsView.tsx thin React binding (init / setOption / resize / dispose)
                               src/store.ts                       one reducer: dataset selection, preview, per-dataset workspace
                               src/lib/router.ts                  hash routes  #/d/<dataset_id>/<page>
@@ -145,9 +183,11 @@ separator is keyboard-resizable (arrow keys).
 
 ## Status
 
-Backend pipeline (upload → profiling → evidence layers → rule-based
-recommendations with derived-column and near-duplicate handling → chart
-rendering → optional local-LLM insights) plus a dark, sidebar-navigated React
-SPA on shadcn/ui with Apache ECharts charts (tooltips, zoom, image export,
-enlarged view) and a shared preview panel with explicit Save into a per-dataset
-workspace. End-to-end tests run headless against the real backend.
+Backend pipeline (upload → profiling → evidence layers 1 and 2 → per-dataset
+false-discovery control → intent-based chart selection → backend rendering →
+optional two-stage local-LLM workflow with probes and wording gates) plus a
+dark, sidebar-navigated React SPA on shadcn/ui with Apache ECharts (tooltips,
+zoom, image export, enlarged view) and a shared preview panel with explicit
+Save into a per-dataset workspace. About 1,300 backend tests (pytest) and the
+frontend adapter tests (vitest) run against fixtures recorded from the real
+backend; end-to-end tests run headless against the real backend.
